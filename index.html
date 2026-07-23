@@ -101,6 +101,38 @@ select{font:inherit;color:var(--fg);background:var(--bg3);border:1px solid var(-
 #winBanner{display:none;background:linear-gradient(90deg,#3a2f10,#5a4413);border:1px solid var(--accent);
   color:var(--accent);text-align:center;padding:8px;font-weight:700}
 #winBanner.show{display:block}
+
+/* 城の箱庭ビュー */
+.city-plot{position:relative;width:100%;height:300px;overflow:hidden;touch-action:pan-y;
+  background:radial-gradient(circle at 50% 42%,#2f4030,#20291f 72%);}
+.city-plot::before{content:"";position:absolute;inset:0;pointer-events:none;border:9px solid #39352d;
+  box-shadow:inset 0 0 0 2px #4c463b, inset 0 0 26px rgba(0,0,0,.55);}
+.city-plot::after{content:"";position:absolute;inset:9px;pointer-events:none;opacity:.12;
+  background-image:linear-gradient(var(--line) 1px,transparent 1px),linear-gradient(90deg,var(--line) 1px,transparent 1px);
+  background-size:calc((100% - 0px)/6) calc((100% - 0px)/5);}
+.bld{position:absolute;transform:translate(-50%,-50%);display:flex;flex-direction:column;align-items:center;
+  gap:2px;cursor:grab;touch-action:none;z-index:1;transition:left .12s ease,top .12s ease}
+.bld.dragging{cursor:grabbing;transition:none;z-index:6;filter:drop-shadow(0 5px 7px rgba(0,0,0,.6))}
+.bld .bld-icon{width:48px;height:48px;font-size:30px;line-height:1;display:flex;align-items:center;
+  justify-content:center;background:linear-gradient(#3a4152,#2a3040);border:1px solid var(--line);
+  border-radius:10px;overflow:hidden}
+.bld .bld-icon img{width:100%;height:100%;object-fit:cover}
+.bld .bld-plat{position:absolute;bottom:4px;width:52px;height:12px;border-radius:50%;
+  background:rgba(0,0,0,.4);z-index:-1;filter:blur(1px)}
+.bld .bld-flags{height:11px;font-size:9px;letter-spacing:-1px;color:var(--accent);text-shadow:0 1px 2px #000}
+.bld .bld-lv{font-size:10px;font-weight:700;background:rgba(20,24,33,.88);border:1px solid var(--line);
+  border-radius:6px;padding:0 5px;color:var(--fg)}
+.bld .bld-status{min-height:11px;font-size:9px;color:var(--accent)}
+/* 外観ティア（レベルで育つ） */
+.bld.tier-2 .bld-icon{width:54px;height:54px;font-size:34px;border-color:#6b7488;
+  background:linear-gradient(#454e63,#333b4d)}
+.bld.tier-3 .bld-icon{width:60px;height:60px;font-size:38px;border-color:var(--accent);
+  background:linear-gradient(#5a5230,#3a3420);box-shadow:0 0 10px rgba(232,184,74,.45)}
+.bld.big .bld-icon{width:58px;height:58px;font-size:40px}
+.bld.big.tier-2 .bld-icon{width:66px;height:66px;font-size:46px}
+.bld.big.tier-3 .bld-icon{width:74px;height:74px;font-size:52px}
+.bld.upgrading .bld-icon{animation:bldpulse 1s infinite}
+@keyframes bldpulse{0%,100%{filter:none}50%{filter:brightness(1.45)}}
 </style>
 </head>
 <body>
@@ -164,6 +196,7 @@ select{font:inherit;color:var(--fg);background:var(--bg3);border:1px solid var(-
  *   [S14] UI: MAP CANVAS    — マップ描画・パン/ズーム/タップ
  *   [S15] UI: ACTIONS       — ボタンから呼ばれる操作(UIA.*)
  *   [S16] GAME LOOP & BOOT  — tick / autosave / 起動処理
+ *   [S17] UI: CITY PLOT     — 城タブの箱庭ビュー（ドラッグ配置・タップ強化）
  *
  * 設計原則:
  *  - 可変状態はグローバル `S` 1個のみ。S をJSON化したものがセーブデータ。
@@ -178,7 +211,7 @@ select{font:inherit;color:var(--fg);background:var(--bg3);border:1px solid var(-
 const CONFIG = {
   SAVE_KEY: "hakoslg_save_v1",          // localStorageキー（名前空間 hakoslg_）
   ASSET_DB: "hakoslg_assets",           // IndexedDB名（画像アセット）
-  SAVE_VERSION: 1,
+  SAVE_VERSION: 2,                     // v2: buildings に城内配置座標 x,y を追加
 
   WORLD_SIZE: 40,                       // 40x40 グリッド
   TICK_MS: 1000,                        // ゲームtick間隔
@@ -230,6 +263,11 @@ const CONFIG = {
   AI_MIN_DIST_EACH: 5,                  // AI城同士の最低距離
   RESOURCE_TILE_RATIO: 0.45,            // 空地でない確率
   LEVEL_BAND: 4,                        // チェビシェフ距離÷この値でタイルLv帯を決定
+
+  // --- 城ビュー（箱庭配置） ---
+  CITY_COLS: 6,                         // 城内グリッド列数（ドラッグのスナップ先）
+  CITY_ROWS: 5,                         // 城内グリッド行数
+  CITY_TIER_UP: [6, 11],               // このLv以上で外観ティアが 2 / 3 に上がる
 };
 
 /* =====================================================================
@@ -278,6 +316,18 @@ const BUILDING_DEFS = {
   warehouse: { name: "倉庫",   emoji: "🏬", imageKey: "bld_warehouse", prodType: null,    prodBase: 0,
                maxLevel: 15, costBase: { wood: 150, stone: 150 },                       costGrowth: 1.5, timeBaseSec: 12,
                desc: "資源の保管容量を拡大" },
+};
+
+/** 建物の初期配置（城内グリッド col,row）。ユーザーはドラッグで自由に変更でき、x,yはSに保存される。 */
+const DEFAULT_BUILDING_LAYOUT = {
+  lab:       { x: 0, y: 1 },
+  farm:      { x: 1, y: 1 },
+  sawmill:   { x: 2, y: 1 },
+  quarry:    { x: 3, y: 1 },
+  ironMine:  { x: 4, y: 1 },
+  barracks:  { x: 5, y: 1 },
+  castle:    { x: 2, y: 3 },
+  warehouse: { x: 4, y: 3 },
 };
 
 /**
@@ -391,10 +441,21 @@ function loadGame() {
     const raw = localStorage.getItem(CONFIG.SAVE_KEY);
     if (!raw) return null;
     const data = JSON.parse(raw);
-    // 将来スキーマが変わったら data.version を見てここでマイグレーションする
-    if (data.version !== CONFIG.SAVE_VERSION) console.warn("save version mismatch", data.version);
-    return data;
+    return migrateSave(data);
   } catch (e) { console.error("load failed", e); return null; }
+}
+/** 旧セーブを現行スキーマへ移行（欠損フィールドの補完のみ・非破壊）。 */
+function migrateSave(data) {
+  if (!data || !data.player) return data;
+  // v1 → v2: 建物に城内配置座標 {x,y} を付与
+  for (const b of data.player.buildings) {
+    if (b.x == null || b.y == null) {
+      const p = DEFAULT_BUILDING_LAYOUT[b.type] || { x: 0, y: 0 };
+      b.x = p.x; b.y = p.y;
+    }
+  }
+  data.version = CONFIG.SAVE_VERSION;
+  return data;
 }
 function resetGame() {
   localStorage.removeItem(CONFIG.SAVE_KEY);
@@ -522,7 +583,7 @@ function generateAIUsers(world) {
  *   world: { size, tiles[] },   // tile = {x,y,type,level,ownerId}
  *   player: {
  *     castleLevel: number,      // buildings内 castle.level のミラー（参照高速化）
- *     buildings: [ {id,type,level,upgradeEndsAt|null} ],
+ *     buildings: [ {id,type,level,upgradeEndsAt|null, x,y} ], // x,y=城内グリッド座標(配置)
  *     resources: {food,wood,stone,iron},   // 浮動小数。表示はfloor
  *     diamonds: number,         // プレミア通貨。容量キャップなし
  *     ownedTiles: [tileIndex],  // 制圧済みタイル（自城タイルは含まない）
@@ -546,7 +607,10 @@ function newGameState() {
     world,
     player: {
       castleLevel: 1,
-      buildings: Object.keys(BUILDING_DEFS).map(type => ({ id: "b_" + type, type, level: 1, upgradeEndsAt: null })),
+      buildings: Object.keys(BUILDING_DEFS).map(type => {
+        const p = DEFAULT_BUILDING_LAYOUT[type] || { x: 0, y: 0 };
+        return { id: "b_" + type, type, level: 1, upgradeEndsAt: null, x: p.x, y: p.y };
+      }),
       resources: { ...CONFIG.START_RESOURCES },
       diamonds: CONFIG.START_DIAMONDS,
       ownedTiles: [],
@@ -905,35 +969,23 @@ function renderHeader() {
     `<span class="res">💎<b>${fmt(S.player.diamonds)}</b> <span class="dim small">+${fmt(per.diamonds)}/h</span></span>`;
 }
 
+/* 城タブ本体。箱庭ビューの構築/ドラッグ/強化シートは [S17] に置く。
+ * 毎tickの全再構築はチラつき・ドラッグ破壊を招くため、citySignature が一致する
+ * 間は updateCityLive（数値とカウントダウンのみ）に切り替える。 */
 function renderCity() {
-  const t = now();
-  const rows = S.player.buildings.map(b => {
-    const def = BUILDING_DEFS[b.type];
-    let action;
-    if (b.upgradeEndsAt) {
-      action = `<button disabled>⏳ ${fmtSec((b.upgradeEndsAt - t) / 1000)}</button>`;
-    } else if (b.level >= def.maxLevel) {
-      action = `<button disabled>MAX</button>`;
-    } else {
-      const cost = getUpgradeCost(b);
-      const gated = b.type !== "castle" && b.level >= S.player.castleLevel;
-      action = `<button class="primary" ${(!canAfford(cost) || gated) ? "disabled" : ""}
-        onclick="UIA.upgrade('${b.type}')">⬆ ${fmtCost(cost)}<br><span class="small">${fmtSec(getUpgradeTimeSec(b))}${gated ? " / 要本城Lv" + (b.level + 1) : ""}</span></button>`;
-    }
-    const prod = def.prodType ? `${RES_DEFS[def.prodType].emoji}${fmt(def.prodBase * b.level)}/h` : def.desc;
-    return `<div class="panel row">
-      <div style="font-size:28px">${artHTML(def.imageKey, def.emoji)}</div>
-      <div class="grow"><b>${def.name}</b> <span class="dim">Lv${b.level}</span><div class="dim small">${prod}</div></div>
-      ${action}</div>`;
-  }).join("");
-  const per = getProdPerHour();
+  const sig = citySignature();
+  if ($("cityPlot") && sig === citySig) { updateCityLive(); return; }
+  citySig = sig;
+  const nodes = S.player.buildings.map(cityNodeHTML).join("");
   $("page-city").innerHTML = `
-    <div class="panel"><h3>🏯 本城 Lv${S.player.castleLevel} ｜ 部隊戦力 ${fmt(getArmyPower())}</h3>
-      <div class="dim small">毎時: ${RES_KEYS.map(k => RES_DEFS[k].emoji + fmt(per[k])).join(" ")} 💎${fmt(per.diamonds)}
-      ｜ 倉庫容量 ${fmt(getStorageCap())}</div></div>
-    ${rows}
+    <div class="panel"><div id="citySummary">${citySummaryHTML()}</div></div>
+    <div class="panel" style="padding:0;overflow:hidden">
+      <div id="cityPlot" class="city-plot">${nodes}</div>
+      <div class="dim small" style="padding:8px 12px">🏗️ 建物を<b>ドラッグ</b>で移動／<b>タップ</b>で強化。レベルが上がると外観が育ちます。</div></div>
     <div class="panel"><h3>⚙️ 設定</h3>
       <button class="danger" onclick="UIA.reset()">セーブデータをリセット</button></div>`;
+  cityAttachDrag();
+  if (openBuildingType && $("sheet").classList.contains("open")) openBuildingSheet(openBuildingType);
 }
 
 function renderCards() {
@@ -1165,7 +1217,7 @@ function openTileSheet(ti) {
   $("sheet").innerHTML = body + `<div class="actions">${actions.join("")}</div>`;
   $("sheet").classList.add("open");
 }
-function closeSheet() { $("sheet").classList.remove("open"); }
+function closeSheet() { $("sheet").classList.remove("open"); openBuildingType = null; }
 
 /* =====================================================================
  * [S15] UI: ACTIONS — ボタンonclickから呼ばれる操作群
@@ -1222,6 +1274,155 @@ const UIA = {
     input.click();
   },
 };
+
+/* =====================================================================
+ * [S17] UI: CITY PLOT — 城タブの箱庭ビュー（ドラッグ配置・タップ強化）
+ * 方針: 建物を絶対配置のDOMノードとして城グリッドに並べる。ドラッグで再配置し
+ *      座標は S.player.buildings[].x/y に保存、タップでボトムシート強化。
+ *      レベルから tier(1-3) を算出し外観（サイズ/装飾/グロー）を変える。
+ * ===================================================================*/
+let citySig = "";            // 全再構築要否の判定用（[S13] renderCity が参照）
+let openBuildingType = null; // 強化シートを開いている建物type（closeSheetでnull）
+const TIER_LABEL = ["", "初級", "中級", "上級"];
+
+/** レベル→外観ティア(1..3) */
+function buildingTier(level) {
+  const [t2, t3] = CONFIG.CITY_TIER_UP;
+  return level >= t3 ? 3 : level >= t2 ? 2 : 1;
+}
+/** グリッドセル(col,row) → 中心の%位置 */
+function cellToPct(col, row) {
+  return { left: (col + 0.5) / CONFIG.CITY_COLS * 100, top: (row + 0.5) / CONFIG.CITY_ROWS * 100 };
+}
+/** 0..1相対座標 → 最寄りグリッドセル */
+function pctToCell(fx, fy) {
+  return {
+    col: clamp(Math.floor(fx * CONFIG.CITY_COLS), 0, CONFIG.CITY_COLS - 1),
+    row: clamp(Math.floor(fy * CONFIG.CITY_ROWS), 0, CONFIG.CITY_ROWS - 1),
+  };
+}
+/** (col,row)が他建物と重なる場合、渦巻き探索で最寄りの空きセルを返す */
+function nearestFreeCell(col, row, exceptType) {
+  const occ = new Set(S.player.buildings.filter(b => b.type !== exceptType).map(b => b.x + "," + b.y));
+  if (!occ.has(col + "," + row)) return { col, row };
+  const maxR = Math.max(CONFIG.CITY_COLS, CONFIG.CITY_ROWS);
+  for (let r = 1; r < maxR; r++) {
+    for (let dc = -r; dc <= r; dc++) for (let dr = -r; dr <= r; dr++) {
+      const c = col + dc, rr = row + dr;
+      if (c < 0 || rr < 0 || c >= CONFIG.CITY_COLS || rr >= CONFIG.CITY_ROWS) continue;
+      if (!occ.has(c + "," + rr)) return { col: c, row: rr };
+    }
+  }
+  return { col, row };
+}
+
+/** 上部サマリー（build時・updateCityLive時 共用） */
+function citySummaryHTML() {
+  const per = getProdPerHour();
+  return `<h3>🏯 本城 Lv${S.player.castleLevel} ｜ 部隊戦力 ${fmt(getArmyPower())}</h3>
+    <div class="dim small">毎時 ${RES_KEYS.map(k => RES_DEFS[k].emoji + fmt(per[k])).join(" ")} 💎${fmt(per.diamonds)}
+    ｜ 倉庫容量 ${fmt(getStorageCap())}</div>`;
+}
+/** tick用の署名。type/level/強化中・本城Lvが変われば全再構築（それ以外は軽量更新） */
+function citySignature() {
+  return S.player.buildings.map(b => b.type + ":" + b.level + (b.upgradeEndsAt ? "U" : "")).join("|")
+    + "#" + S.player.castleLevel;
+}
+/** 建物1つぶんのDOM文字列 */
+function cityNodeHTML(b) {
+  const def = BUILDING_DEFS[b.type];
+  const tier = buildingTier(b.level);
+  const pos = cellToPct(b.x ?? 0, b.y ?? 0);
+  const cls = "bld tier-" + tier + (b.type === "castle" ? " big" : "") + (b.upgradeEndsAt ? " upgrading" : "");
+  const status = b.upgradeEndsAt ? "⏳" + fmtSec((b.upgradeEndsAt - now()) / 1000)
+    : (b.level >= def.maxLevel ? "MAX" : "");
+  return `<div class="${cls}" data-type="${b.type}" style="left:${pos.left}%;top:${pos.top}%">
+      <div class="bld-flags">${"★".repeat(tier)}</div>
+      <div class="bld-icon">${artHTML(def.imageKey, def.emoji)}</div>
+      <div class="bld-plat"></div>
+      <div class="bld-lv">Lv${b.level}</div>
+      <div class="bld-status" id="st-${b.type}">${status}</div></div>`;
+}
+/** 全建物ノードにドラッグ（移動）＋タップ（強化）を付与 */
+function cityAttachDrag() {
+  const plot = $("cityPlot");
+  if (!plot) return;
+  plot.querySelectorAll(".bld").forEach(node => {
+    const type = node.dataset.type;
+    let sx = 0, sy = 0, moved = false, capId = null;
+    node.addEventListener("pointerdown", e => {
+      e.preventDefault();
+      moved = false; sx = e.clientX; sy = e.clientY; capId = e.pointerId;
+      node.setPointerCapture(capId); node.classList.add("dragging");
+    });
+    node.addEventListener("pointermove", e => {
+      if (capId === null) return;
+      if (!moved && Math.hypot(e.clientX - sx, e.clientY - sy) > 8) moved = true;
+      if (moved) {
+        const r = plot.getBoundingClientRect();
+        const fx = clamp((e.clientX - r.left) / r.width, 0.05, 0.95);
+        const fy = clamp((e.clientY - r.top) / r.height, 0.07, 0.93);
+        node.style.left = fx * 100 + "%"; node.style.top = fy * 100 + "%";
+      }
+    });
+    const end = () => {
+      if (capId === null) return;
+      try { node.releasePointerCapture(capId); } catch (_) {}
+      capId = null; node.classList.remove("dragging");
+      if (!moved) { openBuildingSheet(type); return; }   // 動かなければタップ扱い
+      const fx = parseFloat(node.style.left) / 100, fy = parseFloat(node.style.top) / 100;
+      const cell = pctToCell(fx, fy);
+      const free = nearestFreeCell(cell.col, cell.row, type);
+      const b = getBuilding(type); b.x = free.col; b.y = free.row;
+      const p = cellToPct(free.col, free.row);
+      node.style.left = p.left + "%"; node.style.top = p.top + "%";
+      saveGame();
+    };
+    node.addEventListener("pointerup", end);
+    node.addEventListener("pointercancel", end);
+  });
+}
+/** 建物の強化ボトムシート（既存 #sheet を再利用） */
+function openBuildingSheet(type) {
+  openBuildingType = type;
+  const b = getBuilding(type), def = BUILDING_DEFS[type], t = now();
+  const tier = buildingTier(b.level);
+  const prod = def.prodType ? `${RES_DEFS[def.prodType].emoji}${fmt(def.prodBase * b.level)}/h 生産` : def.desc;
+  let body = `<h3>${artHTML(def.imageKey, def.emoji)} ${def.name}
+      <span class="dim small">Lv${b.level}・${TIER_LABEL[tier]}${"★".repeat(tier)}</span></h3>
+    <div class="dim small" style="margin-top:4px">${prod}</div>`;
+  const actions = [];
+  if (b.upgradeEndsAt) {
+    body += `<div class="small" id="sheetCountdown" style="margin-top:8px;color:var(--accent)">⏳ 完成まで ${fmtSec((b.upgradeEndsAt - t) / 1000)}</div>`;
+  } else if (b.level >= def.maxLevel) {
+    body += `<div class="small" style="margin-top:8px">最大レベルに到達しています</div>`;
+  } else {
+    const cost = getUpgradeCost(b);
+    const gated = type !== "castle" && b.level >= S.player.castleLevel;
+    const tierUp = buildingTier(b.level + 1) > tier
+      ? `<br><span style="color:var(--accent)">✨ 外観が${TIER_LABEL[buildingTier(b.level + 1)]}に育ちます</span>` : "";
+    body += `<div class="small" style="margin-top:8px">Lv${b.level + 1}へ ｜ ${fmtCost(cost)} ｜ ${fmtSec(getUpgradeTimeSec(b))}${
+      gated ? `<br><span style="color:var(--danger)">要 本城Lv${b.level + 1}</span>` : ""}${tierUp}</div>`;
+    actions.push(`<button class="primary" ${(!canAfford(cost) || gated) ? "disabled" : ""} onclick="UIA.upgrade('${type}')">⬆ アップグレード</button>`);
+  }
+  actions.push(`<button onclick="closeSheet()">閉じる</button>`);
+  $("sheet").innerHTML = body + `<div class="actions">${actions.join("")}</div>`;
+  $("sheet").classList.add("open");
+}
+/** 毎tickの軽量更新（DOM再構築なし）: サマリー数値・強化中カウントダウン */
+function updateCityLive() {
+  const sum = $("citySummary"); if (sum) sum.innerHTML = citySummaryHTML();
+  const t = now();
+  for (const b of S.player.buildings) {
+    const st = $("st-" + b.type);
+    if (st) st.textContent = b.upgradeEndsAt ? "⏳" + fmtSec((b.upgradeEndsAt - t) / 1000)
+      : (b.level >= BUILDING_DEFS[b.type].maxLevel ? "MAX" : "");
+  }
+  if (openBuildingType) {
+    const b = getBuilding(openBuildingType), cd = $("sheetCountdown");
+    if (cd && b && b.upgradeEndsAt) cd.textContent = "⏳ 完成まで " + fmtSec((b.upgradeEndsAt - t) / 1000);
+  }
+}
 
 /* =====================================================================
  * [S16] GAME LOOP & BOOT
