@@ -61,21 +61,42 @@ aura of power. 3:4 aspect.
 対象: card_ssr_tenba(覇王・大剣と王冠), card_ssr_byakuren(軍神・雷を纏う女神将),
 card_ssr_saya(聖女・光の錫杖), card_ssr_benimaru(鬼神・炎の金棒)
 
-## 2. 建築物アイコン（1:1、imageKey: bld_*）
+## 2. 建築物アイコン（1:1・背景透過PNG・imageKey: bld_*）
 
+**技術前提（厳守）**: city plot 側は 48×48 の角丸タイル（暗いグラデ背景＋接地影）に
+`object-fit:cover` で表示する（`.bld .bld-icon` 参照）。よってアートは
+**建物単体を描いた背景透過PNG**とし、土台・地面・草地・背景は一切描かない
+（枠と影はCSSが用意する）。被写体は中央、周囲に均等な小さめの余白。
+**48pxでも判別できる太く明快なシルエット**にすること（細かい小物は潰れる）。
+
+### 共通仕様プロンプト（全建物で使う）
 ```
-[共通接頭辞] Isometric building icon for a strategy game, sitting on a small
-grass diorama base, soft top-down lighting, 1:1 aspect.
+256x256 px, 1:1 square, TRANSPARENT background (PNG with alpha).
+A single Japanese sengoku-fantasy strategy-game building, centered,
+isometric 3/4 view from slightly above, soft light from the top-left,
+warm painterly shading, rich saturated colors, bold clean readable
+silhouette. NO ground base, NO grass, NO scenery, NO cast shadow,
+no text, no watermark. Keep small even padding around the subject.
+Match the art style, viewing angle, light direction and color palette
+of the reference images (the existing V1 buildings).
 Building: {下記}
 ```
+
+### 既存V1（生成済み・**スタイルの基準**。発注時に参照画像として必ず添付）
 - bld_castle — a grand multi-tiered Japanese castle keep with golden roof ornaments
-- bld_farm — terraced rice paddies with a small farmhouse and golden wheat
-- bld_sawmill — a lumber mill with stacked logs and a water wheel
-- bld_quarry — a stone quarry cut into a rocky hillside with chisels and blocks
+- bld_farm — a small farmhouse beside golden rice paddies
 - bld_ironmine — a mine entrance with iron ore carts and a glowing forge
-- bld_barracks — a fortified training ground with banners, spear racks and drill yard
-- bld_lab — a scholar's pagoda with scrolls, telescope and glowing lanterns
-- bld_warehouse — a large storehouse (kura) with sacks, barrels and crates
+- bld_barracks — a fortified drill yard with banners and spear racks
+
+### 今回の発注（残り4棟・Lv1）
+- bld_sawmill（伐採所／木材生産） — a wooden sawmill hut with a turning water wheel and a neat stack of freshly cut logs, an axe embedded in a chopping block
+- bld_quarry（採石場／石材生産） — a small terraced stone quarry with hewn gray granite blocks and a simple wooden hoist crane, a pickaxe leaning against the blocks
+- bld_lab（研究所／研究） — a scholar's study pavilion with unfurled scrolls, a brass armillary sphere and warm glowing paper lanterns, indigo-and-gold accents
+- bld_warehouse（倉庫／保管容量） — a Japanese kura storehouse with white plaster walls, a black tiled roof and a heavy wooden door, stacked rice-straw sacks, barrels and wooden crates beside it
+
+**納品**: 透過PNG 4枚を imageKey 名で（`bld_sawmill.png` / `bld_quarry.png` / `bld_lab.png` / `bld_warehouse.png`）。
+取り込みはガチャタブ「🖼️ 画像取り込み」でキー指定 → IndexedDB保存（オリジン単位）。
+全オリジンで初回から表示させたい場合は base64 埋め込み（未実装#11）をClaude側で実施する。
 
 ## 3. 資源アイコン（1:1、imageKey: res_*）※コード側は現状絵文字。将来差し替え用
 
