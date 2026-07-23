@@ -1,2 +1,4 @@
 # Auto detect text files and perform LF normalization
 * text=auto
+# 画像はバイナリ扱い（CRLF正規化による破損防止）
+*.png binary
