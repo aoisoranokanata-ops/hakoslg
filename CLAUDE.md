@@ -87,6 +87,7 @@ Claude Code はセッション開始時にこのファイルを読むこと。
 ```
 [S01] CONFIG          全バランス定数。調整はここだけ触る
 [S02] STATIC DEFS     建物/カード/役職/タイル種別の静的定義（セーブに含めない）
+[S02b] EMBEDDED ART   建物アートのbase64同梱(ART_DATA)。tools/embed_art.py で再生成
 [S03] UTILS           $/fmt/toast等の汎用ヘルパー
 [S04] PERSISTENCE     saveGame/loadGame/migrateSave + AssetDB(IndexedDB画像)
 [S05] WORLD GEN       generateWorld / generateAIUsers（新規ゲーム時のみ）
@@ -133,7 +134,10 @@ Claude Code はセッション開始時にこのファイルを読むこと。
 - **[DONE] 建物アート全8棟** — 本城/農場/製鉄所/兵舎/伐採所/採石場/研究所/倉庫。
   `art/<imageKey>.png`（256px透過）を原本に、`index.html` の `[S02b] ART_DATA` へ base64 同梱。
   `artHTML` は IndexedDB取り込み > 同梱 > 絵文字 の順で解決。**全オリジンで初回から絵表示**。
-  差し替えは art/ 更新 → scratchpad/embed_art.py 相当で再生成。index.html≈780KB
+  差し替え・追加は art/ に置いて `python tools/embed_art.py` を実行（冪等・安全ガード付き）。index.html≈780KB
+- **[DONE] ティア対応の描画基盤** — `artTierKey(baseKey, level)` が Lv6/11 で
+  `bld_x_t2` / `bld_x_t3` を優先し、未配置なら基本キーへフォールバック。city plot と強化シート両方が対応済み。
+  → ティア2/3の**アート素材を art/ に追加して埋め込むだけ**で自動反映される（下記#8）
 
 ### ⬜ 未実装（優先度順）
 1. **戦闘の深掘り** — 兵種・兵数、出兵時のカード手動編成UI、複数部隊（`MAX_MARCHES`を兵舎Lvで増加）
@@ -143,9 +147,9 @@ Claude Code はセッション開始時にこのファイルを読むこと。
 5. **同盟の深掘り** — 同盟名変更、同盟ミッション、加入AIの援軍
 6. **チュートリアル/クエスト導線** — 初回起動の誘導が皆無。目標リスト（本城Lv5にせよ等）
 7. **セーブのエクスポート/インポートUI**
-8. **効果音・演出** — ガチャ演出、制圧エフェクト
-9. **ティア2/3アート** — Lv6・Lv11用の育った外観（キー体系案: `bld_castle_t2`）。
-   `artHTML`/`ART_DATA` をティア対応キーに拡張する必要あり（現在は単一キー）
+8. **ティア2/3アート素材** — Lv6・Lv11用の育った外観。**コードは対応済み**（`artTierKey`）。
+   `art/bld_<type>_t2.png` / `_t3.png`（256px透過）を追加→`python tools/embed_art.py`→sw.js CACHE上げ、で反映
+9. **効果音・演出** — ガチャ演出、制圧エフェクト
 10. **カードアート** — 現状カードは絵文字。`card_*` の imageKey は同じ仕組みで差し替え可
 
 ---
