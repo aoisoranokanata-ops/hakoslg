@@ -1,0 +1,1291 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,user-scalable=no">
+<meta name="theme-color" content="#141821">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="箱庭SLG">
+<title>箱庭クロニクル</title>
+<link rel="manifest" href='data:application/manifest+json,{"name":"箱庭クロニクル","short_name":"箱庭SLG","display":"standalone","start_url":".","background_color":"%23141821","theme_color":"%23141821"}'>
+<style>
+/* =====================================================================
+ * スタイル方針: ダークテーマ / モバイル最優先 / 装飾は最小限
+ * 色はCSS変数に集約。後からテーマ調整する場合はここだけ触る。
+ * ===================================================================*/
+:root{
+  --bg:#141821; --bg2:#1c222e; --bg3:#252d3d; --line:#333d52;
+  --fg:#e8ecf4; --fg-dim:#9aa5bb; --accent:#e8b84a; --danger:#e06060;
+  --n:#8b95a8; --r:#5aa0e0; --sr:#b070e0; --ssr:#e8b84a;
+  --safe-b:env(safe-area-inset-bottom,0px);
+}
+*{margin:0;padding:0;box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+html,body{height:100%;overscroll-behavior:none}
+body{background:var(--bg);color:var(--fg);font-family:-apple-system,"Hiragino Sans","Noto Sans JP",sans-serif;
+  font-size:14px;display:flex;flex-direction:column;user-select:none;-webkit-user-select:none}
+button{font:inherit;color:inherit;background:var(--bg3);border:1px solid var(--line);border-radius:8px;
+  padding:8px 12px;cursor:pointer}
+button:active{filter:brightness(1.25)}
+button:disabled{opacity:.4;pointer-events:none}
+button.primary{background:var(--accent);color:#1a1408;border-color:var(--accent);font-weight:700}
+button.danger{border-color:var(--danger);color:var(--danger)}
+select{font:inherit;color:var(--fg);background:var(--bg3);border:1px solid var(--line);border-radius:6px;padding:4px 6px}
+
+/* ヘッダー資源バー */
+#header{display:flex;gap:2px;justify-content:space-around;padding:8px 6px 6px;background:var(--bg2);
+  border-bottom:1px solid var(--line);font-size:12px;flex-wrap:wrap;padding-top:calc(8px + env(safe-area-inset-top,0px))}
+#header .res{white-space:nowrap}
+#header .res b{font-weight:600}
+
+/* メイン領域 */
+#main{flex:1;overflow:hidden;position:relative}
+.tab-page{position:absolute;inset:0;overflow-y:auto;padding:12px;display:none}
+.tab-page.active{display:block}
+#page-map{padding:0;overflow:hidden}
+
+/* マップ */
+#mapWrap{position:absolute;inset:0}
+#mapCanvas{position:absolute;inset:0;width:100%;height:100%;touch-action:none;background:#0e1118}
+#mapCtrl{position:absolute;right:10px;bottom:14px;display:flex;flex-direction:column;gap:8px}
+#mapCtrl button{width:44px;height:44px;font-size:18px;border-radius:10px;background:rgba(37,45,61,.9)}
+#mapInfo{position:absolute;left:10px;top:10px;background:rgba(20,24,33,.85);border:1px solid var(--line);
+  border-radius:8px;padding:6px 10px;font-size:12px;color:var(--fg-dim);max-width:70%}
+
+/* 下部タブバー */
+#tabbar{display:flex;background:var(--bg2);border-top:1px solid var(--line);padding-bottom:var(--safe-b)}
+#tabbar button{flex:1;border:none;border-radius:0;background:none;padding:9px 0 7px;font-size:11px;color:var(--fg-dim)}
+#tabbar button .ico{display:block;font-size:19px;margin-bottom:1px}
+#tabbar button.active{color:var(--accent)}
+
+/* 汎用カードUI */
+.panel{background:var(--bg2);border:1px solid var(--line);border-radius:10px;padding:10px 12px;margin-bottom:10px}
+.panel h3{font-size:14px;margin-bottom:6px}
+.row{display:flex;align-items:center;gap:8px}
+.row .grow{flex:1;min-width:0}
+.dim{color:var(--fg-dim);font-size:12px}
+.small{font-size:11px}
+
+/* カード一覧 */
+.card-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:8px}
+.unit-card{background:var(--bg2);border:2px solid var(--n);border-radius:10px;padding:8px;position:relative}
+.unit-card .art{height:64px;display:flex;align-items:center;justify-content:center;font-size:38px;
+  background:var(--bg3);border-radius:6px;margin-bottom:6px;overflow:hidden}
+.unit-card .art img{width:100%;height:100%;object-fit:cover;border-radius:6px}
+.unit-card .rarity{position:absolute;top:4px;right:6px;font-size:11px;font-weight:700}
+.unit-card.rar-N{border-color:var(--n)} .unit-card.rar-N .rarity{color:var(--n)}
+.unit-card.rar-R{border-color:var(--r)} .unit-card.rar-R .rarity{color:var(--r)}
+.unit-card.rar-SR{border-color:var(--sr)} .unit-card.rar-SR .rarity{color:var(--sr)}
+.unit-card.rar-SSR{border-color:var(--ssr);box-shadow:0 0 8px rgba(232,184,74,.35)} .unit-card.rar-SSR .rarity{color:var(--ssr)}
+
+/* ボトムシート（タイル詳細） */
+#sheet{position:fixed;left:0;right:0;bottom:0;background:var(--bg2);border-top:1px solid var(--line);
+  border-radius:14px 14px 0 0;padding:14px 16px calc(14px + var(--safe-b));transform:translateY(105%);
+  transition:transform .18s ease;z-index:30;max-height:60%;overflow-y:auto}
+#sheet.open{transform:translateY(0)}
+#sheet .actions{display:flex;gap:8px;margin-top:10px;flex-wrap:wrap}
+
+/* トースト */
+#toast{position:fixed;left:50%;bottom:calc(70px + var(--safe-b));transform:translateX(-50%);z-index:40;
+  display:flex;flex-direction:column;gap:6px;align-items:center;pointer-events:none;width:92%}
+#toast .msg{background:rgba(20,24,33,.94);border:1px solid var(--line);border-radius:8px;padding:8px 14px;
+  font-size:13px;animation:fadein .2s;max-width:100%}
+@keyframes fadein{from{opacity:0;transform:translateY(6px)}to{opacity:1}}
+
+/* ガチャ結果 */
+#gachaResult .card-grid{margin-top:8px}
+.rate-table{width:100%;font-size:12px;color:var(--fg-dim)}
+.rate-table td{padding:2px 6px}
+
+/* 勝利バナー */
+#winBanner{display:none;background:linear-gradient(90deg,#3a2f10,#5a4413);border:1px solid var(--accent);
+  color:var(--accent);text-align:center;padding:8px;font-weight:700}
+#winBanner.show{display:block}
+</style>
+</head>
+<body>
+
+<header id="header"></header>
+<div id="winBanner">⛩️ 聖地制圧！ 天下統一まであと一歩 ⛩️</div>
+
+<main id="main">
+  <!-- ▼ マップ -->
+  <section class="tab-page active" id="page-map">
+    <div id="mapWrap">
+      <canvas id="mapCanvas"></canvas>
+      <div id="mapInfo">読み込み中…</div>
+      <div id="mapCtrl">
+        <button id="zoomIn">＋</button>
+        <button id="zoomOut">－</button>
+        <button id="zoomHome">🏯</button>
+      </div>
+    </div>
+  </section>
+  <!-- ▼ 城（内政） -->
+  <section class="tab-page" id="page-city"></section>
+  <!-- ▼ カード -->
+  <section class="tab-page" id="page-cards"></section>
+  <!-- ▼ ガチャ -->
+  <section class="tab-page" id="page-gacha"></section>
+  <!-- ▼ 同盟 -->
+  <section class="tab-page" id="page-alliance"></section>
+</main>
+
+<nav id="tabbar">
+  <button data-tab="map" class="active"><span class="ico">🗺️</span>マップ</button>
+  <button data-tab="city"><span class="ico">🏯</span>城</button>
+  <button data-tab="cards"><span class="ico">🎴</span>カード</button>
+  <button data-tab="gacha"><span class="ico">💎</span>ガチャ</button>
+  <button data-tab="alliance"><span class="ico">🤝</span>同盟</button>
+</nav>
+
+<div id="sheet"></div>
+<div id="toast"></div>
+
+<script>
+"use strict";
+/* =====================================================================
+ * 箱庭クロニクル — 単一HTML箱庭SLG（土台実装）
+ *
+ * コード全体はセクション [S01]〜[S16] に分割。検索は「[Sxx]」で。
+ *   [S01] CONFIG            — 全バランス定数（調整はここだけ）
+ *   [S02] STATIC DEFS       — 建物/カード/役職/AI名 の静的定義
+ *   [S03] UTILS             — 汎用ヘルパー
+ *   [S04] PERSISTENCE       — localStorage セーブ + IndexedDB 画像
+ *   [S05] WORLD GEN         — マップ生成・AI配置
+ *   [S06] STATE INIT        — セーブデータのスキーマ定義と初期化
+ *   [S07] ECONOMY           — 資源/ダイヤ生産・オフライン精算
+ *   [S08] BUILDINGS         — アップグレード
+ *   [S09] MILITARY          — 戦力計算・出兵・制圧・放棄
+ *   [S10] GACHA             — 排出・天井
+ *   [S11] ALLIANCE          — 勧誘・役職・バフ
+ *   [S12] AI USERS          — ルールベースAIの状態機械
+ *   [S13] UI: PANELS        — 各タブのDOM描画
+ *   [S14] UI: MAP CANVAS    — マップ描画・パン/ズーム/タップ
+ *   [S15] UI: ACTIONS       — ボタンから呼ばれる操作(UIA.*)
+ *   [S16] GAME LOOP & BOOT  — tick / autosave / 起動処理
+ *
+ * 設計原則:
+ *  - 可変状態はグローバル `S` 1個のみ。S をJSON化したものがセーブデータ。
+ *  - 静的定義（BUILDING_DEFS等）はセーブに含めない。S には id/level 等の最小情報のみ。
+ *  - 派生値（生産量・コスト・戦力）は毎回計算する。キャッシュしない。
+ *  - 時刻はすべて Date.now() のエポックms絶対値で持つ（オフライン跨ぎ対応）。
+ * ===================================================================*/
+
+/* =====================================================================
+ * [S01] CONFIG — 全バランス定数
+ * ===================================================================*/
+const CONFIG = {
+  SAVE_KEY: "hakoslg_save_v1",          // localStorageキー（名前空間 hakoslg_）
+  ASSET_DB: "hakoslg_assets",           // IndexedDB名（画像アセット）
+  SAVE_VERSION: 1,
+
+  WORLD_SIZE: 40,                       // 40x40 グリッド
+  TICK_MS: 1000,                        // ゲームtick間隔
+  AUTOSAVE_MS: 10000,                   // 自動保存間隔
+  OFFLINE_CAP_HOURS: 12,                // オフライン収益の上限時間
+
+  // --- 資源・生産 ---
+  START_RESOURCES: { food: 1000, wood: 1000, stone: 600, iron: 300 },
+  START_DIAMONDS: 1000,
+  TILE_PROD_PER_LEVEL_PER_HOUR: 200,    // 領有資源タイル: level×この値/時 を生産
+  WAREHOUSE_CAP_BASE: 6000,             // 倉庫容量 = BASE × lv^1.7
+  LAB_PROD_BONUS_PER_LEVEL: 0.02,       // 研究所: 全資源生産 +2%/lv
+
+  // --- ダイヤ（プレミア通貨を領土で稼ぐ、が本作のキモ） ---
+  DIAMOND_PER_TILELEVEL_PER_HOUR: 6,    // Σ(領有タイルlevel) × この値/時
+  DIAMOND_HOLY_LEVEL_MULT: 3,           // 聖地はlevelを3倍換算
+  DIAMOND_CAPTURE_BONUS_PER_LEVEL: 20,  // 新規制圧時の一時金
+
+  // --- 戦闘 ---
+  MAX_MARCHES: 1,                       // 同時出兵数（将来: 兵舎Lvで増やす想定）
+  MARCH_TILES_PER_SEC: 2,               // 行軍速度（タイル/秒）
+  MARCH_MIN_SEC: 3,
+  MARCH_FOOD_COST: 100,                 // 出兵1回の食料コスト
+  TILE_DEF_BASE: 80,                    // 防御 = BASE × level^1.5
+  TILE_DEF_EMPTY_MULT: 0.3,             // 空地は防御3割
+  TILE_DEF_AI_PER_CASTLE_LV: 80,        // AI領有タイルは +AI城Lv×この値
+  HOLY_DEF: 4000,                       // 聖地の固定防御力
+  ARMY_TOP_CARDS: 5,                    // 出撃編成: 戦力上位N枚を自動採用
+  POWER_PER_BARRACKS_LV: 60,
+  POWER_PER_CASTLE_LV: 25,
+  REQUIRE_ADJACENCY: true,              // 自領に隣接するタイルのみ出兵可
+
+  // --- ガチャ（甘め設計） ---
+  GACHA_COST_SINGLE: 100,
+  GACHA_COST_TEN: 900,
+  GACHA_RATES: { SSR: 0.05, SR: 0.15, R: 0.35, N: 0.45 },
+  GACHA_PITY_SSR: 50,                   // 50連でSSR確定
+  GACHA_TEN_GUARANTEE: "SR",            // 10連でSR以上1枚保証
+
+  // --- 勧誘 ---
+  RECRUIT_FOOD_COST: 500,
+  RECRUIT_BASE_CHANCE: 0.5,
+  RECRUIT_CHANCE_PER_LV_DIFF: 0.06,     // (自城Lv−AI城Lv)×この値を加算
+  RECRUIT_COOLDOWN_SEC: 60,
+
+  // --- ワールド生成 ---
+  AI_COUNT: 10,
+  AI_MIN_DIST_CENTER: 6,                // AI城は中心からこの距離以上
+  AI_MIN_DIST_EACH: 5,                  // AI城同士の最低距離
+  RESOURCE_TILE_RATIO: 0.45,            // 空地でない確率
+  LEVEL_BAND: 4,                        // チェビシェフ距離÷この値でタイルLv帯を決定
+};
+
+/* =====================================================================
+ * [S02] STATIC DEFS — 静的定義（セーブに含めない）
+ * ===================================================================*/
+
+/** 資源種別の表示定義 */
+const RES_DEFS = {
+  food:  { name: "食料", emoji: "🌾" },
+  wood:  { name: "木材", emoji: "🪵" },
+  stone: { name: "石材", emoji: "🪨" },
+  iron:  { name: "鉄",   emoji: "⚙️" },
+};
+const RES_KEYS = ["food", "wood", "stone", "iron"];
+
+/**
+ * 建物の静的定義。
+ * Building仕様: { id, type, level, upgradeEndsAt } をインスタンスとして持ち、
+ * prodType/prodRate/upgradeCost/upgradeTime はここから計算する。
+ *  - prodBase: level×prodBase が毎時生産量
+ *  - costBase/costGrowth: Lv n→n+1 のコスト = ceil(costBase × costGrowth^(n-1))
+ *  - timeBaseSec: Lv n→n+1 の所要時間 = timeBaseSec × n 秒
+ */
+const BUILDING_DEFS = {
+  castle:    { name: "本城",   emoji: "🏯", imageKey: "bld_castle",    prodType: null,    prodBase: 0,
+               maxLevel: 15, costBase: { food: 200, wood: 200, stone: 150, iron: 80 }, costGrowth: 1.6, timeBaseSec: 20,
+               desc: "全建物のレベル上限。戦力にも加算" },
+  farm:      { name: "農場",   emoji: "🌾", imageKey: "bld_farm",      prodType: "food",  prodBase: 600,
+               maxLevel: 15, costBase: { wood: 100, stone: 50 },                        costGrowth: 1.5, timeBaseSec: 10,
+               desc: "食料を生産" },
+  sawmill:   { name: "伐採所", emoji: "🪵", imageKey: "bld_sawmill",   prodType: "wood",  prodBase: 600,
+               maxLevel: 15, costBase: { food: 100, stone: 50 },                        costGrowth: 1.5, timeBaseSec: 10,
+               desc: "木材を生産" },
+  quarry:    { name: "採石場", emoji: "🪨", imageKey: "bld_quarry",    prodType: "stone", prodBase: 400,
+               maxLevel: 15, costBase: { food: 100, wood: 100 },                        costGrowth: 1.5, timeBaseSec: 12,
+               desc: "石材を生産" },
+  ironMine:  { name: "製鉄所", emoji: "⚙️", imageKey: "bld_ironmine",  prodType: "iron",  prodBase: 300,
+               maxLevel: 15, costBase: { food: 120, wood: 120, stone: 60 },             costGrowth: 1.5, timeBaseSec: 14,
+               desc: "鉄を生産" },
+  barracks:  { name: "兵舎",   emoji: "⚔️", imageKey: "bld_barracks",  prodType: null,    prodBase: 0,
+               maxLevel: 15, costBase: { food: 150, wood: 150, iron: 50 },              costGrowth: 1.55, timeBaseSec: 15,
+               desc: "部隊戦力 +" + CONFIG.POWER_PER_BARRACKS_LV + "/Lv" },
+  lab:       { name: "研究所", emoji: "📜", imageKey: "bld_lab",       prodType: null,    prodBase: 0,
+               maxLevel: 15, costBase: { wood: 200, stone: 150, iron: 100 },            costGrowth: 1.6, timeBaseSec: 18,
+               desc: "全資源生産 +2%/Lv（研究ツリーは未実装）" },
+  warehouse: { name: "倉庫",   emoji: "🏬", imageKey: "bld_warehouse", prodType: null,    prodBase: 0,
+               maxLevel: 15, costBase: { wood: 150, stone: 150 },                       costGrowth: 1.5, timeBaseSec: 12,
+               desc: "資源の保管容量を拡大" },
+};
+
+/**
+ * カードプール（ガチャ排出の全カード静的定義）。
+ * Card仕様: { id, name, rarity, atk(武力), int(知力), lead(統率), imageKey, emoji }
+ * imageKey は IndexedDB 内の画像キー。未登録なら emoji でプレースホルダー描画。
+ */
+const RARITY_MULT = { N: 1.0, R: 1.2, SR: 1.5, SSR: 2.0 };
+const CARD_POOL = [
+  // --- SSR ---
+  { id: "ssr_tenba",   name: "覇王・天羽",   rarity: "SSR", atk: 95, int: 70, lead: 90, emoji: "👑", imageKey: "card_ssr_tenba" },
+  { id: "ssr_byakuren",name: "軍神・白蓮",   rarity: "SSR", atk: 88, int: 92, lead: 85, emoji: "⚡", imageKey: "card_ssr_byakuren" },
+  { id: "ssr_saya",    name: "聖女・沙耶",   rarity: "SSR", atk: 70, int: 95, lead: 88, emoji: "🌸", imageKey: "card_ssr_saya" },
+  { id: "ssr_benimaru",name: "鬼神・紅丸",   rarity: "SSR", atk: 97, int: 60, lead: 82, emoji: "🔥", imageKey: "card_ssr_benimaru" },
+  // --- SR ---
+  { id: "sr_soji",     name: "剣豪・宗二",   rarity: "SR", atk: 70, int: 45, lead: 55, emoji: "🗡️", imageKey: "card_sr_soji" },
+  { id: "sr_genba",    name: "策士・玄葉",   rarity: "SR", atk: 45, int: 70, lead: 60, emoji: "🪶", imageKey: "card_sr_genba" },
+  { id: "sr_mitsuru",  name: "弓聖・美弦",   rarity: "SR", atk: 65, int: 55, lead: 58, emoji: "🏹", imageKey: "card_sr_mitsuru" },
+  { id: "sr_gantetsu", name: "猛将・岩鉄",   rarity: "SR", atk: 68, int: 40, lead: 65, emoji: "🛡️", imageKey: "card_sr_gantetsu" },
+  { id: "sr_kasumi",   name: "陰陽師・霞",   rarity: "SR", atk: 50, int: 68, lead: 62, emoji: "🌙", imageKey: "card_sr_kasumi" },
+  // --- R ---
+  { id: "r_katsuma",   name: "侍大将・勝真", rarity: "R", atk: 50, int: 38, lead: 45, emoji: "⚔️", imageKey: "card_r_katsuma" },
+  { id: "r_kota",      name: "槍働き・虎太", rarity: "R", atk: 48, int: 35, lead: 40, emoji: "🔱", imageKey: "card_r_kota" },
+  { id: "r_senri",     name: "参謀・千里",   rarity: "R", atk: 36, int: 50, lead: 42, emoji: "📖", imageKey: "card_r_senri" },
+  { id: "r_hayate",    name: "騎兵長・颯",   rarity: "R", atk: 45, int: 38, lead: 48, emoji: "🐎", imageKey: "card_r_hayate" },
+  { id: "r_katayama",  name: "守将・堅山",   rarity: "R", atk: 40, int: 40, lead: 50, emoji: "🏰", imageKey: "card_r_katayama" },
+  // --- N ---
+  { id: "n_taichi",    name: "足軽・太一",   rarity: "N", atk: 30, int: 20, lead: 25, emoji: "🪖", imageKey: "card_n_taichi" },
+  { id: "n_yosuke",    name: "農兵・与助",   rarity: "N", atk: 25, int: 22, lead: 28, emoji: "🌱", imageKey: "card_n_yosuke" },
+  { id: "n_kosuzu",    name: "斥候・小鈴",   rarity: "N", atk: 22, int: 32, lead: 24, emoji: "🔔", imageKey: "card_n_kosuzu" },
+  { id: "n_gonroku",   name: "衛兵・権六",   rarity: "N", atk: 28, int: 20, lead: 30, emoji: "🚪", imageKey: "card_n_gonroku" },
+  { id: "n_maruta",    name: "新兵・丸太",   rarity: "N", atk: 26, int: 24, lead: 22, emoji: "🌰", imageKey: "card_n_maruta" },
+  { id: "n_nihei",     name: "輜重兵・荷平", rarity: "N", atk: 20, int: 28, lead: 30, emoji: "📦", imageKey: "card_n_nihei" },
+];
+const CARD_BY_ID = Object.fromEntries(CARD_POOL.map(c => [c.id, c]));
+
+/** 役職定義。buff は getAllianceBuffs() が参照する乗数。 */
+const ROLE_DEFS = {
+  "盟主": { desc: "同盟の長（プレイヤー固定）", buff: {} },
+  "軍師": { desc: "研究バフ（研究ツリー実装後に有効化予定）", buff: {} },
+  "将軍": { desc: "部隊戦力 +10%",   buff: { power: 1.10 } },
+  "都督": { desc: "全資源生産 +10%", buff: { prod: 1.10 } },
+  "斥候": { desc: "行軍速度 +20%",   buff: { speed: 1.20 } },
+  "一般": { desc: "役職なし", buff: {} },
+};
+const ASSIGNABLE_ROLES = ["一般", "軍師", "将軍", "都督", "斥候"];
+
+/** AI城の名前・カラーパレット（生成時にindex順で使用） */
+const AI_NAMES = ["北条庵", "夜叉丸", "百合園", "鉄舟斎", "花菱", "雷鳥院", "静waves", "黒曜", "月白", "杉浦党"];
+const AI_COLORS = ["#e06666", "#6aa84f", "#6d9eeb", "#e69138", "#a64d79", "#45818e", "#c27ba0", "#8e7cc3", "#bf9000", "#76a5af"];
+
+/** タイル種別の描画定義 */
+const TILE_DEFS = {
+  empty: { name: "空地", color: "#232936", emoji: "" },
+  food:  { name: "農地", color: "#2e4a2a", emoji: "🌾" },
+  wood:  { name: "森林", color: "#3d3a24", emoji: "🪵" },
+  stone: { name: "岩山", color: "#3a3f4a", emoji: "🪨" },
+  iron:  { name: "鉄鉱", color: "#39344a", emoji: "⚙️" },
+  holy:  { name: "聖地", color: "#4a2a4a", emoji: "⛩️" },
+  castle:{ name: "城",   color: "#4a2a2a", emoji: "🏯" },
+};
+
+/* =====================================================================
+ * [S03] UTILS
+ * ===================================================================*/
+const $ = id => document.getElementById(id);
+const now = () => Date.now();
+const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+const randInt = (lo, hi) => lo + Math.floor(Math.random() * (hi - lo + 1));
+const pick = arr => arr[Math.floor(Math.random() * arr.length)];
+let _uidCounter = 0;
+const uid = prefix => prefix + "_" + now().toString(36) + "_" + (_uidCounter++).toString(36);
+
+/** 数値表示: 1234→1,234 / 56789→56.8k / 1234567→1.23M */
+function fmt(n) {
+  n = Math.floor(n);
+  if (n >= 1e6) return (n / 1e6).toFixed(2) + "M";
+  if (n >= 1e4) return (n / 1e3).toFixed(1) + "k";
+  return n.toLocaleString();
+}
+/** 秒数表示: 90→"1分30秒" */
+function fmtSec(sec) {
+  sec = Math.max(0, Math.ceil(sec));
+  if (sec < 60) return sec + "秒";
+  if (sec < 3600) return Math.floor(sec / 60) + "分" + (sec % 60 ? sec % 60 + "秒" : "");
+  return Math.floor(sec / 3600) + "時間" + Math.floor((sec % 3600) / 60) + "分";
+}
+/** コストオブジェクト {food:100,...} → "🌾100 🪵50" */
+function fmtCost(cost) {
+  return Object.entries(cost).map(([k, v]) => RES_DEFS[k].emoji + fmt(v)).join(" ");
+}
+function toast(msg) {
+  const el = document.createElement("div");
+  el.className = "msg";
+  el.textContent = msg;
+  $("toast").appendChild(el);
+  setTimeout(() => el.remove(), 3200);
+}
+
+/* =====================================================================
+ * [S04] PERSISTENCE — localStorage(セーブ) + IndexedDB(画像)
+ * ===================================================================*/
+function saveGame() {
+  try {
+    S.lastSavedAt = now();
+    localStorage.setItem(CONFIG.SAVE_KEY, JSON.stringify(S));
+  } catch (e) { console.error("save failed", e); }
+}
+function loadGame() {
+  try {
+    const raw = localStorage.getItem(CONFIG.SAVE_KEY);
+    if (!raw) return null;
+    const data = JSON.parse(raw);
+    // 将来スキーマが変わったら data.version を見てここでマイグレーションする
+    if (data.version !== CONFIG.SAVE_VERSION) console.warn("save version mismatch", data.version);
+    return data;
+  } catch (e) { console.error("load failed", e); return null; }
+}
+function resetGame() {
+  localStorage.removeItem(CONFIG.SAVE_KEY);
+  location.reload();
+}
+
+/**
+ * AssetDB: imageKey → Blob を IndexedDB に保存する画像ストア。
+ * 起動時に全キーを objectURL 化して ASSET_URLS に展開。
+ * 画像が1枚もなくても絵文字プレースホルダーで完全動作する。
+ * 取り込みはガチャタブ最下部のUI、またはコンソールで
+ *   AssetDB.put("card_ssr_tenba", blob)
+ */
+const ASSET_URLS = {}; // imageKey → objectURL
+const AssetDB = {
+  db: null,
+  open() {
+    return new Promise(resolve => {
+      const req = indexedDB.open(CONFIG.ASSET_DB, 1);
+      req.onupgradeneeded = () => req.result.createObjectStore("images");
+      req.onsuccess = () => { AssetDB.db = req.result; resolve(true); };
+      req.onerror = () => { console.warn("IndexedDB unavailable"); resolve(false); };
+    });
+  },
+  put(key, blob) {
+    return new Promise((resolve, reject) => {
+      if (!AssetDB.db) return reject("no db");
+      const tx = AssetDB.db.transaction("images", "readwrite");
+      tx.objectStore("images").put(blob, key);
+      tx.oncomplete = () => { ASSET_URLS[key] = URL.createObjectURL(blob); resolve(); };
+      tx.onerror = () => reject(tx.error);
+    });
+  },
+  loadAll() {
+    return new Promise(resolve => {
+      if (!AssetDB.db) return resolve();
+      const tx = AssetDB.db.transaction("images", "readonly");
+      const store = tx.objectStore("images");
+      const req = store.openCursor();
+      req.onsuccess = () => {
+        const cur = req.result;
+        if (cur) { ASSET_URLS[cur.key] = URL.createObjectURL(cur.value); cur.continue(); }
+        else resolve();
+      };
+      req.onerror = () => resolve();
+    });
+  },
+};
+/** imageKey に対応する <img> か絵文字プレースホルダーのHTMLを返す */
+function artHTML(imageKey, emoji) {
+  return ASSET_URLS[imageKey] ? `<img src="${ASSET_URLS[imageKey]}" alt="">` : (emoji || "❔");
+}
+
+/* =====================================================================
+ * [S05] WORLD GEN — マップ生成・AI配置
+ * ===================================================================*/
+const SIZE = CONFIG.WORLD_SIZE;
+const idx = (x, y) => y * SIZE + x;
+const inBounds = (x, y) => x >= 0 && y >= 0 && x < SIZE && y < SIZE;
+const chebyshev = (x1, y1, x2, y2) => Math.max(Math.abs(x1 - x2), Math.abs(y1 - y2));
+const CENTER = Math.floor(SIZE / 2); // プレイヤー本城座標 (20,20)
+
+/**
+ * World.tiles を生成。tile = { x, y, type, level, ownerId }
+ *  - level: 中心からの距離帯で1〜5（外周ほど高い）。聖地は6。
+ *  - 聖地: 四隅付近に4箇所。いずれか1つの領有が勝利条件。
+ */
+function generateWorld() {
+  const tiles = [];
+  for (let y = 0; y < SIZE; y++) {
+    for (let x = 0; x < SIZE; x++) {
+      const d = chebyshev(x, y, CENTER, CENTER);
+      const level = clamp(Math.floor(d / CONFIG.LEVEL_BAND) + 1, 1, 5);
+      const type = Math.random() < CONFIG.RESOURCE_TILE_RATIO ? pick(RES_KEYS) : "empty";
+      tiles.push({ x, y, type, level, ownerId: null });
+    }
+  }
+  // プレイヤー本城（中心）
+  tiles[idx(CENTER, CENTER)] = { x: CENTER, y: CENTER, type: "castle", level: 1, ownerId: "player" };
+  // 聖地×4（四隅から少し内側）
+  for (const [hx, hy] of [[4, 4], [SIZE - 5, 4], [4, SIZE - 5], [SIZE - 5, SIZE - 5]]) {
+    tiles[idx(hx, hy)] = { x: hx, y: hy, type: "holy", level: 6, ownerId: null };
+  }
+  return { size: SIZE, tiles };
+}
+
+/** AIUser を生成し、city タイルを world に配置する */
+function generateAIUsers(world) {
+  const users = [];
+  let guard = 0;
+  while (users.length < CONFIG.AI_COUNT && guard++ < 2000) {
+    const x = randInt(2, SIZE - 3), y = randInt(2, SIZE - 3);
+    const t = world.tiles[idx(x, y)];
+    if (t.type === "castle" || t.type === "holy") continue;
+    if (chebyshev(x, y, CENTER, CENTER) < CONFIG.AI_MIN_DIST_CENTER) continue;
+    if (users.some(u => chebyshev(x, y, u.x, u.y) < CONFIG.AI_MIN_DIST_EACH)) continue;
+    const i = users.length;
+    const ai = {
+      id: "ai_" + i,
+      name: AI_NAMES[i] || "AI" + i,
+      color: AI_COLORS[i] || "#888",
+      x, y,
+      castleLevel: randInt(1, 3),
+      personality: pick(["expander", "expander", "balanced", "balanced", "turtle"]),
+      recruitable: Math.random() < 0.6,
+      allianceId: null,
+      ownedTiles: [],          // AIが領有する資源タイルindex（城タイルは含まない）
+      nextActionAt: 0,         // 次に行動する絶対時刻(ms)
+      nextRecruitAt: 0,        // 勧誘再試行可能時刻(ms)
+    };
+    world.tiles[idx(x, y)] = { x, y, type: "castle", level: ai.castleLevel, ownerId: ai.id };
+    users.push(ai);
+  }
+  return users;
+}
+
+/* =====================================================================
+ * [S06] STATE INIT — セーブデータのスキーマ
+ * ===================================================================*/
+/**
+ * S（＝セーブデータ）の完全スキーマ:
+ * {
+ *   version: number,            // セーブ形式バージョン（マイグレーション用）
+ *   createdAt, lastSavedAt, lastTickAt: number(ms),
+ *   world: { size, tiles[] },   // tile = {x,y,type,level,ownerId}
+ *   player: {
+ *     castleLevel: number,      // buildings内 castle.level のミラー（参照高速化）
+ *     buildings: [ {id,type,level,upgradeEndsAt|null} ],
+ *     resources: {food,wood,stone,iron},   // 浮動小数。表示はfloor
+ *     diamonds: number,         // プレミア通貨。容量キャップなし
+ *     ownedTiles: [tileIndex],  // 制圧済みタイル（自城タイルは含まない）
+ *     cards: [ {uid,defId,obtainedAt} ],   // ガチャ獲得カード（重複可）
+ *     allianceId: string,
+ *     marches: [ {id,targetIdx,power,departAt,arriveAt} ],
+ *     gacha: { sinceSSR, total },          // 天井カウンタ・総回数
+ *   },
+ *   alliance: { id, name, members:[{id,role}] },  // 現状プレイヤー同盟1つのみ
+ *   aiUsers: [ AIUser ],        // スキーマは generateAIUsers 参照
+ *   flags: { holyWon: bool },   // 一度きりイベントの発火記録
+ * }
+ */
+function newGameState() {
+  const world = generateWorld();
+  const aiUsers = generateAIUsers(world);
+  const t = now();
+  return {
+    version: CONFIG.SAVE_VERSION,
+    createdAt: t, lastSavedAt: t, lastTickAt: t,
+    world,
+    player: {
+      castleLevel: 1,
+      buildings: Object.keys(BUILDING_DEFS).map(type => ({ id: "b_" + type, type, level: 1, upgradeEndsAt: null })),
+      resources: { ...CONFIG.START_RESOURCES },
+      diamonds: CONFIG.START_DIAMONDS,
+      ownedTiles: [],
+      cards: [
+        { uid: uid("c"), defId: "n_taichi", obtainedAt: t },
+        { uid: uid("c"), defId: "n_kosuzu", obtainedAt: t },
+      ],
+      allianceId: "ally_player",
+      marches: [],
+      gacha: { sinceSSR: 0, total: 0 },
+    },
+    alliance: { id: "ally_player", name: "無名同盟", members: [{ id: "player", role: "盟主" }] },
+    aiUsers,
+    flags: { holyWon: false },
+  };
+}
+
+let S = null; // グローバル可変状態（唯一）
+
+/* =====================================================================
+ * [S07] ECONOMY — 生産・オフライン精算
+ * ===================================================================*/
+/** 毎時生産量 {food,wood,stone,iron,diamonds} を現在の状態から計算 */
+function getProdPerHour() {
+  const buffs = getAllianceBuffs();
+  const labLv = getBuilding("lab").level;
+  const mult = (1 + CONFIG.LAB_PROD_BONUS_PER_LEVEL * labLv) * (buffs.prod || 1);
+  const out = { food: 0, wood: 0, stone: 0, iron: 0, diamonds: 0 };
+  // 建物生産
+  for (const b of S.player.buildings) {
+    const def = BUILDING_DEFS[b.type];
+    if (def.prodType) out[def.prodType] += def.prodBase * b.level;
+  }
+  // 領有タイル生産＋ダイヤ
+  let tileLevelSum = 0;
+  for (const ti of S.player.ownedTiles) {
+    const t = S.world.tiles[ti];
+    if (RES_KEYS.includes(t.type)) {
+      out[t.type] += CONFIG.TILE_PROD_PER_LEVEL_PER_HOUR * t.level;
+      tileLevelSum += t.level;
+    } else if (t.type === "holy") {
+      tileLevelSum += t.level * CONFIG.DIAMOND_HOLY_LEVEL_MULT;
+    } else if (t.type === "empty") {
+      tileLevelSum += t.level * 0.25; // 空地は微量のダイヤのみ
+    }
+  }
+  for (const k of RES_KEYS) out[k] *= mult;
+  out.diamonds = tileLevelSum * CONFIG.DIAMOND_PER_TILELEVEL_PER_HOUR;
+  return out;
+}
+/** 倉庫容量（食料/木材/石材/鉄の各上限） */
+function getStorageCap() {
+  const lv = getBuilding("warehouse").level;
+  return Math.floor(CONFIG.WAREHOUSE_CAP_BASE * Math.pow(lv, 1.7));
+}
+/** dtSec 秒ぶんの生産を適用 */
+function applyEconomy(dtSec) {
+  const per = getProdPerHour();
+  const cap = getStorageCap();
+  for (const k of RES_KEYS) {
+    S.player.resources[k] = Math.min(cap, S.player.resources[k] + per[k] * dtSec / 3600);
+  }
+  S.player.diamonds += per.diamonds * dtSec / 3600;
+}
+/** 起動時のオフライン精算（上限 OFFLINE_CAP_HOURS） */
+function grantOfflineGains() {
+  const elapsedSec = (now() - S.lastTickAt) / 1000;
+  if (elapsedSec < 60) return;
+  const capped = Math.min(elapsedSec, CONFIG.OFFLINE_CAP_HOURS * 3600);
+  const before = { ...S.player.resources, diamonds: S.player.diamonds };
+  applyEconomy(capped);
+  const gains = RES_KEYS.map(k => {
+    const g = Math.floor(S.player.resources[k] - before[k]);
+    return g > 0 ? RES_DEFS[k].emoji + fmt(g) : null;
+  }).filter(Boolean).join(" ");
+  const dg = Math.floor(S.player.diamonds - before.diamonds);
+  toast(`⏰ オフライン収益（${fmtSec(capped)}分）: ${gains}${dg > 0 ? " 💎" + fmt(dg) : ""}`);
+}
+
+/* =====================================================================
+ * [S08] BUILDINGS — アップグレード
+ * ===================================================================*/
+function getBuilding(type) { return S.player.buildings.find(b => b.type === type); }
+/** Lv b.level → b.level+1 のコスト */
+function getUpgradeCost(b) {
+  const def = BUILDING_DEFS[b.type];
+  const cost = {};
+  for (const [k, v] of Object.entries(def.costBase)) {
+    cost[k] = Math.ceil(v * Math.pow(def.costGrowth, b.level - 1));
+  }
+  return cost;
+}
+function getUpgradeTimeSec(b) { return BUILDING_DEFS[b.type].timeBaseSec * b.level; }
+function canAfford(cost) { return Object.entries(cost).every(([k, v]) => S.player.resources[k] >= v); }
+function payCost(cost) { for (const [k, v] of Object.entries(cost)) S.player.resources[k] -= v; }
+/** アップグレード開始。失敗理由の文字列 or null(成功) を返す */
+function startUpgrade(type) {
+  const b = getBuilding(type);
+  const def = BUILDING_DEFS[type];
+  if (b.upgradeEndsAt) return "アップグレード中です";
+  if (b.level >= def.maxLevel) return "最大レベルです";
+  if (type !== "castle" && b.level >= S.player.castleLevel) return "本城レベルが必要です";
+  const cost = getUpgradeCost(b);
+  if (!canAfford(cost)) return "資源が足りません";
+  payCost(cost);
+  b.upgradeEndsAt = now() + getUpgradeTimeSec(b) * 1000;
+  return null;
+}
+/** tickから呼ばれる。完了したアップグレードを反映 */
+function finishUpgrades(t) {
+  for (const b of S.player.buildings) {
+    if (b.upgradeEndsAt && t >= b.upgradeEndsAt) {
+      b.level++;
+      b.upgradeEndsAt = null;
+      if (b.type === "castle") S.player.castleLevel = b.level;
+      toast(`${BUILDING_DEFS[b.type].emoji} ${BUILDING_DEFS[b.type].name} が Lv${b.level} になりました`);
+    }
+  }
+}
+
+/* =====================================================================
+ * [S09] MILITARY — 戦力・出兵・制圧
+ * ===================================================================*/
+/** カード1枚の戦力 */
+function cardPower(defId) {
+  const d = CARD_BY_ID[defId];
+  return Math.round((d.atk * 1.2 + d.lead * 1.0 + d.int * 0.6) * RARITY_MULT[d.rarity]);
+}
+/** 出撃部隊の総戦力（戦力上位N枚 自動編成 + 兵舎 + 本城 + 将軍バフ） */
+function getArmyPower() {
+  const top = S.player.cards.map(c => cardPower(c.defId)).sort((a, b) => b - a).slice(0, CONFIG.ARMY_TOP_CARDS);
+  const base = top.reduce((a, b) => a + b, 0)
+    + getBuilding("barracks").level * CONFIG.POWER_PER_BARRACKS_LV
+    + S.player.castleLevel * CONFIG.POWER_PER_CASTLE_LV;
+  return Math.round(base * (getAllianceBuffs().power || 1));
+}
+/** タイルの防御力 */
+function getTileDefense(ti) {
+  const t = S.world.tiles[ti];
+  if (t.type === "holy") return CONFIG.HOLY_DEF;
+  let def = CONFIG.TILE_DEF_BASE * Math.pow(t.level, 1.5);
+  if (t.type === "empty") def *= CONFIG.TILE_DEF_EMPTY_MULT;
+  if (t.ownerId && t.ownerId !== "player") {
+    const ai = S.aiUsers.find(a => a.id === t.ownerId);
+    if (ai) def += ai.castleLevel * CONFIG.TILE_DEF_AI_PER_CASTLE_LV;
+  }
+  return Math.round(def);
+}
+/** タイルが自領（自城含む）に8方向で隣接しているか */
+function isAdjacentToOwned(ti) {
+  const t = S.world.tiles[ti];
+  for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+    if (!dx && !dy) continue;
+    const nx = t.x + dx, ny = t.y + dy;
+    if (inBounds(nx, ny) && S.world.tiles[idx(nx, ny)].ownerId === "player") return true;
+  }
+  return false;
+}
+/** 出兵開始。失敗理由 or null */
+function startMarch(ti) {
+  const t = S.world.tiles[ti];
+  if (S.player.marches.length >= CONFIG.MAX_MARCHES) return "出兵中の部隊が帰還していません";
+  if (t.ownerId === "player") return "すでに領有しています";
+  if (t.type === "castle") return "他プレイヤーの城は攻撃できません（未実装）";
+  if (CONFIG.REQUIRE_ADJACENCY && !isAdjacentToOwned(ti)) return "自領に隣接するタイルにのみ出兵できます";
+  if (S.player.resources.food < CONFIG.MARCH_FOOD_COST) return "食料が足りません（" + CONFIG.MARCH_FOOD_COST + "必要）";
+  S.player.resources.food -= CONFIG.MARCH_FOOD_COST;
+  const dist = chebyshev(t.x, t.y, CENTER, CENTER);
+  const speed = CONFIG.MARCH_TILES_PER_SEC * (getAllianceBuffs().speed || 1);
+  const sec = Math.max(CONFIG.MARCH_MIN_SEC, dist / speed);
+  S.player.marches.push({ id: uid("m"), targetIdx: ti, power: getArmyPower(), departAt: now(), arriveAt: now() + sec * 1000 });
+  return null;
+}
+/** tickから呼ばれる。到着した出兵を解決（帰還は省略＝即時） */
+function resolveMarches(t) {
+  const done = S.player.marches.filter(m => t >= m.arriveAt);
+  if (!done.length) return;
+  S.player.marches = S.player.marches.filter(m => t < m.arriveAt);
+  for (const m of done) {
+    const tile = S.world.tiles[m.targetIdx];
+    const def = getTileDefense(m.targetIdx);
+    if (m.power >= def) {
+      // 前所有者（AI）から剥奪
+      if (tile.ownerId && tile.ownerId !== "player") {
+        const ai = S.aiUsers.find(a => a.id === tile.ownerId);
+        if (ai) ai.ownedTiles = ai.ownedTiles.filter(i => i !== m.targetIdx);
+      }
+      tile.ownerId = "player";
+      S.player.ownedTiles.push(m.targetIdx);
+      const bonus = CONFIG.DIAMOND_CAPTURE_BONUS_PER_LEVEL * tile.level;
+      S.player.diamonds += bonus;
+      toast(`⚔️ ${TILE_DEFS[tile.type].name}Lv${tile.level} を制圧！ 💎+${bonus}`);
+      if (tile.type === "holy" && !S.flags.holyWon) {
+        S.flags.holyWon = true;
+        $("winBanner").classList.add("show");
+        toast("🎉 勝利条件達成！ 聖地を領有しました！");
+      }
+    } else {
+      toast(`💥 出兵失敗… 戦力${fmt(m.power)} < 防御${fmt(def)}`);
+    }
+  }
+}
+/** 領有タイルの放棄（隣接経路の付け替え用） */
+function abandonTile(ti) {
+  const t = S.world.tiles[ti];
+  if (t.ownerId !== "player" || t.type === "castle") return "放棄できません";
+  t.ownerId = null;
+  S.player.ownedTiles = S.player.ownedTiles.filter(i => i !== ti);
+  return null;
+}
+
+/* =====================================================================
+ * [S10] GACHA — 排出・天井
+ * ===================================================================*/
+/** レア度を1回抽選（天井処理込み） */
+function rollRarity() {
+  S.player.gacha.total++;
+  S.player.gacha.sinceSSR++;
+  if (S.player.gacha.sinceSSR >= CONFIG.GACHA_PITY_SSR) { S.player.gacha.sinceSSR = 0; return "SSR"; }
+  let r = Math.random();
+  for (const [rar, p] of Object.entries(CONFIG.GACHA_RATES)) {
+    if (r < p) {
+      if (rar === "SSR") S.player.gacha.sinceSSR = 0;
+      return rar;
+    }
+    r -= p;
+  }
+  return "N";
+}
+/**
+ * ガチャ実行。count=1|10。
+ * 戻り値: 獲得カードdef配列 / 失敗時はnull（ダイヤ不足）
+ */
+function doGacha(count) {
+  const cost = count === 10 ? CONFIG.GACHA_COST_TEN : CONFIG.GACHA_COST_SINGLE;
+  if (Math.floor(S.player.diamonds) < cost) return null;
+  S.player.diamonds -= cost;
+  const results = [];
+  for (let i = 0; i < count; i++) {
+    const rar = rollRarity();
+    results.push(pick(CARD_POOL.filter(c => c.rarity === rar)));
+  }
+  // 10連保証: SR以上が1枚もなければ最後の1枚をSRに差し替え
+  if (count === 10 && !results.some(c => c.rarity === "SR" || c.rarity === "SSR")) {
+    results[9] = pick(CARD_POOL.filter(c => c.rarity === CONFIG.GACHA_TEN_GUARANTEE));
+  }
+  const t = now();
+  for (const def of results) S.player.cards.push({ uid: uid("c"), defId: def.id, obtainedAt: t });
+  return results;
+}
+
+/* =====================================================================
+ * [S11] ALLIANCE — 勧誘・役職・バフ
+ * ===================================================================*/
+/** 同盟の役職バフを集計。{power,prod,speed} の乗数（未設定は1） */
+function getAllianceBuffs() {
+  const out = {};
+  if (!S) return out;
+  for (const m of S.alliance.members) {
+    const buff = (ROLE_DEFS[m.role] || {}).buff || {};
+    for (const [k, v] of Object.entries(buff)) out[k] = Math.max(out[k] || 1, v);
+  }
+  return out;
+}
+/** AI勧誘。失敗理由 or null（成功/失敗はトーストで通知） */
+function recruitAI(aiId) {
+  const ai = S.aiUsers.find(a => a.id === aiId);
+  if (!ai || !ai.recruitable) return "勧誘できない相手です";
+  if (ai.allianceId) return "すでに同盟所属です";
+  if (now() < ai.nextRecruitAt) return "しばらく待ってから再勧誘してください（" + fmtSec((ai.nextRecruitAt - now()) / 1000) + "）";
+  if (S.player.resources.food < CONFIG.RECRUIT_FOOD_COST) return "食料が足りません（" + CONFIG.RECRUIT_FOOD_COST + "必要）";
+  S.player.resources.food -= CONFIG.RECRUIT_FOOD_COST;
+  const chance = clamp(
+    CONFIG.RECRUIT_BASE_CHANCE + CONFIG.RECRUIT_CHANCE_PER_LV_DIFF * (S.player.castleLevel - ai.castleLevel),
+    0.15, 0.95);
+  if (Math.random() < chance) {
+    ai.allianceId = S.alliance.id;
+    S.alliance.members.push({ id: ai.id, role: "一般" });
+    toast(`🤝 ${ai.name} が同盟に加入しました！`);
+  } else {
+    ai.nextRecruitAt = now() + CONFIG.RECRUIT_COOLDOWN_SEC * 1000;
+    toast(`😔 ${ai.name} に断られました（成功率${Math.round(chance * 100)}%）`);
+  }
+  return null;
+}
+function setMemberRole(memberId, role) {
+  const m = S.alliance.members.find(m => m.id === memberId);
+  if (m && m.role !== "盟主") m.role = role;
+}
+
+/* =====================================================================
+ * [S12] AI USERS — ルールベース状態機械
+ *
+ * 各AIは nextActionAt が来たら1アクションだけ実行して次回時刻を再設定。
+ * personality:
+ *   expander : 20-60秒ごとに隣接未所有タイルを1枚claim
+ *   balanced : 60-180秒ごとに 拡張50% / 城Lvアップ50%
+ *   turtle   : 120-300秒ごとに城Lvアップのみ
+ * 制約: プレイヤー領有タイル・城・聖地は奪わない（対人戦は未実装）。
+ * ===================================================================*/
+const AI_ACTION_INTERVALS = { expander: [20, 60], balanced: [60, 180], turtle: [120, 300] };
+
+function aiExpand(ai) {
+  // AI領土（城＋領有タイル）に隣接する未所有タイルを収集
+  const seeds = [idx(ai.x, ai.y), ...ai.ownedTiles];
+  const candidates = [];
+  for (const si of seeds) {
+    const st = S.world.tiles[si];
+    for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+      if (!dx && !dy) continue;
+      const nx = st.x + dx, ny = st.y + dy;
+      if (!inBounds(nx, ny)) continue;
+      const ti = idx(nx, ny);
+      const t = S.world.tiles[ti];
+      if (t.ownerId || t.type === "castle" || t.type === "holy") continue;
+      if (t.level > ai.castleLevel + 1) continue; // 分不相応なタイルは取らない
+      candidates.push(ti);
+    }
+  }
+  if (candidates.length) {
+    const ti = pick(candidates);
+    S.world.tiles[ti].ownerId = ai.id;
+    ai.ownedTiles.push(ti);
+  }
+}
+function aiGrow(ai) {
+  if (ai.castleLevel < 10) {
+    ai.castleLevel++;
+    S.world.tiles[idx(ai.x, ai.y)].level = ai.castleLevel;
+  }
+}
+function aiTickAll(t) {
+  for (const ai of S.aiUsers) {
+    if (t < ai.nextActionAt) continue;
+    const [lo, hi] = AI_ACTION_INTERVALS[ai.personality];
+    ai.nextActionAt = t + randInt(lo, hi) * 1000;
+    if (ai.personality === "expander") aiExpand(ai);
+    else if (ai.personality === "turtle") aiGrow(ai);
+    else Math.random() < 0.5 ? aiExpand(ai) : aiGrow(ai);
+  }
+}
+
+/* =====================================================================
+ * [S13] UI: PANELS — 各タブのDOM描画
+ * 描画方針: 毎秒 renderHeader + アクティブタブのみ再描画。
+ * 同盟タブはselect操作を壊さないよう、イベント時のみ再描画。
+ * ===================================================================*/
+let activeTab = "map";
+
+function renderHeader() {
+  const cap = getStorageCap();
+  const per = getProdPerHour();
+  $("header").innerHTML =
+    RES_KEYS.map(k =>
+      `<span class="res">${RES_DEFS[k].emoji}<b>${fmt(S.player.resources[k])}</b></span>`).join("") +
+    `<span class="res">💎<b>${fmt(S.player.diamonds)}</b> <span class="dim small">+${fmt(per.diamonds)}/h</span></span>`;
+}
+
+function renderCity() {
+  const t = now();
+  const rows = S.player.buildings.map(b => {
+    const def = BUILDING_DEFS[b.type];
+    let action;
+    if (b.upgradeEndsAt) {
+      action = `<button disabled>⏳ ${fmtSec((b.upgradeEndsAt - t) / 1000)}</button>`;
+    } else if (b.level >= def.maxLevel) {
+      action = `<button disabled>MAX</button>`;
+    } else {
+      const cost = getUpgradeCost(b);
+      const gated = b.type !== "castle" && b.level >= S.player.castleLevel;
+      action = `<button class="primary" ${(!canAfford(cost) || gated) ? "disabled" : ""}
+        onclick="UIA.upgrade('${b.type}')">⬆ ${fmtCost(cost)}<br><span class="small">${fmtSec(getUpgradeTimeSec(b))}${gated ? " / 要本城Lv" + (b.level + 1) : ""}</span></button>`;
+    }
+    const prod = def.prodType ? `${RES_DEFS[def.prodType].emoji}${fmt(def.prodBase * b.level)}/h` : def.desc;
+    return `<div class="panel row">
+      <div style="font-size:28px">${artHTML(def.imageKey, def.emoji)}</div>
+      <div class="grow"><b>${def.name}</b> <span class="dim">Lv${b.level}</span><div class="dim small">${prod}</div></div>
+      ${action}</div>`;
+  }).join("");
+  const per = getProdPerHour();
+  $("page-city").innerHTML = `
+    <div class="panel"><h3>🏯 本城 Lv${S.player.castleLevel} ｜ 部隊戦力 ${fmt(getArmyPower())}</h3>
+      <div class="dim small">毎時: ${RES_KEYS.map(k => RES_DEFS[k].emoji + fmt(per[k])).join(" ")} 💎${fmt(per.diamonds)}
+      ｜ 倉庫容量 ${fmt(getStorageCap())}</div></div>
+    ${rows}
+    <div class="panel"><h3>⚙️ 設定</h3>
+      <button class="danger" onclick="UIA.reset()">セーブデータをリセット</button></div>`;
+}
+
+function renderCards() {
+  // defIdごとにグルーピングして枚数表示
+  const counts = {};
+  for (const c of S.player.cards) counts[c.defId] = (counts[c.defId] || 0) + 1;
+  const order = { SSR: 0, SR: 1, R: 2, N: 3 };
+  const defs = Object.keys(counts).map(id => CARD_BY_ID[id])
+    .sort((a, b) => order[a.rarity] - order[b.rarity] || cardPower(b.id) - cardPower(a.id));
+  const cards = defs.map(d => `
+    <div class="unit-card rar-${d.rarity}">
+      <span class="rarity">${d.rarity}</span>
+      <div class="art">${artHTML(d.imageKey, d.emoji)}</div>
+      <b>${d.name}</b> <span class="dim small">×${counts[d.id]}</span>
+      <div class="dim small">武${d.atk} 知${d.int} 統${d.lead} ｜ 戦力${cardPower(d.id)}</div>
+    </div>`).join("");
+  $("page-cards").innerHTML = `
+    <div class="panel"><h3>🎴 所持カード ${S.player.cards.length}枚</h3>
+      <div class="dim small">出撃編成: 戦力上位${CONFIG.ARMY_TOP_CARDS}枚を自動採用 ｜ 部隊戦力 ${fmt(getArmyPower())}</div></div>
+    <div class="card-grid">${cards || '<div class="dim">カードなし</div>'}</div>`;
+}
+
+let lastGachaResults = [];
+function renderGacha() {
+  const g = S.player.gacha;
+  const rates = Object.entries(CONFIG.GACHA_RATES)
+    .map(([r, p]) => `<tr><td>${r}</td><td>${(p * 100).toFixed(0)}%</td></tr>`).join("");
+  const results = lastGachaResults.map(d => `
+    <div class="unit-card rar-${d.rarity}">
+      <span class="rarity">${d.rarity}</span>
+      <div class="art">${artHTML(d.imageKey, d.emoji)}</div>
+      <b>${d.name}</b></div>`).join("");
+  $("page-gacha").innerHTML = `
+    <div class="panel"><h3>💎 ガチャ（所持 ${fmt(S.player.diamonds)}）</h3>
+      <div class="row" style="margin:8px 0">
+        <button class="primary grow" onclick="UIA.gacha(1)">単発 💎${CONFIG.GACHA_COST_SINGLE}</button>
+        <button class="primary grow" onclick="UIA.gacha(10)">10連 💎${CONFIG.GACHA_COST_TEN}</button>
+      </div>
+      <div class="dim small">天井: あと${CONFIG.GACHA_PITY_SSR - g.sinceSSR}連でSSR確定 ｜ 10連はSR以上1枚保証 ｜ 累計${g.total}連</div>
+      <table class="rate-table"><tr>${rates}</tr></table></div>
+    <div id="gachaResult">${results ? `<div class="panel"><h3>✨ 排出結果</h3><div class="card-grid">${results}</div></div>` : ""}</div>
+    <div class="panel"><h3>🖼️ 画像取り込み（開発用）</h3>
+      <div class="dim small" style="margin-bottom:6px">imageKey を指定して画像を登録すると絵文字の代わりに表示されます</div>
+      <div class="row"><input id="assetKey" placeholder="例: card_ssr_tenba" style="flex:1;padding:6px;background:var(--bg3);border:1px solid var(--line);border-radius:6px;color:var(--fg)">
+      <input type="file" id="assetFile" accept="image/*" style="display:none">
+      <button onclick="UIA.importAsset()">選択</button></div></div>`;
+}
+
+function renderAlliance() {
+  const memberRows = S.alliance.members.map(m => {
+    const isPlayer = m.id === "player";
+    const ai = S.aiUsers.find(a => a.id === m.id);
+    const name = isPlayer ? "あなた" : (ai ? ai.name : m.id);
+    const lv = isPlayer ? S.player.castleLevel : (ai ? ai.castleLevel : "?");
+    const roleUI = isPlayer ? `<b>盟主</b>` :
+      `<select onchange="UIA.setRole('${m.id}', this.value)">
+        ${ASSIGNABLE_ROLES.map(r => `<option ${r === m.role ? "selected" : ""}>${r}</option>`).join("")}</select>`;
+    return `<div class="panel row"><div class="grow"><b>${name}</b> <span class="dim">城Lv${lv}</span></div>${roleUI}</div>`;
+  }).join("");
+  const buffs = getAllianceBuffs();
+  const buffText = [
+    buffs.power ? `戦力+${Math.round((buffs.power - 1) * 100)}%` : null,
+    buffs.prod ? `生産+${Math.round((buffs.prod - 1) * 100)}%` : null,
+    buffs.speed ? `行軍+${Math.round((buffs.speed - 1) * 100)}%` : null,
+  ].filter(Boolean).join(" ") || "なし";
+  const roleHelp = ASSIGNABLE_ROLES.filter(r => r !== "一般")
+    .map(r => `<div class="small dim">${r}: ${ROLE_DEFS[r].desc}</div>`).join("");
+  $("page-alliance").innerHTML = `
+    <div class="panel"><h3>🤝 ${S.alliance.name}（${S.alliance.members.length}名）</h3>
+      <div class="dim small">発動中バフ: ${buffText}</div>${roleHelp}</div>
+    ${memberRows}
+    <div class="panel dim small">マップ上の🏯（勧誘可マーク付き）をタップすると勧誘できます。<br>
+    勧誘コスト: 🌾${CONFIG.RECRUIT_FOOD_COST} ｜ 成功率は自城とAI城のレベル差で変動</div>`;
+}
+
+/* =====================================================================
+ * [S14] UI: MAP CANVAS — 描画・パン/ズーム/タップ
+ * ===================================================================*/
+const MapView = {
+  canvas: null, ctx: null,
+  zoom: 1,               // 1 = 基準タイルサイズ22px
+  baseTile: 22,
+  offsetX: 0, offsetY: 0, // マップ原点の画面座標(px)
+  get tilePx() { return this.baseTile * this.zoom; },
+
+  init() {
+    this.canvas = $("mapCanvas");
+    this.ctx = this.canvas.getContext("2d");
+    this.pendingCenter = [CENTER, CENTER]; // 初回の有効サイズ確定時に自城へ中心合わせ
+    this.fit();
+    window.addEventListener("resize", () => { this.fit(); this.draw(); });
+    // --- パン＆タップ（Pointer Events） ---
+    let down = null, moved = false;
+    this.canvas.addEventListener("pointerdown", e => { down = { x: e.clientX, y: e.clientY, ox: this.offsetX, oy: this.offsetY }; moved = false; });
+    this.canvas.addEventListener("pointermove", e => {
+      if (!down) return;
+      const dx = e.clientX - down.x, dy = e.clientY - down.y;
+      if (Math.abs(dx) + Math.abs(dy) > 8) moved = true;
+      if (moved) { this.offsetX = down.ox + dx; this.offsetY = down.oy + dy; this.draw(); }
+    });
+    this.canvas.addEventListener("pointerup", e => {
+      if (down && !moved) this.tap(e.clientX, e.clientY);
+      down = null;
+    });
+    this.canvas.addEventListener("pointercancel", () => { down = null; });
+    $("zoomIn").onclick = () => { this.setZoom(this.zoom * 1.3); };
+    $("zoomOut").onclick = () => { this.setZoom(this.zoom / 1.3); };
+    $("zoomHome").onclick = () => { this.centerOn(CENTER, CENTER); this.draw(); };
+  },
+  fit() {
+    const r = this.canvas.parentElement.getBoundingClientRect();
+    const dpr = window.devicePixelRatio || 1;
+    this.canvas.width = r.width * dpr;
+    this.canvas.height = r.height * dpr;
+    this.ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    this.vw = r.width; this.vh = r.height;
+    // 起動直後はレイアウト未確定で幅0のことがある。初回の有効サイズで中心合わせ
+    if (this.pendingCenter && this.vw > 0) {
+      this.centerOn(this.pendingCenter[0], this.pendingCenter[1]);
+      this.pendingCenter = null;
+    }
+  },
+  setZoom(z) {
+    // 画面中央を基準にズーム
+    const cx = this.vw / 2, cy = this.vh / 2;
+    const wx = (cx - this.offsetX) / this.tilePx, wy = (cy - this.offsetY) / this.tilePx;
+    this.zoom = clamp(z, 0.4, 3);
+    this.offsetX = cx - wx * this.tilePx;
+    this.offsetY = cy - wy * this.tilePx;
+    this.draw();
+  },
+  centerOn(x, y) {
+    this.offsetX = this.vw / 2 - (x + 0.5) * this.tilePx;
+    this.offsetY = this.vh / 2 - (y + 0.5) * this.tilePx;
+  },
+  tap(cx, cy) {
+    const rect = this.canvas.getBoundingClientRect();
+    const x = Math.floor((cx - rect.left - this.offsetX) / this.tilePx);
+    const y = Math.floor((cy - rect.top - this.offsetY) / this.tilePx);
+    if (inBounds(x, y)) openTileSheet(idx(x, y));
+  },
+  draw() {
+    if (!S) return;
+    const ctx = this.ctx, ts = this.tilePx;
+    ctx.clearRect(0, 0, this.vw, this.vh);
+    // 可視範囲のタイルのみ描画
+    const x0 = clamp(Math.floor(-this.offsetX / ts), 0, SIZE - 1);
+    const y0 = clamp(Math.floor(-this.offsetY / ts), 0, SIZE - 1);
+    const x1 = clamp(Math.ceil((this.vw - this.offsetX) / ts), 0, SIZE);
+    const y1 = clamp(Math.ceil((this.vh - this.offsetY) / ts), 0, SIZE);
+    ctx.font = `${Math.floor(ts * 0.62)}px sans-serif`;
+    ctx.textAlign = "center"; ctx.textBaseline = "middle";
+    for (let y = y0; y < y1; y++) {
+      for (let x = x0; x < x1; x++) {
+        const t = S.world.tiles[idx(x, y)];
+        const px = this.offsetX + x * ts, py = this.offsetY + y * ts;
+        // 地色（レベルが高いほど明るく）
+        ctx.fillStyle = TILE_DEFS[t.type].color;
+        ctx.fillRect(px, py, ts - 1, ts - 1);
+        if (t.level > 1 && t.type !== "castle") {
+          ctx.fillStyle = `rgba(255,255,255,${(t.level - 1) * 0.045})`;
+          ctx.fillRect(px, py, ts - 1, ts - 1);
+        }
+        // 所有者の縁取り
+        if (t.ownerId) {
+          ctx.strokeStyle = t.ownerId === "player" ? "#e8b84a" :
+            (S.aiUsers.find(a => a.id === t.ownerId) || {}).color || "#888";
+          ctx.lineWidth = 2;
+          ctx.strokeRect(px + 1, py + 1, ts - 3, ts - 3);
+        }
+        // アイコン（ズームが小さい時は省略）
+        if (ts >= 13 && TILE_DEFS[t.type].emoji) {
+          ctx.fillStyle = "#fff";
+          ctx.fillText(TILE_DEFS[t.type].emoji, px + ts / 2, py + ts / 2 + 1);
+        }
+      }
+    }
+    // 出兵ラインと部隊ドット
+    const t0 = now();
+    for (const m of S.player.marches) {
+      const tt = S.world.tiles[m.targetIdx];
+      const sx = this.offsetX + (CENTER + 0.5) * ts, sy = this.offsetY + (CENTER + 0.5) * ts;
+      const ex = this.offsetX + (tt.x + 0.5) * ts, ey = this.offsetY + (tt.y + 0.5) * ts;
+      const p = clamp((t0 - m.departAt) / (m.arriveAt - m.departAt), 0, 1);
+      ctx.strokeStyle = "rgba(232,184,74,.6)"; ctx.lineWidth = 2;
+      ctx.setLineDash([6, 4]);
+      ctx.beginPath(); ctx.moveTo(sx, sy); ctx.lineTo(ex, ey); ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.fillStyle = "#e8b84a";
+      ctx.beginPath(); ctx.arc(sx + (ex - sx) * p, sy + (ey - sy) * p, 5, 0, Math.PI * 2); ctx.fill();
+    }
+    // 情報バー
+    const march = S.player.marches[0];
+    $("mapInfo").textContent = march
+      ? `⚔️ 出兵中… 到着まで ${fmtSec((march.arriveAt - t0) / 1000)}`
+      : `領地 ${S.player.ownedTiles.length}枚 ｜ 戦力 ${fmt(getArmyPower())} ｜ タイルをタップで詳細`;
+  },
+};
+
+/** タイル詳細ボトムシートを開く */
+function openTileSheet(ti) {
+  const t = S.world.tiles[ti];
+  const td = TILE_DEFS[t.type];
+  const ai = t.ownerId && t.ownerId !== "player" ? S.aiUsers.find(a => a.id === t.ownerId) : null;
+  const ownerText = t.ownerId === "player" ? "あなたの領地" : ai ? `${ai.name} の領地` : "未所有";
+  let body = `<h3>${td.emoji} ${td.name} Lv${t.level} <span class="dim small">(${t.x}, ${t.y})</span></h3>
+    <div class="dim small">${ownerText}</div>`;
+  const actions = [];
+  if (t.type === "castle" && ai) {
+    // AI城: 勧誘UI
+    body += `<div class="small" style="margin-top:6px">城Lv${ai.castleLevel} ｜ 性格: ${
+      { expander: "拡張志向", balanced: "バランス型", turtle: "内政重視" }[ai.personality]}
+      ｜ ${ai.allianceId ? "🤝 同盟員" : ai.recruitable ? "✅ 勧誘可能" : "❌ 勧誘不可"}</div>`;
+    if (ai.recruitable && !ai.allianceId) {
+      actions.push(`<button class="primary" onclick="UIA.recruit('${ai.id}')">🤝 勧誘する（🌾${CONFIG.RECRUIT_FOOD_COST}）</button>`);
+    }
+  } else if (t.ownerId === "player" && t.type !== "castle") {
+    actions.push(`<button class="danger" onclick="UIA.abandon(${ti})">🏳️ 放棄する</button>`);
+  } else if (t.ownerId !== "player" && t.type !== "castle") {
+    const def = getTileDefense(ti);
+    const power = getArmyPower();
+    const resInfo = RES_KEYS.includes(t.type)
+      ? `制圧すると ${RES_DEFS[t.type].emoji}+${fmt(CONFIG.TILE_PROD_PER_LEVEL_PER_HOUR * t.level)}/h`
+      : t.type === "holy" ? "🎉 制圧すると勝利条件達成！" : "制圧すると領地が広がる";
+    body += `<div class="small" style="margin-top:6px">防御力 ${fmt(def)} ｜ 自軍戦力 ${fmt(power)} ${power >= def ? "✅" : "⚠️戦力不足"}<br>${resInfo}<br>💎ボーナス +${CONFIG.DIAMOND_CAPTURE_BONUS_PER_LEVEL * t.level}</div>`;
+    actions.push(`<button class="primary" onclick="UIA.march(${ti})">⚔️ 出兵する（🌾${CONFIG.MARCH_FOOD_COST}）</button>`);
+  }
+  actions.push(`<button onclick="closeSheet()">閉じる</button>`);
+  $("sheet").innerHTML = body + `<div class="actions">${actions.join("")}</div>`;
+  $("sheet").classList.add("open");
+}
+function closeSheet() { $("sheet").classList.remove("open"); }
+
+/* =====================================================================
+ * [S15] UI: ACTIONS — ボタンonclickから呼ばれる操作群
+ * 命名規約: UIA.動詞。エラー文字列はトーストで表示。
+ * ===================================================================*/
+const UIA = {
+  upgrade(type) {
+    const err = startUpgrade(type);
+    if (err) toast("⚠️ " + err);
+    renderCity(); renderHeader();
+  },
+  march(ti) {
+    const err = startMarch(ti);
+    if (err) toast("⚠️ " + err); else toast("⚔️ 出兵しました");
+    closeSheet(); MapView.draw(); renderHeader();
+  },
+  abandon(ti) {
+    const err = abandonTile(ti);
+    if (err) toast("⚠️ " + err); else toast("🏳️ 放棄しました");
+    closeSheet(); MapView.draw();
+  },
+  recruit(aiId) {
+    const err = recruitAI(aiId);
+    if (err) toast("⚠️ " + err);
+    closeSheet(); renderHeader();
+  },
+  gacha(count) {
+    const results = doGacha(count);
+    if (!results) { toast("⚠️ ダイヤが足りません"); return; }
+    lastGachaResults = results;
+    const best = results.some(c => c.rarity === "SSR") ? "🌟SSR!!" : results.some(c => c.rarity === "SR") ? "✨SR!" : "";
+    toast(`🎰 ${count}連ガチャ ${best}`);
+    renderGacha(); renderHeader();
+  },
+  setRole(memberId, role) {
+    setMemberRole(memberId, role);
+    toast(`役職を ${role} に変更しました`);
+    renderAlliance();
+  },
+  reset() {
+    if (confirm("セーブデータを完全に削除して最初からやり直しますか？")) resetGame();
+  },
+  importAsset() {
+    const key = $("assetKey").value.trim();
+    if (!key) { toast("⚠️ imageKey を入力してください"); return; }
+    const input = $("assetFile");
+    input.onchange = async () => {
+      if (input.files[0]) {
+        await AssetDB.put(key, input.files[0]);
+        toast(`🖼️ ${key} に画像を登録しました`);
+        renderActiveTab();
+      }
+    };
+    input.click();
+  },
+};
+
+/* =====================================================================
+ * [S16] GAME LOOP & BOOT
+ * ===================================================================*/
+function renderActiveTab() {
+  if (activeTab === "map") MapView.draw();
+  else if (activeTab === "city") renderCity();
+  else if (activeTab === "cards") renderCards();
+  else if (activeTab === "gacha") renderGacha();
+  else if (activeTab === "alliance") renderAlliance();
+}
+function switchTab(tab) {
+  activeTab = tab;
+  document.querySelectorAll(".tab-page").forEach(p => p.classList.toggle("active", p.id === "page-" + tab));
+  document.querySelectorAll("#tabbar button").forEach(b => b.classList.toggle("active", b.dataset.tab === tab));
+  closeSheet();
+  if (tab === "map") MapView.fit();
+  renderActiveTab();
+}
+
+/* tickの全再描画がタップ中のボタンを破壊して click を飲み込むのを防ぐ:
+ * ポインタが押されている間は再描画をスキップする（clickはpointerupの直後に
+ * 発火し、次のtickまでDOMは無傷なので取りこぼさない） */
+let pointerHeld = false;
+window.addEventListener("pointerdown", () => { pointerHeld = true; }, true);
+window.addEventListener("pointerup", () => { pointerHeld = false; }, true);
+window.addEventListener("pointercancel", () => { pointerHeld = false; }, true);
+
+/** メインtick（1秒ごと）。dtは実測で計算するためタブ復帰時も破綻しない */
+function tick() {
+  const t = now();
+  const dtSec = clamp((t - S.lastTickAt) / 1000, 0, CONFIG.OFFLINE_CAP_HOURS * 3600);
+  S.lastTickAt = t;
+  applyEconomy(dtSec);
+  finishUpgrades(t);
+  resolveMarches(t);
+  aiTickAll(t);
+  renderHeader();
+  // 同盟タブはselect操作保護のため、またタップ中はclick保護のため再描画しない
+  if (activeTab !== "alliance" && !pointerHeld) renderActiveTab();
+}
+
+async function boot() {
+  await AssetDB.open();
+  await AssetDB.loadAll();
+  S = loadGame() || newGameState();
+  if (S.flags.holyWon) $("winBanner").classList.add("show");
+  MapView.init();
+  grantOfflineGains();
+  S.lastTickAt = now();
+  renderHeader();
+  MapView.draw();
+  // タブバー
+  document.querySelectorAll("#tabbar button").forEach(b => b.onclick = () => switchTab(b.dataset.tab));
+  // ループ＆自動保存
+  setInterval(tick, CONFIG.TICK_MS);
+  setInterval(saveGame, CONFIG.AUTOSAVE_MS);
+  document.addEventListener("visibilitychange", () => { if (document.hidden) saveGame(); });
+  // Service Worker（http(s)配信時のみ。file://ではスキップ）
+  if ("serviceWorker" in navigator && location.protocol.startsWith("http")) {
+    navigator.serviceWorker.register("./sw.js").catch(e => console.warn("SW registration failed", e));
+  }
+}
+boot();
+</script>
+</body>
+</html>
