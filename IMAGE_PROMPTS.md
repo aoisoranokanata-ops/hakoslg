@@ -94,9 +94,28 @@ Building: {下記}
 - bld_lab（研究所／研究） — a scholar's study pavilion with unfurled scrolls, a brass armillary sphere and warm glowing paper lanterns, indigo-and-gold accents
 - bld_warehouse（倉庫／保管容量） — a Japanese kura storehouse with white plaster walls, a black tiled roof and a heavy wooden door, stacked rice-straw sacks, barrels and wooden crates beside it
 
-**納品**: 透過PNG 4枚を imageKey 名で（`bld_sawmill.png` / `bld_quarry.png` / `bld_lab.png` / `bld_warehouse.png`）。
-取り込みはガチャタブ「🖼️ 画像取り込み」でキー指定 → IndexedDB保存（オリジン単位）。
-全オリジンで初回から表示させたい場合は base64 埋め込み（未実装#11）をClaude側で実施する。
+**納品**: 透過PNG 8枚を imageKey 名で（`bld_castle.png` 等）。Lv1基本アートは全8棟実装・公開済み。
+
+### ティア2/3（育った外観・imageKey: bld_<type>_t2 / _t3）
+
+建物は Lv6 で**ティア2**、Lv11 で**ティア3**に外観が育つ（`artTierKey` が自動で切替。素材が無ければ基本アートにフォールバック）。
+- **共通仕様は Lv1 と同一**（256px・透過・アイソメ3/4・上手前光・**Lv1の同建物を参照画像として必ず添付**）
+- **同じ建物の成長**として描く。シルエットの家系を保ちつつ、t2=増築・材質向上・付帯物追加、t3=最も壮麗（金装飾・幟・規模最大）
+- ゲーム内で t1→t2→t3 が並ぶので、**一目で「育った」と分かる差**をつける（サイズ感・要素数・豪華さ）
+
+| type | ティア2（Lv6 / _t2） | ティア3（Lv11 / _t3） |
+|---|---|---|
+| castle 本城 | 天守が高くなり外壁と門を追加、幟を数本 | 金の装飾の壮大な城郭、複数の櫓と大幟、石垣 |
+| farm 農場 | 母屋が大きくなり水車小屋と棚田を増設 | 蔵付きの豪農屋敷、風車、広大な黄金の田 |
+| sawmill 伐採所 | 建屋拡大・水車2連・製材ピットと丸太増 | 大型製材所、複数水車、木材クレーンと大量の材木 |
+| quarry 採石場 | 採掘段が深くなり大型クレーンと運搬車 | 石切り足場を組んだ大採石場、複数クレーン |
+| ironmine 製鉄所 | 炉が大きくなり鞴（ふいご）と鉱石トロッコ | 煙突の並ぶ大溶鉱炉、赤熱する溶けた鉄 |
+| barracks 兵舎 | 塀と物見櫓、訓練用の的を追加 | 砦の駐屯地、柵と複数の軍旗、武器庫 |
+| lab 研究所 | 二層になり天体観測台と望遠鏡を追加 | 壮大な学問所の塔、大型渾天儀と多数の提灯 |
+| warehouse 倉庫 | 蔵が大きくなり荷積み場と物資を増設 | 複数棟の大蔵群、荷役クレーン |
+
+**納品**: 透過PNG（256px）を imageKey 名で。最大16枚（8棟×t2/t3）。
+一度に全部でなくてよく、**t2を8棟 → 次にt3を8棟**のように分割納品も可。届いた分から Claude が `art/` へ入れ `tools/embed_art.py` で埋め込み反映する。
 
 ## 3. 資源アイコン（1:1、imageKey: res_*）※コード側は現状絵文字。将来差し替え用
 
