@@ -232,6 +232,7 @@ select{font:inherit;color:var(--fg);background:var(--bg3);border:1px solid var(-
  * [S01] CONFIG — 全バランス定数
  * ===================================================================*/
 const CONFIG = {
+  DEV_MODE: false,                      // trueで開発用UI（ガチャタブの画像取り込み等）を表示
   SAVE_KEY: "hakoslg_save_v1",          // localStorageキー（名前空間 hakoslg_）
   ASSET_DB: "hakoslg_assets",           // IndexedDB名（画像アセット）
   SAVE_VERSION: 4,                     // v4: AIに loyalty、S.incident を追加
@@ -410,7 +411,7 @@ const CARD_BY_ID = Object.fromEntries(CARD_POOL.map(c => [c.id, c]));
 /** 役職定義。buff は getAllianceBuffs() が参照する乗数。 */
 const ROLE_DEFS = {
   "盟主": { desc: "同盟の長（プレイヤー固定）", buff: {} },
-  "軍師": { desc: "研究バフ（研究ツリー実装後に有効化予定）", buff: {} },
+  "軍師": { desc: "軍略の補佐（現在は効果なし）", buff: {} }, // TODO: 研究ツリー実装時にバフを付与
   "将軍": { desc: "部隊戦力 +10%",   buff: { power: 1.10 } },
   "都督": { desc: "全資源生産 +10%", buff: { prod: 1.10 } },
   "斥候": { desc: "行軍速度 +20%",   buff: { speed: 1.20 } },
@@ -1781,11 +1782,11 @@ function renderGacha() {
       <div class="dim small">天井: あと${CONFIG.GACHA_PITY_SSR - g.sinceSSR}連でSSR確定 ｜ 10連はSR以上1枚保証 ｜ 累計${g.total}連</div>
       <table class="rate-table"><tr>${rates}</tr></table></div>
     <div id="gachaResult">${results ? `<div class="panel"><h3>✨ 排出結果</h3><div class="card-grid">${results}</div></div>` : ""}</div>
-    <div class="panel"><h3>🖼️ 画像取り込み（開発用）</h3>
+    ${CONFIG.DEV_MODE ? `<div class="panel"><h3>🖼️ 画像取り込み（開発用）</h3>
       <div class="dim small" style="margin-bottom:6px">imageKey を指定して画像を登録すると絵文字の代わりに表示されます</div>
       <div class="row"><input id="assetKey" placeholder="例: card_ssr_tenba" style="flex:1;padding:6px;background:var(--bg3);border:1px solid var(--line);border-radius:6px;color:var(--fg)">
       <input type="file" id="assetFile" accept="image/*" style="display:none">
-      <button onclick="UIA.importAsset()">選択</button></div></div>`;
+      <button onclick="UIA.importAsset()">選択</button></div></div>` : ""}`;
 }
 
 /* 同盟タブは毎tickの全再構築を避ける（役職selectと入力中テキストを壊すため）。
