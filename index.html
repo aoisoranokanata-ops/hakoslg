@@ -262,7 +262,7 @@ const CONFIG = {
   DEV_MODE: false,                      // trueで開発用UI（ガチャタブの画像取り込み等）を表示
   SAVE_KEY: "hakoslg_save_v1",          // localStorageキー（名前空間 hakoslg_）
   ASSET_DB: "hakoslg_assets",           // IndexedDB名（画像アセット）
-  SAVE_VERSION: 6,                     // v6: 初陣指南 S.tutorial を追加
+  SAVE_VERSION: 7,                     // v7: 地形ワールド（world.version/ruleset/playerStart）
   LOG_MAX: 30,                         // 保持する出来事ログの最大件数
 
   // --- 初陣指南（[S15A]。最初の約1分でコアループを1周させる導線） ---
@@ -294,7 +294,23 @@ const CONFIG = {
   IGNORE_LOYALTY_PENALTY: 22,          // 放置した時の追加低下
   LOYALTY_LEAVE_THRESHOLD: 12,         // これを下回ると自主脱退
 
-  WORLD_SIZE: 40,                       // 40x40 グリッド
+  WORLD_SIZE: 40,                       // 40x40 グリッド（地形導入後も維持。idx計算と既存座標系の互換のため）
+
+  // --- 地形ワールド（[S05]。山河で三地方に分かれ、中央の皇都を目指す） ---
+  WORLD_LAYOUT_VERSION: 2,              // 新規生成するワールドの版
+  WORLD_RULESET: "three_realms_v2",     // 勝利条件の系統（旧セーブは "legacy_v1"）
+  PLAYER_START_X: 20, PLAYER_START_Y: 34, // 新ワールドのプレイヤー本城（南方地方）
+  CAPITAL_X: 20, CAPITAL_Y: 20,         // 皇都（最終目標）
+  PORT_LEVEL: 4, PORT_DEF: 700,         // 埠頭: 川を渡る唯一の地点
+  GATE_LEVEL: 6, GATE_DEF: 1500,        // 関所: 皇都州への3つの入口。中盤の壁
+  CAPITAL_LEVEL: 10, CAPITAL_DEF: 4000, // 皇都: 制圧で勝利
+  CAPITAL_RESOURCE_MIN_LV: 8,           // 皇都州の資源レベル下限
+  CAPITAL_RESOURCE_MAX_LV: 10,          // 同上限（通常地域はLv5まで）
+  CAPITAL_RESOURCE_COUNT: 12,           // 皇都州に配置する高レベル資源の枚数
+  AI_REGION_COUNTS: { nw: 4, ne: 4, south: 2 }, // AI10勢力の三地方への配分
+  AI_CAN_CAPTURE_PORT: false,           // V1ではAIは地域境界を越えない
+  AI_CAN_CAPTURE_GATE: false,
+  AI_CAN_CAPTURE_CAPITAL: false,
   TICK_MS: 1000,                        // ゲームtick間隔
   AUTOSAVE_MS: 10000,                   // 自動保存間隔
   OFFLINE_CAP_HOURS: 12,                // オフライン収益の上限時間
@@ -474,7 +490,21 @@ const TILE_DEFS = {
   iron:  { name: "鉄鉱", color: "#39344a", emoji: "⚙️" },
   holy:  { name: "聖地", color: "#4a2a4a", emoji: "⛩️" },
   castle:{ name: "城",   color: "#4a2a2a", emoji: "🏯" },
+  // --- 地形（[S05]）。mountain/river は「防御が高い」のではなく出兵対象にならない ---
+  // 色は縮小表示でも地形が読めるよう、資源地(暗色)とはっきり差をつける
+  mountain:{ name: "険山", color: "#736758", emoji: "⛰️", blocked: true,
+             desc: "峻険な山々が行軍を阻む。ここを越えることはできない。" },
+  river:   { name: "大河", color: "#1b4b7d", emoji: "🌊", blocked: true,
+             desc: "急流のため渡河できない。埠頭を確保し、渡河路を開け。" },
+  port:    { name: "埠頭", color: "#2f7ba8", emoji: "⚓",
+             desc: "対岸へ兵を渡すための要衝。ここを押さえれば、大河の向こうへ進軍できる。" },
+  gate:    { name: "関所", color: "#8a4a22", emoji: "🛡️",
+             desc: "山河の狭間を守る堅牢な要塞。この関を破らぬ限り、先へは進めない。" },
+  capital: { name: "皇都", color: "#8a6a18", emoji: "👑",
+             desc: "天下の中心にして最大の要衝。この地を制する者が、天下を制する。" },
 };
+/** 通行できない地形か（山・川）。出兵対象にもならない */
+const isBlockedType = type => !!(TILE_DEFS[type] && TILE_DEFS[type].blocked);
 
 /* =====================================================================
  * [S03] UTILS
@@ -573,6 +603,15 @@ function migrateSave(data) {
       : { version: CONFIG.TUTORIAL_VERSION, introSeen: true,
           didTenPull: ((p.gacha && p.gacha.total) || 0) >= CONFIG.TUTORIAL_GACHA_COUNT, completedAt: now() };
   }
+  // v6 → v7: 地形ワールドの導入。既存ワールドは旧ルールのまま遊べるようにし、tiles[] には一切触らない
+  if (data.world && data.world.version == null) {
+    data.world.version = 1;
+    data.world.ruleset = "legacy_v1";
+    data.world.playerStart = { x: CENTER, y: CENTER }; // 旧ワールドの本城は中心
+    data.world.capitalIdx = null;
+  }
+  if (data.flags && data.flags.capitalWon == null) data.flags.capitalWon = false;
+  for (const ai of (data.aiUsers || [])) if (ai.regionId === undefined) ai.regionId = null;
   data.version = CONFIG.SAVE_VERSION;
   return data;
 }
@@ -681,72 +720,222 @@ const SIZE = CONFIG.WORLD_SIZE;
 const idx = (x, y) => y * SIZE + x;
 const inBounds = (x, y) => x >= 0 && y >= 0 && x < SIZE && y < SIZE;
 const chebyshev = (x1, y1, x2, y2) => Math.max(Math.abs(x1 - x2), Math.abs(y1 - y2));
-const CENTER = Math.floor(SIZE / 2); // プレイヤー本城座標 (20,20)
+const CENTER = Math.floor(SIZE / 2); // 旧ワールドのプレイヤー本城座標 (20,20)
+
+/** プレイヤー本城の座標。旧ワールドは(20,20)、地形ワールドは world.playerStart */
+function getPlayerStart() {
+  const ps = S && S.world && S.world.playerStart;
+  return ps ? ps : { x: CENTER, y: CENTER };
+}
+/** プレイヤー本城のタイルindex */
+function playerStartIdx() { const p = getPlayerStart(); return idx(p.x, p.y); }
+
+/** 2点を結ぶ直線上のセル列（ブレゼンハム） */
+function lineCells(x0, y0, x1, y1) {
+  const cells = [];
+  const dx = Math.abs(x1 - x0), dy = Math.abs(y1 - y0);
+  const sx = x0 < x1 ? 1 : -1, sy = y0 < y1 ? 1 : -1;
+  let err = dx - dy, x = x0, y = y0;
+  for (let guard = 0; guard < 4000; guard++) {
+    cells.push([x, y]);
+    if (x === x1 && y === y1) break;
+    const e2 = 2 * err;
+    if (e2 > -dy) { err -= dy; x += sx; }
+    if (e2 < dx) { err += dx; y += sy; }
+  }
+  return cells;
+}
 
 /**
- * World.tiles を生成。tile = { x, y, type, level, ownerId }
- *  - level: 中心からの距離帯で1〜5（外周ほど高い）。聖地は6。
- *  - 聖地: 四隅付近に4箇所。いずれか1つの領有が勝利条件。
+ * World.tiles を生成（地形ワールド v2）。tile = { x, y, type, level, ownerId }
+ *
+ * 「固定骨格＋ランダム資源」方式:
+ *   - 山脈・大河・埠頭・関所・皇都州・開始地点は毎回同じ（地政学を保証する）
+ *   - 資源の種類と配置、同帯域内のLv差、AI城の細かい位置はランダム
+ * 完全ランダムだと「関所を無視して横から回り込める」事故が必ず起きるため。
+ *
+ * 地勢:
+ *   北西 ←(埠頭)→ 北東   … 縦の大河 x=20,y=0..15 で分断
+ *   北西 ←(関所)→ 南方   … 南西へ走る山脈で分断
+ *   北東 ←(埠頭)→ 南方   … 南東へ走る大河で分断
+ *   中央の皇都州へは 北西関/北東関/南関 の3つの入口のみ
  */
 function generateWorld() {
+  const PS = { x: CONFIG.PLAYER_START_X, y: CONFIG.PLAYER_START_Y };
+  const CX = CONFIG.CAPITAL_X, CY = CONFIG.CAPITAL_Y;
   const tiles = [];
+  // 1) ベース: プレイヤー本城からの距離帯でLv1〜5、資源はランダム
   for (let y = 0; y < SIZE; y++) {
     for (let x = 0; x < SIZE; x++) {
-      const d = chebyshev(x, y, CENTER, CENTER);
+      const d = chebyshev(x, y, PS.x, PS.y);
       const level = clamp(Math.floor(d / CONFIG.LEVEL_BAND) + 1, 1, 5);
       const type = Math.random() < CONFIG.RESOURCE_TILE_RATIO ? pick(RES_KEYS) : "empty";
       tiles.push({ x, y, type, level, ownerId: null });
     }
   }
-  // プレイヤー本城（中心）
-  tiles[idx(CENTER, CENTER)] = { x: CENTER, y: CENTER, type: "castle", level: 1, ownerId: "player" };
-  // 聖地×4（四隅から少し内側）
-  for (const [hx, hy] of [[4, 4], [SIZE - 5, 4], [4, SIZE - 5], [SIZE - 5, SIZE - 5]]) {
-    tiles[idx(hx, hy)] = { x: hx, y: hy, type: "holy", level: 6, ownerId: null };
+  const put = (x, y, type, level) => {
+    if (!inBounds(x, y)) return;
+    const t = tiles[idx(x, y)];
+    t.type = type;
+    if (level != null) t.level = level;
+  };
+  // 山河は横に2セル分の厚みを持たせる。斜め移動は canStepBetween が角抜けを禁じるため、
+  // この厚みで確実に通行を遮断できる。
+  const stampLine = (x0, y0, x1, y1, type) => {
+    for (const [x, y] of lineCells(x0, y0, x1, y1)) { put(x, y, type); put(x + 1, y, type); }
+  };
+
+  // 2) 北西と北東を分ける縦の大河（埠頭1箇所のみ渡河可）
+  for (let y = 0; y <= 15; y++) { put(20, y, "river"); put(21, y, "river"); }
+  put(20, 8, "port", CONFIG.PORT_LEVEL); put(21, 8, "port", CONFIG.PORT_LEVEL);
+
+  // 3) 皇都州の外郭（x16..23 / y16..23 の枠）を山にし、入口を3つの関所だけにする
+  for (let x = 16; x <= 23; x++) { put(x, 16, "mountain"); put(x, 23, "mountain"); }
+  for (let y = 16; y <= 23; y++) { put(16, y, "mountain"); put(23, y, "mountain"); }
+  put(16, 19, "gate", CONFIG.GATE_LEVEL);  // 北西関
+  put(23, 19, "gate", CONFIG.GATE_LEVEL);  // 北東関
+  put(20, 23, "gate", CONFIG.GATE_LEVEL);  // 南関
+
+  // 4) 皇都州の内部（6×6）。中心が皇都、Lv8〜10の資源を12枚（4種を最低2枚ずつ）
+  const inner = [];
+  for (let y = 17; y <= 22; y++) for (let x = 17; x <= 22; x++) {
+    put(x, y, "empty", CONFIG.CAPITAL_RESOURCE_MIN_LV);
+    if (!(x === CX && y === CY)) inner.push([x, y]);
   }
-  // 初陣指南①（最初の制圧）が乱数で詰まないよう、自城の8近傍にLv1資源地を最低1枚保証する。
-  // 新規ワールド生成時だけの処理なので、既存セーブのマップには影響しない。
+  const picks = [];
+  for (const k of RES_KEYS) picks.push(k, k);              // 各種2枚を保証
+  while (picks.length < CONFIG.CAPITAL_RESOURCE_COUNT) picks.push(pick(RES_KEYS));
+  for (let i = inner.length - 1; i > 0; i--) {             // シャッフルして配置先を決める
+    const j = randInt(0, i); const t = inner[i]; inner[i] = inner[j]; inner[j] = t;
+  }
+  picks.forEach((k, i) => {
+    const cell = inner[i]; if (!cell) return;
+    put(cell[0], cell[1], k, randInt(CONFIG.CAPITAL_RESOURCE_MIN_LV, CONFIG.CAPITAL_RESOURCE_MAX_LV));
+  });
+  put(CX, CY, "capital", CONFIG.CAPITAL_LEVEL);
+
+  // 5) 北西と南方を分ける山脈（途中の関所だけが通れる）
+  stampLine(15, 22, 0, 38, "mountain");
+  put(8, 30, "gate", CONFIG.GATE_LEVEL); put(9, 30, "gate", CONFIG.GATE_LEVEL);
+  // 6) 北東と南方を分ける大河（途中の埠頭だけが渡れる）
+  stampLine(24, 22, 39, 38, "river");
+  put(31, 30, "port", CONFIG.PORT_LEVEL); put(32, 30, "port", CONFIG.PORT_LEVEL);
+
+  // 7) 関所の周辺は一段うまみのある土地にする（Lv5〜7）
+  for (const [gx, gy] of [[16, 19], [23, 19], [20, 23], [8, 30], [31, 30]]) {
+    for (let dy = -2; dy <= 2; dy++) for (let dx = -2; dx <= 2; dx++) {
+      const t = inBounds(gx + dx, gy + dy) ? tiles[idx(gx + dx, gy + dy)] : null;
+      if (t && RES_KEYS.includes(t.type)) t.level = Math.max(t.level, randInt(5, 7));
+    }
+  }
+
+  // 8) プレイヤー本城と、初陣指南①が詰まないための隣接Lv1資源地
+  put(PS.x, PS.y, "castle", 1);
+  tiles[idx(PS.x, PS.y)].ownerId = "player";
   const around = [];
   for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
     if (!dx && !dy) continue;
-    const nx = CENTER + dx, ny = CENTER + dy;
-    if (inBounds(nx, ny)) around.push(idx(nx, ny));
+    const nx = PS.x + dx, ny = PS.y + dy;
+    if (inBounds(nx, ny) && !isBlockedType(tiles[idx(nx, ny)].type)) around.push(idx(nx, ny));
   }
   if (!around.some(ti => RES_KEYS.includes(tiles[ti].type))) {
     const t = tiles[pick(around)];
     t.type = CONFIG.TUTORIAL_START_RESOURCE_TYPE;
     t.level = 1;
   }
-  return { size: SIZE, tiles };
+  return {
+    version: CONFIG.WORLD_LAYOUT_VERSION,
+    ruleset: CONFIG.WORLD_RULESET,
+    size: SIZE,
+    playerStart: { x: PS.x, y: PS.y },
+    capitalIdx: idx(CX, CY),
+    tiles,
+  };
 }
 
-/** AIUser を生成し、city タイルを world に配置する */
+/**
+ * 三地方の連結成分を塗る。山・川に加え、埠頭/関所/皇都も壁として扱うので
+ * 「境界を越えないと行けない場所」が別地域として分離される。
+ * 戻り値: index → "nw" | "ne" | "south" | null
+ */
+function computeRegionMask(tiles) {
+  const isWall = ti => {
+    const t = tiles[ti];
+    return isBlockedType(t.type) || t.type === "port" || t.type === "gate" || t.type === "capital";
+  };
+  const mask = new Array(SIZE * SIZE).fill(null);
+  const fill = (sx, sy, id) => {
+    if (!inBounds(sx, sy)) return;
+    const start = idx(sx, sy);
+    if (mask[start] || isWall(start)) return;
+    const q = [start]; mask[start] = id;
+    while (q.length) {
+      const ti = q.pop(), t = tiles[ti];
+      for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+        if (!dx && !dy) continue;
+        const nx = t.x + dx, ny = t.y + dy;
+        if (!inBounds(nx, ny)) continue;
+        const ni = idx(nx, ny);
+        if (mask[ni] || isWall(ni)) continue;
+        // 斜めの角抜けを禁止（canStepBetween と同じ判定）
+        if (dx && dy && (isWall(idx(t.x + dx, t.y)) || isWall(idx(t.x, t.y + dy)))) continue;
+        mask[ni] = id; q.push(ni);
+      }
+    }
+  };
+  fill(CONFIG.PLAYER_START_X, CONFIG.PLAYER_START_Y, "south");
+  fill(5, 5, "nw");
+  fill(SIZE - 6, 5, "ne");
+  return mask;
+}
+
+/** AIUser を生成し、city タイルを world に配置する（地形ワールドは三地方へ 4/4/2 で配分） */
 function generateAIUsers(world) {
   const users = [];
-  let guard = 0;
-  while (users.length < CONFIG.AI_COUNT && guard++ < 2000) {
-    const x = randInt(2, SIZE - 3), y = randInt(2, SIZE - 3);
-    const t = world.tiles[idx(x, y)];
+  const PS = world.playerStart || { x: CENTER, y: CENTER };
+  const mask = computeRegionMask(world.tiles);
+  // 地域ごとの配置候補（自城から離れ、城でも特殊地形でもないタイル）
+  const cand = { nw: [], ne: [], south: [] };
+  for (let i = 0; i < world.tiles.length; i++) {
+    const r = mask[i]; if (!r || !cand[r]) continue;
+    const t = world.tiles[i];
     if (t.type === "castle" || t.type === "holy") continue;
-    if (chebyshev(x, y, CENTER, CENTER) < CONFIG.AI_MIN_DIST_CENTER) continue;
-    if (users.some(u => chebyshev(x, y, u.x, u.y) < CONFIG.AI_MIN_DIST_EACH)) continue;
-    const i = users.length;
-    const ai = {
-      id: "ai_" + i,
-      name: AI_NAMES[i] || "AI" + i,
-      color: AI_COLORS[i] || "#888",
-      x, y,
-      castleLevel: randInt(1, 3),
-      personality: pick(["expander", "expander", "balanced", "balanced", "turtle"]),
-      recruitable: Math.random() < 0.6,
-      allianceId: null,
-      ownedTiles: [],          // AIが領有する資源タイルindex（城タイルは含まない）
-      nextActionAt: 0,         // 次に行動する絶対時刻(ms)
-      nextRecruitAt: 0,        // 勧誘再試行可能時刻(ms)
-      loyalty: CONFIG.LOYALTY_START, // 同盟内の忠誠度0-100。加入後に低下し事件の引き金になる([S19])
-    };
-    world.tiles[idx(x, y)] = { x, y, type: "castle", level: ai.castleLevel, ownerId: ai.id };
-    users.push(ai);
+    if (chebyshev(t.x, t.y, PS.x, PS.y) < CONFIG.AI_MIN_DIST_CENTER) continue;
+    cand[r].push(i);
+  }
+  const plan = [];
+  for (const [region, n] of Object.entries(CONFIG.AI_REGION_COUNTS)) {
+    for (let k = 0; k < n; k++) plan.push(region);
+  }
+  for (const region of plan) {
+    if (users.length >= CONFIG.AI_COUNT) break;
+    const pool = cand[region] || [];
+    let placed = false;
+    for (let guard = 0; guard < 400 && !placed; guard++) {
+      const ti = pick(pool); if (ti == null) break;
+      const t = world.tiles[ti];
+      const x = t.x, y = t.y;
+      if (users.some(u => chebyshev(x, y, u.x, u.y) < CONFIG.AI_MIN_DIST_EACH)) continue;
+      placed = true;
+      const i = users.length;
+      const ai = {
+        id: "ai_" + i,
+        name: AI_NAMES[i] || "AI" + i,
+        color: AI_COLORS[i] || "#888",
+        x, y,
+        castleLevel: randInt(1, 3),
+        personality: pick(["expander", "expander", "balanced", "balanced", "turtle"]),
+        recruitable: Math.random() < 0.6,
+        allianceId: null,
+        ownedTiles: [],          // AIが領有する資源タイルindex（城タイルは含まない）
+        nextActionAt: 0,         // 次に行動する絶対時刻(ms)
+        nextRecruitAt: 0,        // 勧誘再試行可能時刻(ms)
+        loyalty: CONFIG.LOYALTY_START, // 同盟内の忠誠度0-100。加入後に低下し事件の引き金になる([S19])
+        regionId: region,        // 所属地方。V1では配置のみで外交的な意味は持たない
+      };
+      world.tiles[idx(x, y)] = { x, y, type: "castle", level: ai.castleLevel, ownerId: ai.id };
+      users.push(ai);
+    }
   }
   return users;
 }
@@ -810,7 +999,7 @@ function newGameState() {
     },
     alliance: { id: "ally_player", name: "無名同盟", members: [{ id: "player", role: "盟主" }] },
     aiUsers,
-    flags: { holyWon: false },
+    flags: { holyWon: false, capitalWon: false },
     chat: { messages: [], nextAmbientAt: 0, unseen: 0 },
     incident: null,            // 発生中の同盟内事件 {id,aiId,kind,createdAt,expiresAt} or null（同時1件）
     nextIncidentCheckAt: 0,    // 次の忠誠チェック時刻(ms)
@@ -847,8 +1036,10 @@ function getProdPerHour() {
       tileLevelSum += t.level;
     } else if (t.type === "holy") {
       tileLevelSum += t.level * CONFIG.DIAMOND_HOLY_LEVEL_MULT;
-    } else if (t.type === "empty") {
-      tileLevelSum += t.level * 0.25; // 空地は微量のダイヤのみ
+    } else if (t.type === "capital") {
+      tileLevelSum += t.level;        // 皇都は等倍（Lv10なら💎60/h）
+    } else if (t.type === "empty" || t.type === "port" || t.type === "gate") {
+      tileLevelSum += t.level * 0.25; // 空地・要衝は資源を生まない代わり微量のダイヤ
     }
   }
   for (const k of RES_KEYS) out[k] *= mult;
@@ -928,6 +1119,18 @@ function finishUpgrades(t) {
 /* =====================================================================
  * [S09] MILITARY — 戦力・出兵・制圧
  * ===================================================================*/
+/** 旧ワールド（聖地が勝利条件）か。地形ワールドは皇都の制圧が勝利条件 */
+function isLegacyRuleset() {
+  return !S.world.ruleset || S.world.ruleset === "legacy_v1";
+}
+/** 勝利バナーをルールセットに応じた文言で表示 */
+function showWinBanner() {
+  const el = $("winBanner"); if (!el) return;
+  el.textContent = isLegacyRuleset()
+    ? "⛩️ 聖地制圧！ 天下統一まであと一歩 ⛩️"
+    : "👑 皇都制圧！ 天下の覇権を握った 👑";
+  el.classList.add("show");
+}
 /** カード1枚の戦力 */
 function cardPower(defId) {
   const d = CARD_BY_ID[defId];
@@ -945,6 +1148,9 @@ function getArmyPower() {
 function getTileDefense(ti) {
   const t = S.world.tiles[ti];
   if (t.type === "holy") return CONFIG.HOLY_DEF;
+  if (t.type === "capital") return CONFIG.CAPITAL_DEF;
+  if (t.type === "gate") return CONFIG.GATE_DEF;
+  if (t.type === "port") return CONFIG.PORT_DEF;
   let def = CONFIG.TILE_DEF_BASE * Math.pow(t.level, 1.5);
   if (t.type === "empty") def *= CONFIG.TILE_DEF_EMPTY_MULT;
   if (t.ownerId && t.ownerId !== "player") {
@@ -953,13 +1159,43 @@ function getTileDefense(ti) {
   }
   return Math.round(def);
 }
-/** タイルが自領（自城含む）に8方向で隣接しているか */
+
+/* --- 地形の通行判定 --------------------------------------------------
+ * 山・川は「防御が高い」のではなく、そもそも出兵対象にならない地形。
+ * 判定を canStepBetween に集約し、隣接判定・出兵可能範囲・AI拡張・
+ * 行軍距離BFS がすべて同じルールを使うようにする。 */
+/** 山・川など進入自体ができない地形か */
+function isTerrainBlocked(ti) { return isBlockedType(S.world.tiles[ti].type); }
+/**
+ * from から to へ1歩進めるか（8方向）。
+ * 斜めの場合、横・縦どちらかの隣接セルが通行不能なら「角抜け」を禁止する。
+ * これが無いと、山脈の角を斜めにすり抜けられてしまう。
+ */
+function canStepBetween(fromIdx, toIdx) {
+  if (isTerrainBlocked(toIdx)) return false;
+  const a = S.world.tiles[fromIdx], b = S.world.tiles[toIdx];
+  const dx = b.x - a.x, dy = b.y - a.y;
+  if (dx && dy) {
+    if (isTerrainBlocked(idx(b.x, a.y)) || isTerrainBlocked(idx(a.x, b.y))) return false;
+  }
+  return true;
+}
+/** 出兵の対象になりうるタイルか（山・川・城は不可） */
+function isCapturableTile(ti) {
+  const t = S.world.tiles[ti];
+  return !isBlockedType(t.type) && t.type !== "castle";
+}
+/** タイルが自領（自城含む）に8方向で隣接しているか（地形で遮られていないこと） */
 function isAdjacentToOwned(ti) {
   const t = S.world.tiles[ti];
+  if (!isCapturableTile(ti)) return false;
   for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
     if (!dx && !dy) continue;
     const nx = t.x + dx, ny = t.y + dy;
-    if (inBounds(nx, ny) && S.world.tiles[idx(nx, ny)].ownerId === "player") return true;
+    if (!inBounds(nx, ny)) continue;
+    const ni = idx(nx, ny);
+    if (S.world.tiles[ni].ownerId !== "player") continue;
+    if (canStepBetween(ni, ti)) return true; // 自領から実際に踏み込めるか
   }
   return false;
 }
@@ -973,7 +1209,7 @@ function invalidateMarchable() { _marchableSet = null; }
 function getMarchableTiles() {
   if (_marchableSet) return _marchableSet;
   const set = new Set();
-  const seeds = [idx(CENTER, CENTER), ...S.player.ownedTiles];
+  const seeds = [playerStartIdx(), ...S.player.ownedTiles];
   for (const si of seeds) {
     const st = S.world.tiles[si];
     if (!st) continue;
@@ -984,11 +1220,45 @@ function getMarchableTiles() {
       const ti = idx(nx, ny);
       const t = S.world.tiles[ti];
       if (t.ownerId === "player" || t.type === "castle") continue; // 自領・城は対象外
+      if (!isCapturableTile(ti) || !canStepBetween(si, ti)) continue; // 山・川・角抜けは不可
       set.add(ti);
     }
   }
   _marchableSet = set;
   return set;
+}
+
+/* 本城からの地形距離（山・川を迂回した実距離）。行軍時間の算出に使う。
+ * 1600マスのBFSを起動時とワールド生成時に1回だけ実行し、RAM上にだけ保持する
+ * （派生値なのでセーブには入れない）。draw() から呼んではいけない。 */
+const RUNTIME = { terrainDistance: null };
+function buildTerrainDistanceMap() {
+  const dist = new Array(SIZE * SIZE).fill(Infinity);
+  const start = playerStartIdx();
+  dist[start] = 0;
+  const q = [start];
+  for (let head = 0; head < q.length; head++) {
+    const ti = q[head], t = S.world.tiles[ti];
+    for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+      if (!dx && !dy) continue;
+      const nx = t.x + dx, ny = t.y + dy;
+      if (!inBounds(nx, ny)) continue;
+      const ni = idx(nx, ny);
+      if (dist[ni] !== Infinity) continue;
+      if (!canStepBetween(ti, ni)) continue;
+      dist[ni] = dist[ti] + 1;
+      q.push(ni);
+    }
+  }
+  RUNTIME.terrainDistance = dist;
+  return dist;
+}
+/** 本城から目標までの距離。地形距離が使えればそれを、無ければ直線距離を使う */
+function getMarchDistance(ti) {
+  const d = RUNTIME.terrainDistance ? RUNTIME.terrainDistance[ti] : Infinity;
+  if (d != null && isFinite(d)) return d;
+  const t = S.world.tiles[ti], p = getPlayerStart();
+  return chebyshev(t.x, t.y, p.x, p.y);
 }
 /** 出兵開始。失敗理由 or null */
 function startMarch(ti) {
@@ -996,10 +1266,12 @@ function startMarch(ti) {
   if (S.player.marches.length >= CONFIG.MAX_MARCHES) return "出兵中の部隊が帰還していません";
   if (t.ownerId === "player") return "すでに領有しています";
   if (t.type === "castle") return "他プレイヤーの城は攻撃できません（未実装）";
+  if (isBlockedType(t.type)) return `${TILE_DEFS[t.type].name}は越えられません`;
   if (CONFIG.REQUIRE_ADJACENCY && !isAdjacentToOwned(ti)) return "自領に隣接するタイルにのみ出兵できます";
   if (S.player.resources.food < CONFIG.MARCH_FOOD_COST) return "食料が足りません（" + CONFIG.MARCH_FOOD_COST + "必要）";
   S.player.resources.food -= CONFIG.MARCH_FOOD_COST;
-  const dist = chebyshev(t.x, t.y, CENTER, CENTER);
+  // 山河を迂回した実距離。川向こうは近く見えても埠頭まで回るぶん時間がかかる
+  const dist = getMarchDistance(ti);
   const speed = CONFIG.MARCH_TILES_PER_SEC * (getAllianceBuffs().speed || 1);
   const sec = Math.max(CONFIG.MARCH_MIN_SEC, dist / speed);
   S.player.marches.push({ id: uid("m"), targetIdx: ti, power: getArmyPower(), departAt: now(), arriveAt: now() + sec * 1000 });
@@ -1033,10 +1305,19 @@ function resolveMarches(t) {
         toast(`🏳️ 初領地を得た！ 💎+${dph}/h${rph ? ` ／ ${RES_DEFS[tile.type].emoji}+${rph}/h` : ""} が毎時入り続けます`);
       }
       chatEvent("onPlayerCapture", { ctx: { tile: TILE_DEFS[tile.type].name } }); // 同盟員が祝う
-      if (tile.type === "holy" && !S.flags.holyWon) {
-        S.flags.holyWon = true;
-        $("winBanner").classList.add("show");
-        toast("🎉 勝利条件達成！ 聖地を領有しました！", "win");
+      // 勝利条件はワールドのルールセットで分岐する。
+      // 旧ワールド(legacy_v1)=聖地の領有 / 地形ワールド(three_realms_v2)=皇都の制圧
+      if (isLegacyRuleset()) {
+        if (tile.type === "holy" && !S.flags.holyWon) {
+          S.flags.holyWon = true;
+          showWinBanner();
+          toast("🎉 勝利条件達成！ 聖地を領有しました！", "win");
+          chatEvent("onHolyWin");
+        }
+      } else if (tile.type === "capital" && !S.flags.capitalWon) {
+        S.flags.capitalWon = true;
+        showWinBanner();
+        toast("👑 皇都制圧！ 天下の覇権を握った", "win");
         chatEvent("onHolyWin");
       }
     } else {
@@ -1119,7 +1400,7 @@ function recruitChance(ai) {
 function getRecruitCandidates() {
   return S.aiUsers
     .filter(a => a.recruitable && !a.allianceId)
-    .map(a => ({ ai: a, dist: chebyshev(a.x, a.y, CENTER, CENTER) }))
+    .map(a => { const p = getPlayerStart(); return { ai: a, dist: chebyshev(a.x, a.y, p.x, p.y) }; })
     .sort((p, q) => p.dist - q.dist);
 }
 /** AI勧誘。失敗理由 or null（成功/失敗はトーストで通知） */
@@ -1163,6 +1444,19 @@ function setMemberRole(memberId, role) {
  * ===================================================================*/
 const AI_ACTION_INTERVALS = { expander: [20, 60], balanced: [60, 180], turtle: [120, 300] };
 
+/**
+ * AIが自動でclaimしてよいタイルか。
+ * V1ではAIは地域境界（埠頭・関所）と皇都を越えない＝三地方に自然に閉じ込められ、
+ * プレイヤーだけが関を破って次の地域へ進める。
+ */
+function isAIExpandableTile(ti) {
+  const t = S.world.tiles[ti];
+  if (isBlockedType(t.type)) return false;
+  if (t.type === "port") return !!CONFIG.AI_CAN_CAPTURE_PORT;
+  if (t.type === "gate") return !!CONFIG.AI_CAN_CAPTURE_GATE;
+  if (t.type === "capital") return !!CONFIG.AI_CAN_CAPTURE_CAPITAL;
+  return true;
+}
 function aiExpand(ai) {
   // AI領土（城＋領有タイル）に隣接する未所有タイルを収集
   const seeds = [idx(ai.x, ai.y), ...ai.ownedTiles];
@@ -1176,6 +1470,8 @@ function aiExpand(ai) {
       const ti = idx(nx, ny);
       const t = S.world.tiles[ti];
       if (t.ownerId || t.type === "castle" || t.type === "holy") continue;
+      if (!isAIExpandableTile(ti)) continue;      // 山河・要衝・皇都へは進出しない
+      if (!canStepBetween(si, ti)) continue;      // 角抜けもさせない
       if (t.level > ai.castleLevel + 1) continue; // 分不相応なタイルは取らない
       candidates.push(ti);
     }
@@ -2141,7 +2437,7 @@ const MapView = {
   init() {
     this.canvas = $("mapCanvas");
     this.ctx = this.canvas.getContext("2d");
-    this.pendingCenter = [CENTER, CENTER]; // 初回の有効サイズ確定時に自城へ中心合わせ
+    { const p = getPlayerStart(); this.pendingCenter = [p.x, p.y]; } // 初回の有効サイズ確定時に自城へ中心合わせ
     this.fit();
     window.addEventListener("resize", () => { this.fit(); this.draw(); });
     // --- パン＆タップ（Pointer Events） ---
@@ -2161,7 +2457,7 @@ const MapView = {
     this.canvas.addEventListener("pointercancel", () => { down = null; });
     $("zoomIn").onclick = () => { this.setZoom(this.zoom * 1.3); };
     $("zoomOut").onclick = () => { this.setZoom(this.zoom / 1.3); };
-    $("zoomHome").onclick = () => { this.centerOn(CENTER, CENTER); this.draw(); };
+    $("zoomHome").onclick = () => { const p = getPlayerStart(); this.centerOn(p.x, p.y); this.draw(); };
     $("logBtn").onclick = () => openLogSheet();
   },
   fit() {
@@ -2211,13 +2507,15 @@ const MapView = {
     this._compassHits = [];
     // 右下のズーム/ホームボタンや上部の情報バーと重ならないよう、端の余白を非対称にする
     const ML = 26, MT = 26, MR = 82, MB = 52;
+    const objective = isLegacyRuleset() ? "holy" : "capital"; // 目標はルールセットで変わる
+    const ps = getPlayerStart();
     for (const t of S.world.tiles) {
-      if (t.type !== "holy") continue;
+      if (t.type !== objective) continue;
       const cx = this.offsetX + (t.x + 0.5) * ts, cy = this.offsetY + (t.y + 0.5) * ts;
       if (cx >= 0 && cx <= this.vw && cy >= 0 && cy <= this.vh) continue; // 画面内なら不要
       const mx = clamp(cx, ML, this.vw - MR), my = clamp(cy, MT, this.vh - MB);
       const mine = t.ownerId === "player";
-      const dist = chebyshev(t.x, t.y, CENTER, CENTER);
+      const dist = chebyshev(t.x, t.y, ps.x, ps.y);
       // 台座
       ctx.beginPath();
       ctx.arc(mx, my, 17, 0, Math.PI * 2);
@@ -2237,7 +2535,7 @@ const MapView = {
       // アイコンと距離
       ctx.font = "14px sans-serif"; ctx.textAlign = "center"; ctx.textBaseline = "middle";
       ctx.fillStyle = "#fff";
-      ctx.fillText("⛩️", mx, my - 3);
+      ctx.fillText(TILE_DEFS[objective].emoji, mx, my - 3);
       ctx.font = "bold 9px sans-serif";
       ctx.fillStyle = mine ? "#ffe9a8" : "#e6d2f2";
       ctx.fillText(mine ? "領有" : dist + "マス", mx, my + 10);
@@ -2252,7 +2550,8 @@ const MapView = {
     for (const h of (this._compassHits || [])) {
       if (Math.hypot(px - h.x, py - h.y) <= 20) {
         this.centerOn(h.tx, h.ty); this.draw();
-        toast("⛩️ 聖地へ移動しました（ここを領有すれば勝利）");
+        const objName = TILE_DEFS[isLegacyRuleset() ? "holy" : "capital"].name;
+        toast(`${isLegacyRuleset() ? "⛩️" : "👑"} ${objName}へ移動しました（ここを制すれば勝利）`);
         return true;
       }
     }
@@ -2350,7 +2649,8 @@ const MapView = {
     const t0 = now();
     for (const m of S.player.marches) {
       const tt = S.world.tiles[m.targetIdx];
-      const sx = this.offsetX + (CENTER + 0.5) * ts, sy = this.offsetY + (CENTER + 0.5) * ts;
+      const ps = getPlayerStart();
+      const sx = this.offsetX + (ps.x + 0.5) * ts, sy = this.offsetY + (ps.y + 0.5) * ts;
       const ex = this.offsetX + (tt.x + 0.5) * ts, ey = this.offsetY + (tt.y + 0.5) * ts;
       const p = clamp((t0 - m.departAt) / (m.arriveAt - m.departAt), 0, 1);
       ctx.strokeStyle = "rgba(232,184,74,.6)"; ctx.lineWidth = 2;
@@ -2376,8 +2676,11 @@ function openTileSheet(ti) {
   const ownerText = t.ownerId === "player" ? "あなたの領地" : ai ? `${ai.name} の領地` : "未所有";
   let body = `<h3>${td.emoji} ${td.name} Lv${t.level} <span class="dim small">(${t.x}, ${t.y})</span></h3>
     <div class="dim small">${ownerText}</div>`;
+  if (td.desc) body += `<div class="small" style="margin-top:8px;line-height:1.6">${td.desc}</div>`;
   const actions = [];
-  if (t.type === "castle" && ai) {
+  if (isBlockedType(t.type)) {
+    // 山・川は出兵対象にならない。説明だけ出して終わる
+  } else if (t.type === "castle" && ai) {
     // AI城: 勧誘UI
     body += `<div class="small" style="margin-top:6px">城Lv${ai.castleLevel} ｜ 性格: ${
       { expander: "拡張志向", balanced: "バランス型", turtle: "内政重視" }[ai.personality]}
@@ -2392,7 +2695,11 @@ function openTileSheet(ti) {
     const power = getArmyPower();
     const resInfo = RES_KEYS.includes(t.type)
       ? `制圧すると ${RES_DEFS[t.type].emoji}+${fmt(CONFIG.TILE_PROD_PER_LEVEL_PER_HOUR * t.level)}/h`
-      : t.type === "holy" ? "🎉 制圧すると勝利条件達成！" : "制圧すると領地が広がる";
+      : t.type === "holy" && isLegacyRuleset() ? "🎉 制圧すると勝利条件達成！"
+      : t.type === "capital" ? "👑 制圧すれば天下統一！"
+      : t.type === "port" ? "⚓ 制圧すると対岸へ進軍できる"
+      : t.type === "gate" ? "🛡️ 制圧するとこの先へ進める"
+      : "制圧すると領地が広がる";
     body += `<div class="small" style="margin-top:6px">防御力 ${fmt(def)} ｜ 自軍戦力 ${fmt(power)} ${power >= def ? "✅" : "⚠️戦力不足"}<br>${resInfo}<br>💎ボーナス +${CONFIG.DIAMOND_CAPTURE_BONUS_PER_LEVEL * t.level}</div>`;
     actions.push(`<button class="primary" onclick="UIA.march(${ti})">⚔️ 出兵する（🌾${CONFIG.MARCH_FOOD_COST}）</button>`);
   }
@@ -2438,7 +2745,8 @@ const UIA = {
     const d = TUTORIAL_STEPS[step];
     if (d.tab) switchTab(d.tab);
     if (step === "capture1" || step === "capture2") {
-      MapView.centerOn(CENTER, CENTER); MapView.draw();
+      const p = getPlayerStart();
+      MapView.centerOn(p.x, p.y); MapView.draw();
       toast("光る枠のタイルをタップして出兵しましょう");
     }
   },
@@ -2845,7 +3153,9 @@ async function boot() {
   await AssetDB.open();
   await AssetDB.loadAll();
   S = loadGame() || newGameState();
-  if (S.flags.holyWon) $("winBanner").classList.add("show");
+  if (S.flags.holyWon || S.flags.capitalWon) showWinBanner();
+  // 地形を迂回した行軍距離。1600マスのBFSを起動時に1回だけ（描画中には絶対に呼ばない）
+  buildTerrainDistanceMap();
   MapView.init();
   MapView.startAnim();
   grantOfflineGains();
