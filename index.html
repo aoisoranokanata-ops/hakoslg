@@ -71,6 +71,14 @@ select{font:inherit;color:var(--fg);background:var(--bg3);border:1px solid var(-
 .chat-input-row input{flex:1;min-width:0;padding:7px 8px;background:var(--bg3);border:1px solid var(--line);
   border-radius:6px;color:var(--fg);font:inherit}
 
+/* 同盟内事件 */
+.panel.incident{border-color:var(--danger);background:linear-gradient(180deg,#2a1e22,var(--bg2))}
+.incident-actions{display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-top:9px}
+.incident-actions button{font-size:12px;padding:9px 6px}
+.loyalty{display:flex;align-items:center;gap:6px;margin-top:3px}
+.loyalty-bar{flex:1;max-width:110px;height:5px;background:var(--bg3);border-radius:3px;overflow:hidden}
+.loyalty-bar i{display:block;height:100%;border-radius:3px;transition:width .3s}
+
 /* 汎用カードUI */
 .panel{background:var(--bg2);border:1px solid var(--line);border-radius:10px;padding:10px 12px;margin-bottom:10px}
 .panel h3{font-size:14px;margin-bottom:6px}
@@ -211,6 +219,7 @@ select{font:inherit;color:var(--fg);background:var(--bg3);border:1px solid var(-
  *   [S16] GAME LOOP & BOOT  — tick / autosave / 起動処理
  *   [S17] UI: CITY PLOT     — 城タブの箱庭ビュー（ドラッグ配置・タップ強化）
  *   [S18] ALLIANCE CHAT     — 同盟チャット（ルールベース再生 / Grok作セリフ）
+ *   [S19] ALLIANCE INCIDENTS— 同盟内事件（忠誠低下→不満→なだめ/任命/放置/追放）
  *
  * 設計原則:
  *  - 可変状態はグローバル `S` 1個のみ。S をJSON化したものがセーブデータ。
@@ -225,12 +234,27 @@ select{font:inherit;color:var(--fg);background:var(--bg3);border:1px solid var(-
 const CONFIG = {
   SAVE_KEY: "hakoslg_save_v1",          // localStorageキー（名前空間 hakoslg_）
   ASSET_DB: "hakoslg_assets",           // IndexedDB名（画像アセット）
-  SAVE_VERSION: 3,                     // v3: 同盟チャット S.chat を追加
+  SAVE_VERSION: 4,                     // v4: AIに loyalty、S.incident を追加
 
   // --- 同盟チャット（Grok作セリフプールをルールベース再生。[S18]） ---
   CHAT_MAX_MESSAGES: 60,               // 保持する最大ログ数
   CHAT_AMBIENT_MIN_SEC: 25,            // 環境チャット間隔の下限（秒）
   CHAT_AMBIENT_MAX_SEC: 70,            // 環境チャット間隔の上限（秒）
+
+  // --- 同盟内事件（[S19]。忠誠が下がったAIが不満を訴える） ---
+  LOYALTY_START: 70,                   // 加入時の忠誠度（0〜100）
+  LOYALTY_MAX: 100,
+  INCIDENT_CHECK_MIN_SEC: 100,         // 忠誠チェック間隔の下限（秒）
+  INCIDENT_CHECK_MAX_SEC: 220,         // 同上限
+  LOYALTY_DECAY_NO_ROLE: 8,            // チェックごとの忠誠低下（役職なし＝不満が溜まりやすい）
+  LOYALTY_DECAY_WITH_ROLE: 3,          // 同（役職あり）
+  INCIDENT_THRESHOLD: 45,              // この忠誠を下回ると事件が発生しうる
+  INCIDENT_EXPIRE_SEC: 240,            // 未対応のままこの時間が過ぎると自動的に「放置」扱い
+  SOOTHE_FOOD_COST: 800,               // なだめるコスト（食料）
+  SOOTHE_LOYALTY_GAIN: 30,             // なだめ成功時の回復
+  PROMOTE_LOYALTY_GAIN: 45,            // 役職付与で解決した時の回復（役職なしの相手のみ）
+  IGNORE_LOYALTY_PENALTY: 22,          // 放置した時の追加低下
+  LOYALTY_LEAVE_THRESHOLD: 12,         // これを下回ると自主脱退
 
   WORLD_SIZE: 40,                       // 40x40 グリッド
   TICK_MS: 1000,                        // ゲームtick間隔
@@ -480,6 +504,12 @@ function migrateSave(data) {
   }
   // v2 → v3: 同盟チャットログを付与
   if (!data.chat) data.chat = { messages: [], nextAmbientAt: 0, unseen: 0 };
+  // v3 → v4: AIに忠誠度、同盟内事件の枠を付与
+  for (const ai of (data.aiUsers || [])) {
+    if (ai.loyalty == null) ai.loyalty = CONFIG.LOYALTY_START;
+  }
+  if (data.incident === undefined) data.incident = null;
+  if (data.nextIncidentCheckAt == null) data.nextIncidentCheckAt = 0;
   data.version = CONFIG.SAVE_VERSION;
   return data;
 }
@@ -637,6 +667,7 @@ function generateAIUsers(world) {
       ownedTiles: [],          // AIが領有する資源タイルindex（城タイルは含まない）
       nextActionAt: 0,         // 次に行動する絶対時刻(ms)
       nextRecruitAt: 0,        // 勧誘再試行可能時刻(ms)
+      loyalty: CONFIG.LOYALTY_START, // 同盟内の忠誠度0-100。加入後に低下し事件の引き金になる([S19])
     };
     world.tiles[idx(x, y)] = { x, y, type: "castle", level: ai.castleLevel, ownerId: ai.id };
     users.push(ai);
@@ -667,6 +698,9 @@ function generateAIUsers(world) {
  *   alliance: { id, name, members:[{id,role}] },  // 現状プレイヤー同盟1つのみ
  *   aiUsers: [ AIUser ],        // スキーマは generateAIUsers 参照
  *   flags: { holyWon: bool },   // 一度きりイベントの発火記録
+ *   chat: { messages:[{id,ts,senderId,text}], nextAmbientAt, unseen },  // 同盟チャット([S18])
+ *   incident: {id,aiId,kind,createdAt,expiresAt}|null,  // 発生中の同盟内事件([S19])。同時1件
+ *   nextIncidentCheckAt: number(ms),                    // 次の忠誠チェック時刻
  * }
  */
 function newGameState() {
@@ -698,6 +732,8 @@ function newGameState() {
     aiUsers,
     flags: { holyWon: false },
     chat: { messages: [], nextAmbientAt: 0, unseen: 0 },
+    incident: null,            // 発生中の同盟内事件 {id,aiId,kind,createdAt,expiresAt} or null（同時1件）
+    nextIncidentCheckAt: 0,    // 次の忠誠チェック時刻(ms)
   };
 }
 
@@ -1275,6 +1311,56 @@ const CHAT_LINES = {
     "すぐに。",
     "お待ちを。",
   ],
+
+  /* --- 以下は同盟内事件用([S19])。暫定セリフ＝Grokが増量する（CHAT_SCRIPT.md） --- */
+  // 不満の表明（事件発生時。kind別）
+  onIncident: {
+    noRole: [ // 役職を与えられていない不満
+      "盟主殿……この{name}に、何の役目も無いのですか。",
+      "役職も無いまま、ただ日を過ごすのは辛いものです。",
+      "働きたいのだ。何か任せてはくれぬか。",
+    ],
+    noReward: [ // 恩賞・待遇への不満
+      "我らの働きに、何の報いも無いとは……。",
+      "この待遇では、家臣に示しがつきませぬ。",
+      "少しは我らのことも考えてくだされ、盟主殿。",
+    ],
+    idle: [ // 同盟が動かないことへの不満
+      "{ally}は、いつまで動かぬのですか。",
+      "戦も無く、ただ守るだけ……これでは兵が腐る。",
+      "このままでは、我らは何のために集まったのか。",
+    ],
+  },
+  onSoothe: [ // なだめ成功
+    "……盟主殿の言葉、確かに受け取りました。",
+    "そこまで仰るなら、もう申しますまい。",
+    "気持ちを汲んでいただけましたか。……有り難い。",
+  ],
+  onSootheFail: [ // なだめ失敗
+    "言葉だけでは、腹は満たされませぬ。",
+    "……そう仰られても、納得はできませぬ。",
+    "口先だけでは、心は動きませぬぞ。",
+  ],
+  onPromoteFix: [ // 役職を与えて解決
+    "おお……この役目、確かに承りました！",
+    "この{name}を認めてくださるか。粉骨砕身、務めます。",
+    "役目を戴いた以上、必ずや応えてご覧に入れる。",
+  ],
+  onIgnore: [ // 放置された
+    "……返事も無し、か。",
+    "そうですか。……もう良いです。",
+    "聞く耳を持たぬということですな。覚えておきましょう。",
+  ],
+  onExile: [ // 追放された
+    "追放……この{name}を切り捨てると。よかろう、去りましょう。",
+    "{ally}に義理は無くなった。さらばだ。",
+    "ここまでですか。……恨みはせぬが、忘れもせぬ。",
+  ],
+  onLeave: [ // 忠誠が尽きて自主脱退
+    "もう限界です。{ally}を去らせていただく。",
+    "この同盟に、我が居場所は無いようだ。……失礼する。",
+    "永らくお世話になりました。{name}、これにて御免。",
+  ],
 };
 
 /** チャットログへ1件追加（上限超過分は古い方から切り捨て） */
@@ -1318,6 +1404,131 @@ function chatTick(t) {
   if (!ai) return;
   const pool = CHAT_LINES.ambient[ai.personality] || [];
   if (pool.length) chatPush(ai.id, chatFill(pick(pool), { name: ai.name, ally: S.alliance.name }));
+}
+
+/* =====================================================================
+ * [S19] ALLIANCE INCIDENTS — 同盟内事件（不満AIへの対処）
+ *
+ * 流れ: 一定間隔で同盟AIの忠誠(loyalty)が低下 → 閾値を下回った者が不満を訴える
+ *       （＝事件発生。同時1件） → プレイヤーが4択で対処 → 結果を chat に流す。
+ *   なだめる: 食料を払い忠誠回復。低忠誠ほど失敗しやすい
+ *   役職を与える: 役職なしの相手のみ。回復量が最大（役職は不満の主因なので理に適う）
+ *   放置:     忠誠がさらに低下。閾値を割ると自主脱退
+ *   追放:     即座に同盟から除名（二度と勧誘できない）
+ * 役職持ちは忠誠の低下が緩い＝役職を配る動機になる。
+ * 事件は未対応のまま INCIDENT_EXPIRE_SEC 経過で自動的に「放置」扱いになる。
+ * ===================================================================*/
+const INCIDENT_DEFS = {
+  noRole:   { label: "役職への不満", desc: "役目を与えられず腐っている" },
+  noReward: { label: "待遇への不満", desc: "働きに報いが無いと感じている" },
+  idle:     { label: "停滞への不満", desc: "同盟が動かないことに苛立っている" },
+};
+
+/** 同盟メンバーのAI一覧（プレイヤー除く。members と aiUsers の両方に居る者だけ） */
+function allianceAIs() {
+  return S.alliance.members
+    .filter(m => m.id !== "player")
+    .map(m => S.aiUsers.find(a => a.id === m.id))
+    .filter(Boolean);
+}
+function memberRoleOf(aiId) {
+  const m = S.alliance.members.find(m => m.id === aiId);
+  return m ? m.role : null;
+}
+/** AIを同盟から外す共通処理。banned=true で以後勧誘不可 */
+function removeFromAlliance(ai, banned) {
+  S.alliance.members = S.alliance.members.filter(m => m.id !== ai.id);
+  ai.allianceId = null;
+  ai.loyalty = CONFIG.LOYALTY_START;
+  if (banned) ai.recruitable = false;
+  else ai.nextRecruitAt = now() + CONFIG.RECRUIT_COOLDOWN_SEC * 1000;
+}
+/** 事件を1件発生させる（既に発生中なら何もしない） */
+function raiseIncident(ai) {
+  if (S.incident) return;
+  const kind = memberRoleOf(ai.id) === "一般" ? "noRole" : pick(["noReward", "idle"]);
+  S.incident = { id: uid("inc"), aiId: ai.id, kind, createdAt: now(), expiresAt: now() + CONFIG.INCIDENT_EXPIRE_SEC * 1000 };
+  chatEvent("onIncident", { ai, sub: kind });
+  toast(`⚠️ ${ai.name} が不満を訴えています（同盟タブ）`);
+}
+/** tickから呼ぶ: 忠誠の自然低下と事件発生／期限切れ処理 */
+function incidentTick(t) {
+  if (!S.alliance) return;
+  // 期限切れ＝放置扱い
+  if (S.incident && t >= S.incident.expiresAt) resolveIncident("ignore", true);
+  if (t < (S.nextIncidentCheckAt || 0)) return;
+  S.nextIncidentCheckAt = t + randInt(CONFIG.INCIDENT_CHECK_MIN_SEC, CONFIG.INCIDENT_CHECK_MAX_SEC) * 1000;
+  const ais = allianceAIs();
+  if (!ais.length) return;
+  for (const ai of ais) {
+    const hasRole = memberRoleOf(ai.id) !== "一般";
+    ai.loyalty = clamp(ai.loyalty - (hasRole ? CONFIG.LOYALTY_DECAY_WITH_ROLE : CONFIG.LOYALTY_DECAY_NO_ROLE),
+      0, CONFIG.LOYALTY_MAX);
+  }
+  if (S.incident) return; // 同時に複数は起こさない
+  const unhappy = ais.filter(a => a.loyalty < CONFIG.INCIDENT_THRESHOLD);
+  if (unhappy.length) raiseIncident(pick(unhappy));
+}
+/**
+ * 事件への対処。action: soothe|promote|ignore|exile
+ * 戻り値は失敗理由の文字列 / 成功時 null（[S08]等と同じ規約）。
+ * auto=true は期限切れによる自動「放置」（トーストの文言を変える）。
+ */
+function resolveIncident(action, auto) {
+  const inc = S.incident;
+  if (!inc) return "対応中の事件はありません";
+  const ai = S.aiUsers.find(a => a.id === inc.aiId);
+  if (!ai) { S.incident = null; return null; }
+
+  if (action === "soothe") {
+    if (S.player.resources.food < CONFIG.SOOTHE_FOOD_COST) return `食料が足りません（${CONFIG.SOOTHE_FOOD_COST}必要）`;
+    S.player.resources.food -= CONFIG.SOOTHE_FOOD_COST;
+    // 忠誠が低いほど失敗しやすい（0で35%、閾値付近で75%程度）
+    const chance = clamp(0.35 + (ai.loyalty / CONFIG.INCIDENT_THRESHOLD) * 0.4, 0.35, 0.9);
+    if (Math.random() < chance) {
+      ai.loyalty = clamp(ai.loyalty + CONFIG.SOOTHE_LOYALTY_GAIN, 0, CONFIG.LOYALTY_MAX);
+      chatEvent("onSoothe", { ai });
+      toast(`🤝 ${ai.name} をなだめました（忠誠${Math.round(ai.loyalty)}）`);
+    } else {
+      chatEvent("onSootheFail", { ai });
+      toast(`😞 ${ai.name} は納得しませんでした`);
+    }
+    S.incident = null;
+    return null;
+  }
+  if (action === "promote") {
+    if (memberRoleOf(ai.id) !== "一般") return "すでに役職を持っています";
+    const role = pick(ASSIGNABLE_ROLES.filter(r => r !== "一般"));
+    const m = S.alliance.members.find(m => m.id === ai.id);
+    if (m) m.role = role;
+    ai.loyalty = clamp(ai.loyalty + CONFIG.PROMOTE_LOYALTY_GAIN, 0, CONFIG.LOYALTY_MAX);
+    chatEvent("onPromoteFix", { ai });
+    toast(`🎖️ ${ai.name} を「${role}」に任命しました（忠誠${Math.round(ai.loyalty)}）`);
+    S.incident = null;
+    return null;
+  }
+  if (action === "ignore") {
+    ai.loyalty = clamp(ai.loyalty - CONFIG.IGNORE_LOYALTY_PENALTY, 0, CONFIG.LOYALTY_MAX);
+    S.incident = null;
+    if (ai.loyalty < CONFIG.LOYALTY_LEAVE_THRESHOLD) {
+      chatEvent("onLeave", { ai });
+      removeFromAlliance(ai, false); // 再勧誘は可能
+      toast(`💔 ${ai.name} が同盟を去りました`);
+    } else {
+      chatEvent("onIgnore", { ai });
+      toast(auto ? `⌛ ${ai.name} の訴えを放置しました（忠誠${Math.round(ai.loyalty)}）`
+                 : `😐 ${ai.name} を放置しました（忠誠${Math.round(ai.loyalty)}）`);
+    }
+    return null;
+  }
+  if (action === "exile") {
+    chatEvent("onExile", { ai });
+    removeFromAlliance(ai, true); // 追放者は二度と勧誘できない
+    S.incident = null;
+    toast(`⛔ ${ai.name} を追放しました`);
+    return null;
+  }
+  return "不明な操作です";
 }
 
 /* =====================================================================
@@ -1401,7 +1612,45 @@ function renderGacha() {
       <button onclick="UIA.importAsset()">選択</button></div></div>`;
 }
 
+/* 同盟タブは毎tickの全再構築を避ける（役職selectと入力中テキストを壊すため）。
+ * 構成が変わった時（事件の発生/解決・メンバー増減・役職変更・忠誠の目盛り変化）だけ
+ * 全再描画し、それ以外はチャットログとカウントダウンのみ更新する。 */
+let allianceSig = "";
+function allianceSignature() {
+  const inc = S.incident ? S.incident.id : "-";
+  const mem = S.alliance.members.map(m => {
+    const ai = S.aiUsers.find(a => a.id === m.id);
+    return m.id + ":" + m.role + ":" + (ai ? Math.round(ai.loyalty / 5) : "p"); // 忠誠は5刻みで判定
+  }).join(",");
+  return inc + "|" + mem;
+}
+/** 軽量更新: 事件パネルの残り時間だけ書き換える */
+function updateIncidentCountdown() {
+  const el = $("incidentLeft");
+  if (el && S.incident) el.textContent = fmtSec(Math.max(0, (S.incident.expiresAt - now()) / 1000));
+}
+/** 発生中の事件パネルHTML（無ければ空文字） */
+function incidentPanelHTML() {
+  const inc = S.incident; if (!inc) return "";
+  const ai = S.aiUsers.find(a => a.id === inc.aiId); if (!ai) return "";
+  const def = INCIDENT_DEFS[inc.kind] || { label: "不満", desc: "" };
+  const canPromote = memberRoleOf(ai.id) === "一般";
+  const leftSec = Math.max(0, (inc.expiresAt - now()) / 1000);
+  return `<div class="panel incident">
+    <h3>⚠️ ${escapeHtml(ai.name)} の${def.label}</h3>
+    <div class="dim small">${def.desc}／忠誠 ${Math.round(ai.loyalty)} ／
+      放置すると <span id="incidentLeft">${fmtSec(leftSec)}</span> で自動的に「放置」扱いになります</div>
+    <div class="incident-actions">
+      <button class="primary" onclick="UIA.incident('soothe')">🤝 なだめる（🌾${CONFIG.SOOTHE_FOOD_COST}）</button>
+      <button ${canPromote ? "" : "disabled"} onclick="UIA.incident('promote')">🎖️ 役職を与える</button>
+      <button onclick="UIA.incident('ignore')">😐 放置する</button>
+      <button class="danger" onclick="UIA.incident('exile')">⛔ 追放する</button>
+    </div>
+    <div class="dim small" style="margin-top:6px">※追放した相手は二度と勧誘できません</div>
+  </div>`;
+}
 function renderAlliance() {
+  allianceSig = allianceSignature();
   const memberRows = S.alliance.members.map(m => {
     const isPlayer = m.id === "player";
     const ai = S.aiUsers.find(a => a.id === m.id);
@@ -1410,7 +1659,14 @@ function renderAlliance() {
     const roleUI = isPlayer ? `<b>盟主</b>` :
       `<select onchange="UIA.setRole('${m.id}', this.value)">
         ${ASSIGNABLE_ROLES.map(r => `<option ${r === m.role ? "selected" : ""}>${r}</option>`).join("")}</select>`;
-    return `<div class="panel row"><div class="grow"><b>${name}</b> <span class="dim">城Lv${lv}</span></div>${roleUI}</div>`;
+    // 忠誠バー（AIのみ）。低いほど赤くなる
+    const loyalUI = (isPlayer || !ai) ? "" : (() => {
+      const v = clamp(Math.round(ai.loyalty), 0, CONFIG.LOYALTY_MAX);
+      const col = v < CONFIG.INCIDENT_THRESHOLD ? "var(--danger)" : v < 70 ? "#d8a13a" : "#5aa05a";
+      return `<div class="loyalty"><div class="loyalty-bar"><i style="width:${v}%;background:${col}"></i></div>
+        <span class="dim small">忠誠 ${v}</span></div>`;
+    })();
+    return `<div class="panel row"><div class="grow"><b>${name}</b> <span class="dim">城Lv${lv}</span>${loyalUI}</div>${roleUI}</div>`;
   }).join("");
   const buffs = getAllianceBuffs();
   const buffText = [
@@ -1423,6 +1679,7 @@ function renderAlliance() {
   $("page-alliance").innerHTML = `
     <div class="panel"><h3>🤝 ${S.alliance.name}（${S.alliance.members.length}名）</h3>
       <div class="dim small">発動中バフ: ${buffText}</div>${roleHelp}</div>
+    ${incidentPanelHTML()}
     ${memberRows}
     <div class="panel">
       <h3>💬 同盟チャット</h3>
@@ -1462,6 +1719,8 @@ function renderChatLog(forceBottom) {
 function updateChatBadge() {
   const el = $("chatBadge"); if (!el) return;
   const n = (S.chat && S.chat.unseen) || 0;
+  // 事件発生中は未読数より優先して「!」を出す（対処待ちを見逃さないため）
+  if (S.incident) { el.textContent = "!"; el.style.display = ""; return; }
   el.textContent = n > 9 ? "9+" : (n || "");
   el.style.display = n > 0 ? "" : "none";
 }
@@ -1661,6 +1920,11 @@ const UIA = {
     setMemberRole(memberId, role);
     toast(`役職を ${role} に変更しました`);
     renderAlliance();
+  },
+  incident(action) {
+    const err = resolveIncident(action);
+    if (err) toast("⚠️ " + err);
+    renderAlliance(); renderHeader();
   },
   sendChat() {
     const inp = $("chatInput"); if (!inp) return;
@@ -1876,13 +2140,22 @@ function tick() {
   resolveMarches(t);
   aiTickAll(t);
   chatTick(t);
+  incidentTick(t);
   renderHeader();
   updateChatBadge();
-  // 同盟タブはselect操作保護のため full 再描画せず、チャットログのみ更新。
+  // 同盟タブはselect/入力保護のため、構成が変わった時だけ full 再描画（入力中の文字は保全）。
   // タップ中はclick保護のため再描画しない。
   if (!pointerHeld) {
-    if (activeTab === "alliance") renderChatLog();
-    else renderActiveTab();
+    if (activeTab === "alliance") {
+      if (allianceSignature() !== allianceSig) {
+        const keep = $("chatInput") ? $("chatInput").value : "";
+        renderAlliance();
+        if (keep && $("chatInput")) $("chatInput").value = keep;
+      } else {
+        renderChatLog();
+        updateIncidentCountdown();
+      }
+    } else renderActiveTab();
   }
 }
 

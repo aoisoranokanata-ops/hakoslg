@@ -1,7 +1,7 @@
 /* 箱庭クロニクル Service Worker — キャッシュファーストでオフライン動作
  * 単一HTML方針の唯一の例外（SWはブラウザ仕様上、別ファイル必須）。
  * index.html を更新したら CACHE のバージョンを上げること。 */
-const CACHE = "hakoslg-v9";
+const CACHE = "hakoslg-v10";
 const ASSETS = ["./", "./index.html"];
 
 self.addEventListener("install", e => {
