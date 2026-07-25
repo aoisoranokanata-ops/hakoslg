@@ -88,6 +88,10 @@ select{font:inherit;color:var(--fg);background:var(--bg3);border:1px solid var(-
 .loyalty-bar{flex:1;max-width:110px;height:5px;background:var(--bg3);border-radius:3px;overflow:hidden}
 .loyalty-bar i{display:block;height:100%;border-radius:3px;transition:width .3s}
 
+/* 勧誘候補一覧 */
+.recruit-row{gap:6px}
+.recruit-row button{font-size:12px;padding:7px 9px;white-space:nowrap}
+
 /* 汎用カードUI */
 .panel{background:var(--bg2);border:1px solid var(--line);border-radius:10px;padding:10px 12px;margin-bottom:10px}
 .panel h3{font-size:14px;margin-bottom:6px}
@@ -1046,6 +1050,19 @@ function getAllianceBuffs() {
   }
   return out;
 }
+/** 勧誘の成功率（0〜1）。自城とAI城のレベル差で変動。UI表示と実処理で共用する */
+function recruitChance(ai) {
+  return clamp(
+    CONFIG.RECRUIT_BASE_CHANCE + CONFIG.RECRUIT_CHANCE_PER_LV_DIFF * (S.player.castleLevel - ai.castleLevel),
+    0.15, 0.95);
+}
+/** 勧誘の候補（未所属かつ勧誘可のAI）を自城からの距離が近い順に返す */
+function getRecruitCandidates() {
+  return S.aiUsers
+    .filter(a => a.recruitable && !a.allianceId)
+    .map(a => ({ ai: a, dist: chebyshev(a.x, a.y, CENTER, CENTER) }))
+    .sort((p, q) => p.dist - q.dist);
+}
 /** AI勧誘。失敗理由 or null（成功/失敗はトーストで通知） */
 function recruitAI(aiId) {
   const ai = S.aiUsers.find(a => a.id === aiId);
@@ -1054,9 +1071,7 @@ function recruitAI(aiId) {
   if (now() < ai.nextRecruitAt) return "しばらく待ってから再勧誘してください（" + fmtSec((ai.nextRecruitAt - now()) / 1000) + "）";
   if (S.player.resources.food < CONFIG.RECRUIT_FOOD_COST) return "食料が足りません（" + CONFIG.RECRUIT_FOOD_COST + "必要）";
   S.player.resources.food -= CONFIG.RECRUIT_FOOD_COST;
-  const chance = clamp(
-    CONFIG.RECRUIT_BASE_CHANCE + CONFIG.RECRUIT_CHANCE_PER_LV_DIFF * (S.player.castleLevel - ai.castleLevel),
-    0.15, 0.95);
+  const chance = recruitChance(ai);
   if (Math.random() < chance) {
     ai.allianceId = S.alliance.id;
     S.alliance.members.push({ id: ai.id, role: "一般" });
@@ -1909,17 +1924,53 @@ function renderGacha() {
  * 全再描画し、それ以外はチャットログとカウントダウンのみ更新する。 */
 let allianceSig = "";
 function allianceSignature() {
+  const t = now();
   const inc = S.incident ? S.incident.id : "-";
   const mem = S.alliance.members.map(m => {
     const ai = S.aiUsers.find(a => a.id === m.id);
     return m.id + ":" + m.role + ":" + (ai ? Math.round(ai.loyalty / 5) : "p"); // 忠誠は5刻みで判定
   }).join(",");
-  return inc + "|" + mem;
+  // 勧誘候補の顔ぶれとクールダウンの有無・食料の充足（ボタンの活性が変わる条件）
+  const rec = getRecruitCandidates().map(c => c.ai.id + (t < c.ai.nextRecruitAt ? "!" : "")).join(",");
+  const poor = S.player.resources.food < CONFIG.RECRUIT_FOOD_COST ? "p" : "-";
+  return inc + "|" + mem + "|" + rec + "|" + poor;
 }
-/** 軽量更新: 事件パネルの残り時間だけ書き換える */
+/** 軽量更新: 事件パネルと勧誘クールダウンの残り時間だけ書き換える（全再描画を避ける） */
 function updateIncidentCountdown() {
   const el = $("incidentLeft");
   if (el && S.incident) el.textContent = fmtSec(Math.max(0, (S.incident.expiresAt - now()) / 1000));
+  for (const { ai } of getRecruitCandidates()) {
+    const c = $("rcd_" + ai.id);
+    if (c) c.textContent = fmtSec(Math.max(0, (ai.nextRecruitAt - now()) / 1000));
+  }
+}
+/* 近隣の勧誘候補パネル。マップでAI城を1つずつ探さなくても、
+ * 同盟タブだけで「誰を誘えるか・成功率・距離」が分かり、その場で勧誘できる。 */
+function recruitPanelHTML() {
+  const cands = getRecruitCandidates();
+  const cost = CONFIG.RECRUIT_FOOD_COST;
+  const rows = cands.map(({ ai, dist }) => {
+    const cd = Math.max(0, ai.nextRecruitAt - now());
+    const poor = S.player.resources.food < cost;
+    const pct = Math.round(recruitChance(ai) * 100);
+    const btn = cd > 0
+      ? `<button disabled>⏳ <span id="rcd_${ai.id}">${fmtSec(cd / 1000)}</span></button>`
+      : `<button class="primary" ${poor ? "disabled" : ""} onclick="UIA.recruit('${ai.id}')">🤝 勧誘</button>`;
+    return `<div class="panel row recruit-row">
+      <div class="grow">
+        <b style="color:${ai.color}">${escapeHtml(ai.name)}</b>
+        <span class="dim small">城Lv${ai.castleLevel} ｜ ${dist}マス</span>
+        <div class="dim small">成功率 ${pct}%${poor ? " ｜ 🌾不足" : ""}</div>
+      </div>
+      <button onclick="UIA.jumpToAI('${ai.id}')">🗺️</button>
+      ${btn}
+    </div>`;
+  }).join("");
+  return `<div class="panel"><h3>🔍 近隣の勢力（勧誘候補）</h3>
+      <div class="dim small">勧誘コスト 🌾${cost} ｜ 成功率は自城とAI城のレベル差で変動。
+      🗺️ で地図の位置へ移動します</div></div>
+    ${rows || `<div class="panel dim small">勧誘できる勢力がありません。<br>
+      （すでに同盟入り／追放済みの勢力は候補に出ません）</div>`}`;
 }
 /** 発生中の事件パネルHTML（無ければ空文字） */
 function incidentPanelHTML() {
@@ -1982,8 +2033,7 @@ function renderAlliance() {
         <button class="primary" onclick="UIA.sendChat()">送信</button>
       </div>
     </div>
-    <div class="panel dim small">マップ上の🏯（勧誘可マーク付き）をタップすると勧誘できます。<br>
-    勧誘コスト: 🌾${CONFIG.RECRUIT_FOOD_COST} ｜ 成功率は自城とAI城のレベル差で変動</div>`;
+    ${recruitPanelHTML()}`;
   renderChatLog(true);
 }
 /** チャットログ本体だけを再描画（メンバーselect/入力欄は温存。tickからも呼ぶ）。
@@ -2214,6 +2264,24 @@ const MapView = {
             ctx.font = `${Math.floor(ts * 0.62)}px sans-serif`; // 元に戻す
           }
         }
+        // AI城の外交状態バッジ。同盟員＝金の「盟」、勧誘できる相手＝緑の「勧」。
+        // 1つずつタップして確かめなくても、マップを見るだけで勧誘先が分かるようにする。
+        else if (t.type === "castle" && t.ownerId && ts >= 15) {
+          const ai = S.aiUsers.find(a => a.id === t.ownerId);
+          const ally = ai && ai.allianceId;
+          const canRecruit = ai && !ally && ai.recruitable;
+          if (ally || canRecruit) {
+            const bx = px + ts - 6, by = py + 6;
+            ctx.beginPath(); ctx.arc(bx, by, 7.5, 0, Math.PI * 2);
+            ctx.fillStyle = ally ? "rgba(232,184,74,.95)" : `rgba(90,205,150,${0.7 + 0.3 * pulse})`;
+            ctx.fill();
+            ctx.strokeStyle = "rgba(0,0,0,.45)"; ctx.lineWidth = 1; ctx.stroke();
+            ctx.font = "bold 9px sans-serif";
+            ctx.fillStyle = "#12161f";
+            ctx.fillText(ally ? "盟" : "勧", bx, by + 1);
+            ctx.font = `${Math.floor(ts * 0.62)}px sans-serif`; // 元に戻す
+          }
+        }
       }
     }
     if (CONFIG.MAP_HOLY_COMPASS) this.drawHolyCompass(ctx, ts, pulse);
@@ -2297,6 +2365,17 @@ const UIA = {
     const err = recruitAI(aiId);
     if (err) toast("⚠️ " + err);
     closeSheet(); renderHeader();
+    if (activeTab === "alliance") renderAlliance(); // 同盟タブの候補一覧からも呼ばれる
+  },
+  /** 勧誘候補の位置へマップを移動して表示（同盟タブ→マップの導線） */
+  jumpToAI(aiId) {
+    const ai = S.aiUsers.find(a => a.id === aiId);
+    if (!ai) return;
+    switchTab("map");
+    MapView.fit();
+    MapView.centerOn(ai.x, ai.y);
+    MapView.draw();
+    toast(`🗺️ ${ai.name} の城（${ai.x}, ${ai.y}）へ移動しました`);
   },
   gacha(count) {
     const results = doGacha(count);
