@@ -288,6 +288,11 @@ const CONFIG = {
   POWER_PER_CASTLE_LV: 25,
   REQUIRE_ADJACENCY: true,              // 自領に隣接するタイルのみ出兵可
 
+  // --- マップの視覚的誘導（UX検品の指摘を受けて追加） ---
+  MAP_HIGHLIGHT_MARCHABLE: true,        // 出兵可能なタイルを枠で強調（隣接ルールの可視化）
+  MAP_HOLY_COMPASS: true,               // 画面外の聖地の方向を画面端に表示（目標の提示）
+  MAP_ANIM_FPS: 15,                     // マップの脈動アニメのfps（0で静止）
+
   // --- ガチャ（甘め設計） ---
   GACHA_COST_SINGLE: 100,
   GACHA_COST_TEN: 900,
@@ -879,6 +884,33 @@ function isAdjacentToOwned(ti) {
   }
   return false;
 }
+
+/* 今すぐ出兵できるタイルの集合（マップ強調用）。
+ * 自領の8近傍を種に作る。毎フレーム再計算しないよう明示的に無効化する方式で、
+ * 自領が変化する箇所（制圧・放棄）から invalidateMarchable() を呼ぶ。
+ * ※AIが未所有タイルを取っても「攻撃可能」であることは変わらないため無効化不要。 */
+let _marchableSet = null;
+function invalidateMarchable() { _marchableSet = null; }
+function getMarchableTiles() {
+  if (_marchableSet) return _marchableSet;
+  const set = new Set();
+  const seeds = [idx(CENTER, CENTER), ...S.player.ownedTiles];
+  for (const si of seeds) {
+    const st = S.world.tiles[si];
+    if (!st) continue;
+    for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+      if (!dx && !dy) continue;
+      const nx = st.x + dx, ny = st.y + dy;
+      if (!inBounds(nx, ny)) continue;
+      const ti = idx(nx, ny);
+      const t = S.world.tiles[ti];
+      if (t.ownerId === "player" || t.type === "castle") continue; // 自領・城は対象外
+      set.add(ti);
+    }
+  }
+  _marchableSet = set;
+  return set;
+}
 /** 出兵開始。失敗理由 or null */
 function startMarch(ti) {
   const t = S.world.tiles[ti];
@@ -910,6 +942,7 @@ function resolveMarches(t) {
       }
       tile.ownerId = "player";
       S.player.ownedTiles.push(m.targetIdx);
+      invalidateMarchable(); // 自領が広がると出兵可能範囲も変わる
       const bonus = CONFIG.DIAMOND_CAPTURE_BONUS_PER_LEVEL * tile.level;
       S.player.diamonds += bonus;
       toast(`⚔️ ${TILE_DEFS[tile.type].name}Lv${tile.level} を制圧！ 💎+${bonus}`);
@@ -931,6 +964,7 @@ function abandonTile(ti) {
   if (t.ownerId !== "player" || t.type === "castle") return "放棄できません";
   t.ownerId = null;
   S.player.ownedTiles = S.player.ownedTiles.filter(i => i !== ti);
+  invalidateMarchable();
   return null;
 }
 
@@ -1928,7 +1962,8 @@ const MapView = {
       if (moved) { this.offsetX = down.ox + dx; this.offsetY = down.oy + dy; this.draw(); }
     });
     this.canvas.addEventListener("pointerup", e => {
-      if (down && !moved) this.tap(e.clientX, e.clientY);
+      // 聖地コンパスのマーカーはタイルより手前にあるので先に判定する
+      if (down && !moved && !this.compassHit(e.clientX, e.clientY)) this.tap(e.clientX, e.clientY);
       down = null;
     });
     this.canvas.addEventListener("pointercancel", () => { down = null; });
@@ -1962,11 +1997,73 @@ const MapView = {
     this.offsetX = this.vw / 2 - (x + 0.5) * this.tilePx;
     this.offsetY = this.vh / 2 - (y + 0.5) * this.tilePx;
   },
+  /* 脈動アニメ用の低頻度ループ。マップタブを見ている時だけ描画するので
+   * 他タブ・バックグラウンドでは一切コストがかからない。 */
+  startAnim() {
+    if (this._animTimer || !CONFIG.MAP_ANIM_FPS) return;
+    this._animTimer = setInterval(() => {
+      if (activeTab === "map" && !document.hidden) this.draw();
+    }, Math.round(1000 / CONFIG.MAP_ANIM_FPS));
+  },
   tap(cx, cy) {
     const rect = this.canvas.getBoundingClientRect();
     const x = Math.floor((cx - rect.left - this.offsetX) / this.tilePx);
     const y = Math.floor((cy - rect.top - this.offsetY) / this.tilePx);
     if (inBounds(x, y)) openTileSheet(idx(x, y));
+  },
+  /* 画面外の聖地を画面端のマーカーで指し示す。
+   * 勝利条件が常に画面外で「何を目指すゲームか分からない」問題への対処。
+   * タップするとその聖地へマップを移動する（compassHit で判定）。 */
+  drawHolyCompass(ctx, ts, pulse) {
+    this._compassHits = [];
+    // 右下のズーム/ホームボタンや上部の情報バーと重ならないよう、端の余白を非対称にする
+    const ML = 26, MT = 26, MR = 82, MB = 52;
+    for (const t of S.world.tiles) {
+      if (t.type !== "holy") continue;
+      const cx = this.offsetX + (t.x + 0.5) * ts, cy = this.offsetY + (t.y + 0.5) * ts;
+      if (cx >= 0 && cx <= this.vw && cy >= 0 && cy <= this.vh) continue; // 画面内なら不要
+      const mx = clamp(cx, ML, this.vw - MR), my = clamp(cy, MT, this.vh - MB);
+      const mine = t.ownerId === "player";
+      const dist = chebyshev(t.x, t.y, CENTER, CENTER);
+      // 台座
+      ctx.beginPath();
+      ctx.arc(mx, my, 17, 0, Math.PI * 2);
+      ctx.fillStyle = mine ? "rgba(80,60,20,.92)" : "rgba(58,32,64,.92)";
+      ctx.fill();
+      ctx.strokeStyle = mine ? "#e8b84a" : `rgba(200,150,230,${0.65 + 0.35 * pulse})`;
+      ctx.lineWidth = 2; ctx.stroke();
+      // 中心方向を指す小三角
+      const ang = Math.atan2(cy - my, cx - mx);
+      ctx.beginPath();
+      ctx.moveTo(mx + Math.cos(ang) * 23, my + Math.sin(ang) * 23);
+      ctx.lineTo(mx + Math.cos(ang + 2.5) * 15, my + Math.sin(ang + 2.5) * 15);
+      ctx.lineTo(mx + Math.cos(ang - 2.5) * 15, my + Math.sin(ang - 2.5) * 15);
+      ctx.closePath();
+      ctx.fillStyle = mine ? "#e8b84a" : "rgba(200,150,230,.9)";
+      ctx.fill();
+      // アイコンと距離
+      ctx.font = "14px sans-serif"; ctx.textAlign = "center"; ctx.textBaseline = "middle";
+      ctx.fillStyle = "#fff";
+      ctx.fillText("⛩️", mx, my - 3);
+      ctx.font = "bold 9px sans-serif";
+      ctx.fillStyle = mine ? "#ffe9a8" : "#e6d2f2";
+      ctx.fillText(mine ? "領有" : dist + "マス", mx, my + 10);
+      ctx.font = `${Math.floor(ts * 0.62)}px sans-serif`; // 元に戻す
+      this._compassHits.push({ x: mx, y: my, tx: t.x, ty: t.y });
+    }
+  },
+  /** コンパスのマーカーがタップされたら、その聖地へ移動して true を返す */
+  compassHit(cx, cy) {
+    const rect = this.canvas.getBoundingClientRect();
+    const px = cx - rect.left, py = cy - rect.top;
+    for (const h of (this._compassHits || [])) {
+      if (Math.hypot(px - h.x, py - h.y) <= 20) {
+        this.centerOn(h.tx, h.ty); this.draw();
+        toast("⛩️ 聖地へ移動しました（ここを領有すれば勝利）");
+        return true;
+      }
+    }
+    return false;
   },
   draw() {
     if (!S) return;
@@ -1979,9 +2076,14 @@ const MapView = {
     const y1 = clamp(Math.ceil((this.vh - this.offsetY) / ts), 0, SIZE);
     ctx.font = `${Math.floor(ts * 0.62)}px sans-serif`;
     ctx.textAlign = "center"; ctx.textBaseline = "middle";
+    // 脈動用の位相（0〜1）。tickだけでなくアニメループからも描画されるので滑らかに動く
+    const pulse = (Math.sin(now() / 420) + 1) / 2;
+    const marchable = CONFIG.MAP_HIGHLIGHT_MARCHABLE && !S.player.marches.length
+      ? getMarchableTiles() : null;
     for (let y = y0; y < y1; y++) {
       for (let x = x0; x < x1; x++) {
-        const t = S.world.tiles[idx(x, y)];
+        const ti = idx(x, y);
+        const t = S.world.tiles[ti];
         const px = this.offsetX + x * ts, py = this.offsetY + y * ts;
         // 地色（レベルが高いほど明るく）
         ctx.fillStyle = TILE_DEFS[t.type].color;
@@ -1997,13 +2099,42 @@ const MapView = {
           ctx.lineWidth = 2;
           ctx.strokeRect(px + 1, py + 1, ts - 3, ts - 3);
         }
+        // 出兵可能タイルの強調（隣接ルールを目で分かるようにする）
+        if (marchable && marchable.has(ti)) {
+          ctx.fillStyle = `rgba(120,215,255,${0.10 + 0.10 * pulse})`;
+          ctx.fillRect(px, py, ts - 1, ts - 1);
+          ctx.strokeStyle = `rgba(140,225,255,${0.55 + 0.35 * pulse})`;
+          ctx.lineWidth = 2;
+          ctx.setLineDash([4, 3]);
+          ctx.strokeRect(px + 1.5, py + 1.5, ts - 4, ts - 4);
+          ctx.setLineDash([]);
+        }
         // アイコン（ズームが小さい時は省略）
         if (ts >= 13 && TILE_DEFS[t.type].emoji) {
           ctx.fillStyle = "#fff";
           ctx.fillText(TILE_DEFS[t.type].emoji, px + ts / 2, py + ts / 2 + 1);
         }
+        // 自城は主人公として際立たせる（AI城と見分けがつかない問題への対処）
+        if (t.type === "castle" && t.ownerId === "player") {
+          ctx.strokeStyle = `rgba(255,215,110,${0.6 + 0.4 * pulse})`;
+          ctx.lineWidth = 2.5;
+          ctx.beginPath();
+          ctx.arc(px + ts / 2, py + ts / 2, ts * 0.52 + 2 + pulse * 2, 0, Math.PI * 2);
+          ctx.stroke();
+          if (ts >= 16) { // ズームが十分な時だけ「自城」ラベル
+            ctx.font = `bold ${Math.max(8, Math.floor(ts * 0.3))}px sans-serif`;
+            ctx.fillStyle = "#1a1408";
+            const lw = ctx.measureText("自城").width + 6;
+            ctx.fillStyle = "rgba(255,215,110,.92)";
+            ctx.fillRect(px + ts / 2 - lw / 2, py - ts * 0.34, lw, ts * 0.30);
+            ctx.fillStyle = "#1a1408";
+            ctx.fillText("自城", px + ts / 2, py - ts * 0.19);
+            ctx.font = `${Math.floor(ts * 0.62)}px sans-serif`; // 元に戻す
+          }
+        }
       }
     }
+    if (CONFIG.MAP_HOLY_COMPASS) this.drawHolyCompass(ctx, ts, pulse);
     // 出兵ラインと部隊ドット
     const t0 = now();
     for (const m of S.player.marches) {
@@ -2022,7 +2153,7 @@ const MapView = {
     const march = S.player.marches[0];
     $("mapInfo").textContent = march
       ? `⚔️ 出兵中… 到着まで ${fmtSec((march.arriveAt - t0) / 1000)}`
-      : `領地 ${S.player.ownedTiles.length}枚 ｜ 戦力 ${fmt(getArmyPower())} ｜ タイルをタップで詳細`;
+      : `領地 ${S.player.ownedTiles.length}枚 ｜ 戦力 ${fmt(getArmyPower())} ｜ 光る枠のタイルへ出兵できます`;
   },
 };
 
@@ -2342,6 +2473,7 @@ async function boot() {
   S = loadGame() || newGameState();
   if (S.flags.holyWon) $("winBanner").classList.add("show");
   MapView.init();
+  MapView.startAnim();
   grantOfflineGains();
   S.lastTickAt = now();
   renderHeader();
