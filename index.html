@@ -38,6 +38,16 @@ select{font:inherit;color:var(--fg);background:var(--bg3);border:1px solid var(-
 #header .res{white-space:nowrap}
 #header .res b{font-weight:600}
 
+/* 初陣指南バー（チュートリアル中だけヘッダー直下に出る唯一の常駐UI） */
+#guideBar{display:flex;align-items:center;gap:8px;padding:8px 12px;cursor:pointer;
+  background:linear-gradient(90deg,#3a2f10,#2a2416);border-bottom:1px solid var(--accent);
+  font-size:12px;color:#f2e2b0}
+#guideBar .guide-no{flex-shrink:0;font-weight:700;color:var(--accent)}
+#guideBar .guide-txt{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#guideBar .guide-more{flex-shrink:0;color:var(--accent);font-size:16px}
+.guide-loop{margin:12px 0 4px;padding:10px;text-align:center;font-weight:700;color:var(--accent);
+  background:rgba(232,184,74,.10);border:1px solid var(--accent);border-radius:8px}
+
 /* メイン領域 */
 #main{flex:1;overflow:hidden;position:relative}
 .tab-page{position:absolute;inset:0;overflow-y:auto;padding:12px;display:none}
@@ -172,6 +182,7 @@ select{font:inherit;color:var(--fg);background:var(--bg3);border:1px solid var(-
 <body>
 
 <header id="header"></header>
+<div id="guideBar" style="display:none" onclick="UIA.guideOpen()"></div>
 <div id="winBanner">⛩️ 聖地制圧！ 天下統一まであと一歩 ⛩️</div>
 
 <main id="main">
@@ -230,6 +241,7 @@ select{font:inherit;color:var(--fg);background:var(--bg3);border:1px solid var(-
  *   [S13] UI: PANELS        — 各タブのDOM描画
  *   [S14] UI: MAP CANVAS    — マップ描画・パン/ズーム/タップ
  *   [S15] UI: ACTIONS       — ボタンから呼ばれる操作(UIA.*)
+ *   [S15A] TUTORIAL GUIDE   — 初陣指南（最初の約1分でコアループを1周させる導線）
  *   [S16] GAME LOOP & BOOT  — tick / autosave / 起動処理
  *   [S17] UI: CITY PLOT     — 城タブの箱庭ビュー（ドラッグ配置・タップ強化）
  *   [S18] ALLIANCE CHAT     — 同盟チャット（ルールベース再生 / Grok作セリフ）
@@ -250,8 +262,17 @@ const CONFIG = {
   DEV_MODE: false,                      // trueで開発用UI（ガチャタブの画像取り込み等）を表示
   SAVE_KEY: "hakoslg_save_v1",          // localStorageキー（名前空間 hakoslg_）
   ASSET_DB: "hakoslg_assets",           // IndexedDB名（画像アセット）
-  SAVE_VERSION: 5,                     // v5: 出来事ログ S.log を追加
+  SAVE_VERSION: 6,                     // v6: 初陣指南 S.tutorial を追加
   LOG_MAX: 30,                         // 保持する出来事ログの最大件数
+
+  // --- 初陣指南（[S15A]。最初の約1分でコアループを1周させる導線） ---
+  TUTORIAL_VERSION: 1,                 // 初陣指南の仕様版
+  TUTORIAL_FIRST_TILE_COUNT: 1,        // 第一目標の領地数
+  TUTORIAL_CASTLE_TARGET_LV: 2,        // 本城の目標レベル
+  TUTORIAL_BARRACKS_TARGET_LV: 2,      // 兵舎の目標レベル
+  TUTORIAL_GACHA_COUNT: 10,            // 教えるガチャの単位（10連）
+  TUTORIAL_FINAL_TILE_COUNT: 2,        // 指南の終了条件となる領地数
+  TUTORIAL_START_RESOURCE_TYPE: "food",// 自城の8近傍に資源地が無い時の保証用タイル種別
 
   // --- 同盟チャット（Grok作セリフプールをルールベース再生。[S18]） ---
   CHAT_MAX_MESSAGES: 60,               // 保持する最大ログ数
@@ -541,6 +562,17 @@ function migrateSave(data) {
   // v4 → v5: 出来事ログ
   if (!data.log) data.log = [];
   if (data.logUnseen == null) data.logUnseen = 0;
+  // v5 → v6: 初陣指南。すでに遊んでいる旧セーブには今さら指南を出さない（完了扱いにする）
+  if (!data.tutorial) {
+    const p = data.player;
+    const pristine = (p.ownedTiles || []).length === 0
+      && ((p.gacha && p.gacha.total) || 0) === 0
+      && (p.buildings || []).every(b => b.level === 1);
+    data.tutorial = pristine
+      ? { version: CONFIG.TUTORIAL_VERSION, introSeen: false, didTenPull: false, completedAt: null }
+      : { version: CONFIG.TUTORIAL_VERSION, introSeen: true,
+          didTenPull: ((p.gacha && p.gacha.total) || 0) >= CONFIG.TUTORIAL_GACHA_COUNT, completedAt: now() };
+  }
   data.version = CONFIG.SAVE_VERSION;
   return data;
 }
@@ -672,6 +704,19 @@ function generateWorld() {
   for (const [hx, hy] of [[4, 4], [SIZE - 5, 4], [4, SIZE - 5], [SIZE - 5, SIZE - 5]]) {
     tiles[idx(hx, hy)] = { x: hx, y: hy, type: "holy", level: 6, ownerId: null };
   }
+  // 初陣指南①（最初の制圧）が乱数で詰まないよう、自城の8近傍にLv1資源地を最低1枚保証する。
+  // 新規ワールド生成時だけの処理なので、既存セーブのマップには影響しない。
+  const around = [];
+  for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+    if (!dx && !dy) continue;
+    const nx = CENTER + dx, ny = CENTER + dy;
+    if (inBounds(nx, ny)) around.push(idx(nx, ny));
+  }
+  if (!around.some(ti => RES_KEYS.includes(tiles[ti].type))) {
+    const t = tiles[pick(around)];
+    t.type = CONFIG.TUTORIAL_START_RESOURCE_TYPE;
+    t.level = 1;
+  }
   return { size: SIZE, tiles };
 }
 
@@ -734,6 +779,8 @@ function generateAIUsers(world) {
  *   nextIncidentCheckAt: number(ms),                    // 次の忠誠チェック時刻
  *   log: [{id,ts,kind,text}],   // 出来事ログ([S20])。上限 CONFIG.LOG_MAX、古い順に切り捨て
  *   logUnseen: number,          // ログの未読件数（開くと0）
+ *   tutorial: { version, introSeen, didTenPull, completedAt },  // 初陣指南([S15A])
+ *     // 現在ステップは保存しない（getTutorialStep がゲーム状態から都度算出する）
  * }
  */
 function newGameState() {
@@ -769,6 +816,9 @@ function newGameState() {
     nextIncidentCheckAt: 0,    // 次の忠誠チェック時刻(ms)
     log: [],                   // 出来事ログ [{id,ts,kind,text}]（上限 CONFIG.LOG_MAX）。[S20]
     logUnseen: 0,              // 未読件数（ログを開くと0）
+    // 初陣指南([S15A])。現在ステップは保存せず毎回ゲーム状態から算出するため、
+    // ここには「一度きりの事実」だけを持つ。
+    tutorial: { version: CONFIG.TUTORIAL_VERSION, introSeen: false, didTenPull: false, completedAt: null },
   };
 }
 
@@ -975,6 +1025,13 @@ function resolveMarches(t) {
       const bonus = CONFIG.DIAMOND_CAPTURE_BONUS_PER_LEVEL * tile.level;
       S.player.diamonds += bonus;
       toast(`⚔️ ${TILE_DEFS[tile.type].name}Lv${tile.level} を制圧！ 💎+${bonus}`, "capture");
+      // 初制圧時だけ「領地が継続的に何を生むか」を1本にまとめて明示する
+      // （コアループの起点。初陣指南①の達成通知もこれが兼ねる）
+      if (S.player.ownedTiles.length === 1) {
+        const dph = CONFIG.DIAMOND_PER_TILELEVEL_PER_HOUR * tile.level;
+        const rph = RES_KEYS.includes(tile.type) ? CONFIG.TILE_PROD_PER_LEVEL_PER_HOUR * tile.level : 0;
+        toast(`🏳️ 初領地を得た！ 💎+${dph}/h${rph ? ` ／ ${RES_DEFS[tile.type].emoji}+${rph}/h` : ""} が毎時入り続けます`);
+      }
       chatEvent("onPlayerCapture", { ctx: { tile: TILE_DEFS[tile.type].name } }); // 同盟員が祝う
       if (tile.type === "holy" && !S.flags.holyWon) {
         S.flags.holyWon = true;
@@ -1034,6 +1091,8 @@ function doGacha(count) {
   }
   const t = now();
   for (const def of results) S.player.cards.push({ uid: uid("c"), defId: def.id, obtainedAt: t });
+  // 初陣指南④は「10連を引いた」ことが条件（単発では達成しない）
+  if (count === CONFIG.TUTORIAL_GACHA_COUNT && S.tutorial) S.tutorial.didTenPull = true;
   return results;
 }
 
@@ -1798,6 +1857,7 @@ const LOG_KINDS = {
   ally:     { color: "#d0a0e0" },  // 同盟（勧誘・事件の結末）
   incident: { color: "#e0a060" },  // 同盟内事件の発生
   offline:  { color: "#9aa5bb" },  // オフライン収益
+  tutorial: { color: "#e8b84a" },  // 初陣指南の達成
 };
 /** 出来事を1件記録（上限超過分は古い方から切り捨て） */
 function logEvent(kind, text) {
@@ -1851,7 +1911,8 @@ function renderHeader() {
   $("header").innerHTML =
     RES_KEYS.map(k =>
       `<span class="res">${RES_DEFS[k].emoji}<b>${fmt(S.player.resources[k])}</b></span>`).join("") +
-    `<span class="res">💎<b>${fmt(S.player.diamonds)}</b> <span class="dim small">+${fmt(per.diamonds)}/h</span></span>`;
+    // ダイヤの出どころ（＝領地）を常時明示する。本作のコアループを忘れさせないための恒久表示
+    `<span class="res">💎<b>${fmt(S.player.diamonds)}</b> <span class="dim small">+${fmt(per.diamonds)}/h ←領地</span></span>`;
 }
 
 /* 城タブ本体。箱庭ビューの構築/ドラッグ/強化シートは [S17] に置く。
@@ -2367,6 +2428,20 @@ const UIA = {
     closeSheet(); renderHeader();
     if (activeTab === "alliance") renderAlliance(); // 同盟タブの候補一覧からも呼ばれる
   },
+  /** 初陣指南バーのタップ → 詳細シート */
+  guideOpen() { openTutorialSheet(false); },
+  /** 指南シートの行動ボタン → 該当タブへ移動（操作は強制せず、場所まで案内するだけ） */
+  guideGo() {
+    const step = getTutorialStep();
+    closeSheet();
+    if (!step || step === "complete") return;
+    const d = TUTORIAL_STEPS[step];
+    if (d.tab) switchTab(d.tab);
+    if (step === "capture1" || step === "capture2") {
+      MapView.centerOn(CENTER, CENTER); MapView.draw();
+      toast("光る枠のタイルをタップして出兵しましょう");
+    }
+  },
   /** 勧誘候補の位置へマップを移動して表示（同盟タブ→マップの導線） */
   jumpToAI(aiId) {
     const ai = S.aiUsers.find(a => a.id === aiId);
@@ -2420,6 +2495,141 @@ const UIA = {
     input.click();
   },
 };
+
+/* =====================================================================
+ * [S15A] TUTORIAL GUIDE — 初陣指南
+ *
+ * 「説明を読ませる」のではなく、最初の約1分で
+ *   領地を取る → 本城を上げる → 兵舎を上げる → 10連 → もう一度領地を取る
+ * とコアループを1周させ、ゲームの正体を体験で理解させる導線。
+ *
+ * 設計方針:
+ *  - 現在ステップは保存せず getTutorialStep() がゲーム状態から都度算出する。
+ *    そのため順番を無視して先に本城を上げても破綻しない。
+ *  - 操作ロック・強制モーダルはしない。指南中も全タブ・全機能を自由に使える。
+ *  - チュートリアル固有の報酬は配らない（初期1000💎を軍資金として扱う）。
+ *  - 判定と描画はこのセクションに集約し、ゲームロジック側へ条件分岐を散らさない。
+ * ===================================================================*/
+const TUTORIAL_STEPS = {
+  capture1: {
+    no: 1, head: "一、旗を立てよ", bar: "隣の資源地を制圧",
+    desc: "隣の資源地へ兵を進めよ。<br>領地となれば、資源とダイヤが時と共に城へ届く。",
+    cta: "⚔️ マップへ", tab: "map",
+    done: "", // 達成通知は制圧時の「初領地」トースト([S09])が兼ねるため重複させない
+  },
+  castle2: {
+    no: 2, head: "二、城を広げよ", bar: `本城をLv${CONFIG.TUTORIAL_CASTLE_TARGET_LV}へ`,
+    desc: "本城は城下の器。<br>Lv2へ改修し、建物をさらに育てられる城とせよ。",
+    cta: "🏯 本城を見る", tab: "city",
+    done: "🏯 本城Lv2！ 城下の建物も次の段階へ進める。",
+  },
+  barracks2: {
+    no: 3, head: "三、兵を鍛えよ", bar: `兵舎をLv${CONFIG.TUTORIAL_BARRACKS_TARGET_LV}へ`,
+    desc: "名将のみでは戦は勝てぬ。<br>兵舎を鍛え、軍の地力を高めよ。",
+    cta: "⚔️ 兵舎を見る", tab: "city",
+    done: `⚔️ 兵舎Lv2！ 部隊戦力 +${CONFIG.POWER_PER_BARRACKS_LV}`,
+  },
+  gacha10: {
+    no: 4, head: "四、将を迎えよ", bar: `${CONFIG.TUTORIAL_GACHA_COUNT}連で武将を登用`,
+    desc: "領地から得たダイヤで、新たな将を迎えよう。<br>10連ならSR以上の将が一人は加わる。",
+    cta: "💎 10連へ", tab: "gacha",
+    done: "🎴 新たな将が参陣！ 軍勢はさらに強くなった。",
+  },
+  capture2: {
+    no: 5, head: "五、勢いに乗れ", bar: "もう一つ領地を制圧",
+    desc: "城、兵、将――戦支度は整った。<br>その力で、もう一つ領地を広げよ。",
+    cta: "🗺️ 再びマップへ", tab: "map",
+    done: "",
+  },
+};
+const TUTORIAL_ORDER = ["capture1", "castle2", "barracks2", "gacha10", "capture2"];
+
+/** 現在の指南ステップキーを状態から算出。完了済み/対象外なら null */
+function getTutorialStep() {
+  const tu = S.tutorial;
+  if (!tu || tu.completedAt) return null;
+  if (S.player.ownedTiles.length < CONFIG.TUTORIAL_FIRST_TILE_COUNT) return "capture1";
+  if (S.player.castleLevel < CONFIG.TUTORIAL_CASTLE_TARGET_LV) return "castle2";
+  if (getBuilding("barracks").level < CONFIG.TUTORIAL_BARRACKS_TARGET_LV) return "barracks2";
+  if (!tu.didTenPull) return "gacha10";
+  if (S.player.ownedTiles.length < CONFIG.TUTORIAL_FINAL_TILE_COUNT) return "capture2";
+  return "complete";
+}
+/** 指南バーの描画。表示/非表示が切り替わるとマップの高さが変わるので fit() し直す */
+let _guideShown = null, _guideStep = null;
+function renderGuideBar() {
+  const bar = $("guideBar"); if (!bar) return;
+  const step = getTutorialStep();
+  const show = !!step && step !== "complete";
+  if (show) {
+    const d = TUTORIAL_STEPS[step];
+    // 建物の改修中はその残り時間を出して「待てばよい」と分かるようにする
+    let sub = d.bar;
+    if (step === "castle2" || step === "barracks2") {
+      const b = getBuilding(step === "castle2" ? "castle" : "barracks");
+      if (b.upgradeEndsAt) sub = `改修中… 残り ${fmtSec((b.upgradeEndsAt - now()) / 1000)}`;
+    }
+    const html = `<span class="guide-no">📜 初陣指南 ${d.no}/${TUTORIAL_ORDER.length}</span>
+      <span class="guide-txt"><b>${d.head}</b>　${sub}</span><span class="guide-more">›</span>`;
+    if (bar.innerHTML !== html) bar.innerHTML = html;
+  }
+  if (_guideShown !== show) {
+    _guideShown = show;
+    bar.style.display = show ? "" : "none";
+    if (activeTab === "map") { MapView.fit(); MapView.draw(); }
+  }
+}
+/** 指南の詳細シート（バーのタップ、および初回の自動表示） */
+function openTutorialSheet(intro) {
+  const step = getTutorialStep();
+  if (intro || !step || step === "complete") {
+    if (intro) {
+      $("sheet").innerHTML = `<h3>📜 初陣指南</h3>
+        <div class="small" style="line-height:1.7;margin-top:6px">
+          天下への道は、一枚の領地から始まる。<br>
+          領地は資源とダイヤを生み、ダイヤは新たな将を招く。<br>
+          城と兵を鍛え、得た力でさらに領地を広げよ。</div>
+        <div class="actions"><button class="primary" onclick="UIA.guideGo()">⚔️ 初陣へ</button></div>`;
+      $("sheet").classList.add("open");
+    }
+    return;
+  }
+  const d = TUTORIAL_STEPS[step];
+  $("sheet").innerHTML = `<h3>${d.head}</h3>
+    <div class="dim small">初陣指南 ${d.no}/${TUTORIAL_ORDER.length}</div>
+    <div class="small" style="line-height:1.7;margin-top:8px">${d.desc}</div>
+    <div class="actions">
+      <button class="primary" onclick="UIA.guideGo()">${d.cta}</button>
+      <button onclick="closeSheet()">閉じる</button>
+    </div>`;
+  $("sheet").classList.add("open");
+}
+/** tickから呼ぶ: ステップの進行を検出して達成トーストを出し、完了処理も行う */
+function checkTutorialProgress() {
+  if (!S.tutorial || S.tutorial.completedAt) return;
+  const step = getTutorialStep();
+  if (_guideStep === null) { _guideStep = step; return; } // 初回は基準を取るだけ
+  if (step !== _guideStep) {
+    const prev = TUTORIAL_STEPS[_guideStep];
+    if (prev && prev.done) toast(prev.done, "tutorial");
+    _guideStep = step;
+    if (step === "complete") completeTutorial();
+  }
+}
+/** 指南の完了。バーを消し、コアループを明示して締める */
+function completeTutorial() {
+  S.tutorial.completedAt = now();
+  logEvent("tutorial", "🎉 初陣指南 完了");
+  $("sheet").innerHTML = `<h3>🎉 初陣指南 完了</h3>
+    <div class="small" style="line-height:1.7;margin-top:6px">
+      領地を広げれば、資源とダイヤが増える。<br>
+      ダイヤで将を迎え、城と兵舎を鍛えれば軍は強くなる。<br>
+      強くなった軍で、さらに遠き地へ進め。</div>
+    <div class="guide-loop">領土 → ダイヤ → 戦力 → さらに領土</div>
+    <div class="actions"><button class="primary" onclick="closeSheet()">🏯 天下へ進む</button></div>`;
+  $("sheet").classList.add("open");
+  renderGuideBar();
+}
 
 /* =====================================================================
  * [S17] UI: CITY PLOT — 城タブの箱庭ビュー（ドラッグ配置・タップ強化）
@@ -2610,7 +2820,9 @@ function tick() {
   aiTickAll(t);
   chatTick(t);
   incidentTick(t);
+  checkTutorialProgress();
   renderHeader();
+  renderGuideBar();
   updateChatBadge();
   updateMapBadge();
   // 同盟タブはselect/入力保護のため、構成が変わった時だけ full 再描画（入力中の文字は保全）。
@@ -2639,7 +2851,13 @@ async function boot() {
   grantOfflineGains();
   S.lastTickAt = now();
   renderHeader();
+  renderGuideBar();
   MapView.draw();
+  // 初陣指南の導入は初回1回だけ自動表示（閉じてリロードしても再表示しない）
+  if (S.tutorial && !S.tutorial.introSeen && !S.tutorial.completedAt) {
+    S.tutorial.introSeen = true;
+    openTutorialSheet(true);
+  }
   // タブバー
   document.querySelectorAll("#tabbar button").forEach(b => b.onclick = () => switchTab(b.dataset.tab));
   // ループ＆自動保存

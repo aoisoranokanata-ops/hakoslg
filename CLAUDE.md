@@ -105,6 +105,7 @@ Claude Code はセッション開始時にこのファイルを読むこと。
 [S13] UI: PANELS      renderHeader/City/Cards/Gacha/Alliance
 [S14] UI: MAP CANVAS  MapView（描画・パン・ズーム・タップ）+ openTileSheet
 [S15] UI: ACTIONS     UIA.* — ボタンonclickの入口
+[S15A] TUTORIAL GUIDE 初陣指南。getTutorialStep()が状態から現在ステップを算出
 [S16] GAME LOOP       tick(1秒) / switchTab / boot
 [S17] UI: CITY PLOT   城タブの箱庭ビュー（ドラッグ配置・タップ強化・ティア外観）
 [S18] ALLIANCE CHAT   同盟チャット。CHAT_LINES(セリフプール)+chatEvent/chatTick で再生
@@ -176,12 +177,16 @@ Claude Code はセッション開始時にこのファイルを読むこと。
   制圧/敗北/建物完成/同盟/事件/オフライン収益を種別ごとに色分け（敗北は赤で強調）。
   kind省略のトースト（操作エラー等）はログに残さない
 
+- **[DONE] 初陣指南 [S15A]** — ChatGPT設計の確定仕様を実装。最初の約1分で
+  「領地→本城→兵舎→10連→もう1枚領地」とコアループを1周させる5段階の導線。
+  ヘッダー直下に指南バー1要素のみ（新タブ・操作ロック・追加報酬なし）。
+  現在ステップは保存せず `getTutorialStep()` が状態から算出するので順不同でも破綻しない。
+  ダイヤの出どころ `+X/h ←領地` は完了後も恒久表示。SAVE_VERSION 6。
+  既存セーブは「完全初期状態のみ指南開始、遊んでいれば完了扱い」で押し付けない
+
 ### ⬜ 未実装（優先度順）
-0. **UX検品の未対応分** — [UX_REVIEW.md](UX_REVIEW.md) の「★第1回検品の結果と対応状況」参照。
-   C:コアループの可視化（高）※A:イベントログ／B:勧誘導線は対応済み。
-   Cは**チュートリアル(#6)と統合**して [DESIGN_BRIEFS.md](DESIGN_BRIEFS.md) 依頼1でChatGPTに設計発注中
-0b. **地形システム** — 山/川と埠頭/関所/首都の資源州/三国鼎立の地勢。
-   [DESIGN_BRIEFS.md](DESIGN_BRIEFS.md) 依頼2で設計発注中。初回導線の実装後に着手予定。
+0. **地形システム** — 山/川と埠頭/関所/首都の資源州/三国鼎立の地勢。
+   [DESIGN_BRIEFS.md](DESIGN_BRIEFS.md) 依頼2で設計発注中（初回導線は完了したので次はこれ）。
    進軍ルール（隣接判定・出兵可能タイル・AI拡張）と強く干渉するため仕様確定が先
 1. **戦闘の深掘り** — 兵種・兵数、出兵時のカード手動編成UI、複数部隊（`MAX_MARCHES`を兵舎Lvで増加）
 2. **AI城への攻撃・AIからの反撃** — 現在AIはプレイヤー領を奪わない。対人感を出すならここ
