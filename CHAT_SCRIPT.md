@@ -52,7 +52,19 @@ const CHAT_LINES = {
 };
 ```
 
-現状は各プールに暫定4〜6本入っている（Claude作の仮）。Grokはこれを**置き換え/増量**してよい。
+**現状（2026-07-25 更新）: Grok納品の第1弾を反映済み。計185本。**
+
+| プール | 本数 |
+|---|---|
+| ambient.expander / balanced / turtle | 22 / 21 / 21 |
+| onJoin | 18 |
+| onPlayerCapture | 17 |
+| onPlayerCastleUp | 14 |
+| onRole（将軍/都督/斥候/軍師/一般 各8） | 40 |
+| onHolyWin | 14 |
+| onPlayerSend | 18 |
+
+さらに増量する場合も同じフォーマットで納品すればそのまま差し替えられる。
 
 ## 追加プールの提案（新イベントを足したい場合）
 

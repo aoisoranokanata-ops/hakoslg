@@ -145,7 +145,8 @@ Claude Code はセッション開始時にこのファイルを読むこと。
   `tools/embed_art.py` はそのまま base64 化。今後の新規アートも同方式で最適化してから配置する
 - **[DONE] 同盟チャット [S18]** — LLM不使用のルールベース再生。`CHAT_LINES`(性格別ambient＋
   イベント別プール)を `chatEvent(kind,opts)` / `chatTick(t)` で再生。加入/制圧/昇格/本城UP/勝利に連動、
-  プレイヤー発言可(HTMLエスケープ済)、未読バッジ、ログ上限60。**セリフ増量は [CHAT_SCRIPT.md](CHAT_SCRIPT.md) 参照＝Grok担当**。
+  プレイヤー発言可(HTMLエスケープ済)、未読バッジ、ログ上限60。**Grok納品の第1弾セリフ185本を反映済み**
+  （追加増量の手順・フォーマットは [CHAT_SCRIPT.md](CHAT_SCRIPT.md)）。
   次段: 同盟内事件(不満AIのなだめ/追放等)を chatEvent の枠組みに載せる
 
 ### ⬜ 未実装（優先度順）
