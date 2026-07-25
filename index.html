@@ -1381,6 +1381,22 @@ function randomAllianceAI() {
   return S.aiUsers.find(a => a.id === id) || null;
 }
 /**
+ * セリフプールを解決する。プールは「フラット配列」でも「サブキー別オブジェクト」でもよく、
+ * Grokの納品形式が変わっても壊れないようフォールバックする:
+ *   1. 配列ならそのまま使う（sub は無視）
+ *   2. オブジェクト＋subが該当すればそれを使う（性格別・役職別）
+ *   3. オブジェクトだがsubが無い/該当しない場合は全サブプールを平坦化して使う
+ *      （＝キーの取りこぼしで発話が消えるのを防ぐ安全網）
+ */
+function resolveChatPool(root, sub) {
+  if (!root) return null;
+  if (Array.isArray(root)) return root;
+  if (sub && Array.isArray(root[sub]) && root[sub].length) return root[sub];
+  const flat = [];
+  for (const v of Object.values(root)) if (Array.isArray(v)) flat.push(...v);
+  return flat;
+}
+/**
  * イベント発火 → 該当プールから1つ選び同盟AIの発言として投稿。
  * kind: ambient以外の CHAT_LINES キー。opts.ai指定でその人物、無指定でランダム同盟AI。
  * opts.sub でネストプール(onRole)のサブキー、opts.ctx で追加テンプレ変数。
@@ -1388,8 +1404,7 @@ function randomAllianceAI() {
  */
 function chatEvent(kind, opts = {}) {
   if (!S.chat) return;
-  let pool = CHAT_LINES[kind];
-  if (opts.sub) pool = pool && pool[opts.sub];
+  const pool = resolveChatPool(CHAT_LINES[kind], opts.sub);
   if (!pool || !pool.length) return;
   const ai = opts.ai || randomAllianceAI();
   if (!ai) return;
@@ -1511,18 +1526,18 @@ function resolveIncident(action, auto) {
     ai.loyalty = clamp(ai.loyalty - CONFIG.IGNORE_LOYALTY_PENALTY, 0, CONFIG.LOYALTY_MAX);
     S.incident = null;
     if (ai.loyalty < CONFIG.LOYALTY_LEAVE_THRESHOLD) {
-      chatEvent("onLeave", { ai });
+      chatEvent("onLeave", { ai, sub: ai.personality }); // 結末3種は性格別プール（無ければ平坦化）
       removeFromAlliance(ai, false); // 再勧誘は可能
       toast(`💔 ${ai.name} が同盟を去りました`);
     } else {
-      chatEvent("onIgnore", { ai });
+      chatEvent("onIgnore", { ai, sub: ai.personality });
       toast(auto ? `⌛ ${ai.name} の訴えを放置しました（忠誠${Math.round(ai.loyalty)}）`
                  : `😐 ${ai.name} を放置しました（忠誠${Math.round(ai.loyalty)}）`);
     }
     return null;
   }
   if (action === "exile") {
-    chatEvent("onExile", { ai });
+    chatEvent("onExile", { ai, sub: ai.personality });
     removeFromAlliance(ai, true); // 追放者は二度と勧誘できない
     S.incident = null;
     toast(`⛔ ${ai.name} を追放しました`);
