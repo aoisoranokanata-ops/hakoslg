@@ -48,7 +48,16 @@ select{font:inherit;color:var(--fg);background:var(--bg3);border:1px solid var(-
 #mapWrap{position:absolute;inset:0}
 #mapCanvas{position:absolute;inset:0;width:100%;height:100%;touch-action:none;background:#0e1118}
 #mapCtrl{position:absolute;right:10px;bottom:14px;display:flex;flex-direction:column;gap:8px}
-#mapCtrl button{width:44px;height:44px;font-size:18px;border-radius:10px;background:rgba(37,45,61,.9)}
+#mapCtrl button{width:44px;height:44px;font-size:18px;border-radius:10px;background:rgba(37,45,61,.9);position:relative}
+#mapCtrl .badge{position:absolute;top:-3px;right:-3px;min-width:16px;height:16px;background:var(--danger);
+  color:#fff;border-radius:8px;font-size:10px;line-height:16px;text-align:center;padding:0 3px;font-weight:700}
+
+/* 出来事ログ */
+.log-list{max-height:46vh;overflow-y:auto;margin-top:8px;overscroll-behavior:contain}
+.log-row{display:flex;gap:8px;padding:5px 2px;border-bottom:1px solid rgba(255,255,255,.06);font-size:12px}
+.log-row:last-child{border-bottom:none}
+.log-time{color:var(--fg-dim);flex-shrink:0;font-variant-numeric:tabular-nums}
+.log-text{line-height:1.4;word-break:break-word}
 #mapInfo{position:absolute;left:10px;top:10px;background:rgba(20,24,33,.85);border:1px solid var(--line);
   border-radius:8px;padding:6px 10px;font-size:12px;color:var(--fg-dim);max-width:70%}
 
@@ -168,6 +177,7 @@ select{font:inherit;color:var(--fg);background:var(--bg3);border:1px solid var(-
       <canvas id="mapCanvas"></canvas>
       <div id="mapInfo">読み込み中…</div>
       <div id="mapCtrl">
+        <button id="logBtn">📜<span class="badge" id="mapCtrlBadge" style="display:none"></span></button>
         <button id="zoomIn">＋</button>
         <button id="zoomOut">－</button>
         <button id="zoomHome">🏯</button>
@@ -185,7 +195,7 @@ select{font:inherit;color:var(--fg);background:var(--bg3);border:1px solid var(-
 </main>
 
 <nav id="tabbar">
-  <button data-tab="map" class="active"><span class="ico">🗺️</span>マップ</button>
+  <button data-tab="map" class="active"><span class="ico">🗺️</span>マップ<span class="badge" id="mapBadge" style="display:none"></span></button>
   <button data-tab="city"><span class="ico">🏯</span>城</button>
   <button data-tab="cards"><span class="ico">🎴</span>カード</button>
   <button data-tab="gacha"><span class="ico">💎</span>ガチャ</button>
@@ -220,6 +230,7 @@ select{font:inherit;color:var(--fg);background:var(--bg3);border:1px solid var(-
  *   [S17] UI: CITY PLOT     — 城タブの箱庭ビュー（ドラッグ配置・タップ強化）
  *   [S18] ALLIANCE CHAT     — 同盟チャット（ルールベース再生 / Grok作セリフ）
  *   [S19] ALLIANCE INCIDENTS— 同盟内事件（忠誠低下→不満→なだめ/任命/放置/追放）
+ *   [S20] EVENT LOG         — 出来事ログ（トーストを見逃しても後から読める）
  *
  * 設計原則:
  *  - 可変状態はグローバル `S` 1個のみ。S をJSON化したものがセーブデータ。
@@ -235,7 +246,8 @@ const CONFIG = {
   DEV_MODE: false,                      // trueで開発用UI（ガチャタブの画像取り込み等）を表示
   SAVE_KEY: "hakoslg_save_v1",          // localStorageキー（名前空間 hakoslg_）
   ASSET_DB: "hakoslg_assets",           // IndexedDB名（画像アセット）
-  SAVE_VERSION: 4,                     // v4: AIに loyalty、S.incident を追加
+  SAVE_VERSION: 5,                     // v5: 出来事ログ S.log を追加
+  LOG_MAX: 30,                         // 保持する出来事ログの最大件数
 
   // --- 同盟チャット（Grok作セリフプールをルールベース再生。[S18]） ---
   CHAT_MAX_MESSAGES: 60,               // 保持する最大ログ数
@@ -468,12 +480,18 @@ function fmtSec(sec) {
 function fmtCost(cost) {
   return Object.entries(cost).map(([k, v]) => RES_DEFS[k].emoji + fmt(v)).join(" ");
 }
-function toast(msg) {
+/**
+ * 画面下部に一時メッセージを出す。
+ * kind を渡すと出来事ログ([S20])にも残り、トーストが消えた後から読み返せる。
+ * kind 省略時は即時フィードバック（操作エラー等）とみなしログには残さない。
+ */
+function toast(msg, kind) {
   const el = document.createElement("div");
   el.className = "msg";
   el.textContent = msg;
   $("toast").appendChild(el);
   setTimeout(() => el.remove(), 3200);
+  if (kind) logEvent(kind, msg);
 }
 /** innerHTML に差し込む前のHTMLエスケープ（プレイヤー入力の混入対策） */
 function escapeHtml(s) {
@@ -516,6 +534,9 @@ function migrateSave(data) {
   }
   if (data.incident === undefined) data.incident = null;
   if (data.nextIncidentCheckAt == null) data.nextIncidentCheckAt = 0;
+  // v4 → v5: 出来事ログ
+  if (!data.log) data.log = [];
+  if (data.logUnseen == null) data.logUnseen = 0;
   data.version = CONFIG.SAVE_VERSION;
   return data;
 }
@@ -707,6 +728,8 @@ function generateAIUsers(world) {
  *   chat: { messages:[{id,ts,senderId,text}], nextAmbientAt, unseen },  // 同盟チャット([S18])
  *   incident: {id,aiId,kind,createdAt,expiresAt}|null,  // 発生中の同盟内事件([S19])。同時1件
  *   nextIncidentCheckAt: number(ms),                    // 次の忠誠チェック時刻
+ *   log: [{id,ts,kind,text}],   // 出来事ログ([S20])。上限 CONFIG.LOG_MAX、古い順に切り捨て
+ *   logUnseen: number,          // ログの未読件数（開くと0）
  * }
  */
 function newGameState() {
@@ -740,6 +763,8 @@ function newGameState() {
     chat: { messages: [], nextAmbientAt: 0, unseen: 0 },
     incident: null,            // 発生中の同盟内事件 {id,aiId,kind,createdAt,expiresAt} or null（同時1件）
     nextIncidentCheckAt: 0,    // 次の忠誠チェック時刻(ms)
+    log: [],                   // 出来事ログ [{id,ts,kind,text}]（上限 CONFIG.LOG_MAX）。[S20]
+    logUnseen: 0,              // 未読件数（ログを開くと0）
   };
 }
 
@@ -802,7 +827,7 @@ function grantOfflineGains() {
     return g > 0 ? RES_DEFS[k].emoji + fmt(g) : null;
   }).filter(Boolean).join(" ");
   const dg = Math.floor(S.player.diamonds - before.diamonds);
-  toast(`⏰ オフライン収益（${fmtSec(capped)}分）: ${gains}${dg > 0 ? " 💎" + fmt(dg) : ""}`);
+  toast(`⏰ オフライン収益（${fmtSec(capped)}分）: ${gains}${dg > 0 ? " 💎" + fmt(dg) : ""}`, "offline");
 }
 
 /* =====================================================================
@@ -841,7 +866,7 @@ function finishUpgrades(t) {
       b.level++;
       b.upgradeEndsAt = null;
       if (b.type === "castle") { S.player.castleLevel = b.level; chatEvent("onPlayerCastleUp"); }
-      toast(`${BUILDING_DEFS[b.type].emoji} ${BUILDING_DEFS[b.type].name} が Lv${b.level} になりました`);
+      toast(`${BUILDING_DEFS[b.type].emoji} ${BUILDING_DEFS[b.type].name} が Lv${b.level} になりました`, "build");
     }
   }
 }
@@ -945,16 +970,16 @@ function resolveMarches(t) {
       invalidateMarchable(); // 自領が広がると出兵可能範囲も変わる
       const bonus = CONFIG.DIAMOND_CAPTURE_BONUS_PER_LEVEL * tile.level;
       S.player.diamonds += bonus;
-      toast(`⚔️ ${TILE_DEFS[tile.type].name}Lv${tile.level} を制圧！ 💎+${bonus}`);
+      toast(`⚔️ ${TILE_DEFS[tile.type].name}Lv${tile.level} を制圧！ 💎+${bonus}`, "capture");
       chatEvent("onPlayerCapture", { ctx: { tile: TILE_DEFS[tile.type].name } }); // 同盟員が祝う
       if (tile.type === "holy" && !S.flags.holyWon) {
         S.flags.holyWon = true;
         $("winBanner").classList.add("show");
-        toast("🎉 勝利条件達成！ 聖地を領有しました！");
+        toast("🎉 勝利条件達成！ 聖地を領有しました！", "win");
         chatEvent("onHolyWin");
       }
     } else {
-      toast(`💥 出兵失敗… 戦力${fmt(m.power)} < 防御${fmt(def)}`);
+      toast(`💥 ${TILE_DEFS[tile.type].name}Lv${tile.level} への出兵失敗… 戦力${fmt(m.power)} < 防御${fmt(def)}`, "defeat");
     }
   }
 }
@@ -1035,7 +1060,7 @@ function recruitAI(aiId) {
   if (Math.random() < chance) {
     ai.allianceId = S.alliance.id;
     S.alliance.members.push({ id: ai.id, role: "一般" });
-    toast(`🤝 ${ai.name} が同盟に加入しました！`);
+    toast(`🤝 ${ai.name} が同盟に加入しました！`, "ally");
     chatEvent("onJoin", { ai }); // 加入者本人が挨拶
   } else {
     ai.nextRecruitAt = now() + CONFIG.RECRUIT_COOLDOWN_SEC * 1000;
@@ -1660,7 +1685,7 @@ function raiseIncident(ai) {
   const kind = memberRoleOf(ai.id) === "一般" ? "noRole" : pick(["noReward", "idle"]);
   S.incident = { id: uid("inc"), aiId: ai.id, kind, createdAt: now(), expiresAt: now() + CONFIG.INCIDENT_EXPIRE_SEC * 1000 };
   chatEvent("onIncident", { ai, sub: kind });
-  toast(`⚠️ ${ai.name} が不満を訴えています（同盟タブ）`);
+  toast(`⚠️ ${ai.name} が不満を訴えています（同盟タブ）`, "incident");
 }
 /** tickから呼ぶ: 忠誠の自然低下と事件発生／期限切れ処理 */
 function incidentTick(t) {
@@ -1724,7 +1749,7 @@ function resolveIncident(action, auto) {
     if (ai.loyalty < CONFIG.LOYALTY_LEAVE_THRESHOLD) {
       chatEvent("onLeave", { ai, sub: ai.personality }); // 結末3種は性格別プール（無ければ平坦化）
       removeFromAlliance(ai, false); // 再勧誘は可能
-      toast(`💔 ${ai.name} が同盟を去りました`);
+      toast(`💔 ${ai.name} が同盟を去りました`, "ally");
     } else {
       chatEvent("onIgnore", { ai, sub: ai.personality });
       toast(auto ? `⌛ ${ai.name} の訴えを放置しました（忠誠${Math.round(ai.loyalty)}）`
@@ -1736,10 +1761,66 @@ function resolveIncident(action, auto) {
     chatEvent("onExile", { ai, sub: ai.personality });
     removeFromAlliance(ai, true); // 追放者は二度と勧誘できない
     S.incident = null;
-    toast(`⛔ ${ai.name} を追放しました`);
+    toast(`⛔ ${ai.name} を追放しました`, "ally");
     return null;
   }
   return "不明な操作です";
+}
+
+/* =====================================================================
+ * [S20] EVENT LOG — 出来事ログ
+ *
+ * 行軍の解決や建物の完成は「見ていない間」に起きるため、トーストだけでは
+ * 見逃すと何が起きたか分からなくなる（UX検品の指摘）。重要な出来事を蓄積し、
+ * 後から読み返せるようにする。記録は toast(msg, kind) の第2引数で行う。
+ * 表示はマップ画面の📜ボタン → ボトムシート。未読はマップタブにバッジで出す。
+ * ===================================================================*/
+const LOG_KINDS = {
+  capture:  { color: "#8fd98f" },  // 制圧成功
+  defeat:   { color: "#e08080" },  // 出兵失敗（見逃すと最も困る）
+  win:      { color: "#e8b84a" },  // 聖地制圧＝勝利
+  build:    { color: "#9ab6e0" },  // 建物の強化完了
+  ally:     { color: "#d0a0e0" },  // 同盟（勧誘・事件の結末）
+  incident: { color: "#e0a060" },  // 同盟内事件の発生
+  offline:  { color: "#9aa5bb" },  // オフライン収益
+};
+/** 出来事を1件記録（上限超過分は古い方から切り捨て） */
+function logEvent(kind, text) {
+  if (!S) return;
+  if (!S.log) { S.log = []; S.logUnseen = 0; }
+  S.log.push({ id: uid("log"), ts: now(), kind, text });
+  const over = S.log.length - CONFIG.LOG_MAX;
+  if (over > 0) S.log.splice(0, over);
+  S.logUnseen = (S.logUnseen || 0) + 1;
+}
+/** 時刻表示 12:34 */
+function fmtClock(ts) {
+  const d = new Date(ts);
+  return String(d.getHours()).padStart(2, "0") + ":" + String(d.getMinutes()).padStart(2, "0");
+}
+/** 出来事ログをボトムシートで表示（開いた時点で既読にする） */
+function openLogSheet() {
+  S.logUnseen = 0;
+  updateMapBadge();
+  const rows = (S.log || []).slice().reverse().map(e => {
+    const col = (LOG_KINDS[e.kind] || {}).color || "var(--fg)";
+    return `<div class="log-row"><span class="log-time">${fmtClock(e.ts)}</span>
+      <span class="log-text" style="color:${col}">${escapeHtml(e.text)}</span></div>`;
+  }).join("");
+  $("sheet").innerHTML = `<h3>📜 出来事の記録</h3>
+    <div class="dim small">新しい順。最大${CONFIG.LOG_MAX}件まで残ります</div>
+    <div class="log-list">${rows || '<div class="dim small" style="padding:10px 2px">まだ記録がありません</div>'}</div>
+    <div class="actions"><button onclick="closeSheet()">閉じる</button></div>`;
+  $("sheet").classList.add("open");
+}
+/** 未読バッジを更新（タブバーのマップと、マップ内📜ボタンの両方） */
+function updateMapBadge() {
+  const n = (S && S.logUnseen) || 0;
+  for (const id of ["mapBadge", "mapCtrlBadge"]) {
+    const el = $(id); if (!el) continue;
+    el.textContent = n > 9 ? "9+" : (n || "");
+    el.style.display = n > 0 ? "" : "none";
+  }
 }
 
 /* =====================================================================
@@ -1970,6 +2051,7 @@ const MapView = {
     $("zoomIn").onclick = () => { this.setZoom(this.zoom * 1.3); };
     $("zoomOut").onclick = () => { this.setZoom(this.zoom / 1.3); };
     $("zoomHome").onclick = () => { this.centerOn(CENTER, CENTER); this.draw(); };
+    $("logBtn").onclick = () => openLogSheet();
   },
   fit() {
     const r = this.canvas.parentElement.getBoundingClientRect();
@@ -2451,6 +2533,7 @@ function tick() {
   incidentTick(t);
   renderHeader();
   updateChatBadge();
+  updateMapBadge();
   // 同盟タブはselect/入力保護のため、構成が変わった時だけ full 再描画（入力中の文字は保全）。
   // タップ中はclick保護のため再描画しない。
   if (!pointerHeld) {
