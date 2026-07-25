@@ -103,6 +103,7 @@ Claude Code はセッション開始時にこのファイルを読むこと。
 [S15] UI: ACTIONS     UIA.* — ボタンonclickの入口
 [S16] GAME LOOP       tick(1秒) / switchTab / boot
 [S17] UI: CITY PLOT   城タブの箱庭ビュー（ドラッグ配置・タップ強化・ティア外観）
+[S18] ALLIANCE CHAT   同盟チャット。CHAT_LINES(セリフプール)+chatEvent/chatTick で再生
 ```
 
 ### データフロー（一方向）
@@ -142,6 +143,10 @@ Claude Code はセッション開始時にこのファイルを読むこと。
 - **[DONE] 同梱PNGの減色最適化** — art/ の24画像を PIL FASTOCTREE(256色＋Floyd-Steinberg)で
   PNG8化。**index.html 2.6MB → ≈660KB（約75%減）で視覚劣化なし**。art/ 自体が最適化済みで
   `tools/embed_art.py` はそのまま base64 化。今後の新規アートも同方式で最適化してから配置する
+- **[DONE] 同盟チャット [S18]** — LLM不使用のルールベース再生。`CHAT_LINES`(性格別ambient＋
+  イベント別プール)を `chatEvent(kind,opts)` / `chatTick(t)` で再生。加入/制圧/昇格/本城UP/勝利に連動、
+  プレイヤー発言可(HTMLエスケープ済)、未読バッジ、ログ上限60。**セリフ増量は [CHAT_SCRIPT.md](CHAT_SCRIPT.md) 参照＝Grok担当**。
+  次段: 同盟内事件(不満AIのなだめ/追放等)を chatEvent の枠組みに載せる
 
 ### ⬜ 未実装（優先度順）
 1. **戦闘の深掘り** — 兵種・兵数、出兵時のカード手動編成UI、複数部隊（`MAX_MARCHES`を兵舎Lvで増加）

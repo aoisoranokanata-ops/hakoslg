@@ -57,6 +57,19 @@ select{font:inherit;color:var(--fg);background:var(--bg3);border:1px solid var(-
 #tabbar button{flex:1;border:none;border-radius:0;background:none;padding:9px 0 7px;font-size:11px;color:var(--fg-dim)}
 #tabbar button .ico{display:block;font-size:19px;margin-bottom:1px}
 #tabbar button.active{color:var(--accent)}
+#tabbar button{position:relative}
+#tabbar button .badge{position:absolute;top:2px;left:calc(50% + 4px);min-width:15px;height:15px;
+  background:var(--danger);color:#fff;border-radius:8px;font-size:9px;line-height:15px;text-align:center;
+  padding:0 3px;font-weight:700}
+
+/* 同盟チャット */
+.chat-log{height:190px;overflow-y:auto;background:var(--bg);border:1px solid var(--line);border-radius:8px;
+  padding:6px 8px;margin-bottom:8px;display:flex;flex-direction:column;gap:4px;overscroll-behavior:contain}
+.chat-msg{font-size:12px;line-height:1.4;word-break:break-word}
+.chat-msg .chat-name{font-weight:700;margin-right:6px}
+.chat-input-row{display:flex;gap:6px}
+.chat-input-row input{flex:1;min-width:0;padding:7px 8px;background:var(--bg3);border:1px solid var(--line);
+  border-radius:6px;color:var(--fg);font:inherit}
 
 /* 汎用カードUI */
 .panel{background:var(--bg2);border:1px solid var(--line);border-radius:10px;padding:10px 12px;margin-bottom:10px}
@@ -168,7 +181,7 @@ select{font:inherit;color:var(--fg);background:var(--bg3);border:1px solid var(-
   <button data-tab="city"><span class="ico">🏯</span>城</button>
   <button data-tab="cards"><span class="ico">🎴</span>カード</button>
   <button data-tab="gacha"><span class="ico">💎</span>ガチャ</button>
-  <button data-tab="alliance"><span class="ico">🤝</span>同盟</button>
+  <button data-tab="alliance"><span class="ico">🤝</span>同盟<span class="badge" id="chatBadge" style="display:none"></span></button>
 </nav>
 
 <div id="sheet"></div>
@@ -197,6 +210,7 @@ select{font:inherit;color:var(--fg);background:var(--bg3);border:1px solid var(-
  *   [S15] UI: ACTIONS       — ボタンから呼ばれる操作(UIA.*)
  *   [S16] GAME LOOP & BOOT  — tick / autosave / 起動処理
  *   [S17] UI: CITY PLOT     — 城タブの箱庭ビュー（ドラッグ配置・タップ強化）
+ *   [S18] ALLIANCE CHAT     — 同盟チャット（ルールベース再生 / Grok作セリフ）
  *
  * 設計原則:
  *  - 可変状態はグローバル `S` 1個のみ。S をJSON化したものがセーブデータ。
@@ -211,7 +225,12 @@ select{font:inherit;color:var(--fg);background:var(--bg3);border:1px solid var(-
 const CONFIG = {
   SAVE_KEY: "hakoslg_save_v1",          // localStorageキー（名前空間 hakoslg_）
   ASSET_DB: "hakoslg_assets",           // IndexedDB名（画像アセット）
-  SAVE_VERSION: 2,                     // v2: buildings に城内配置座標 x,y を追加
+  SAVE_VERSION: 3,                     // v3: 同盟チャット S.chat を追加
+
+  // --- 同盟チャット（Grok作セリフプールをルールベース再生。[S18]） ---
+  CHAT_MAX_MESSAGES: 60,               // 保持する最大ログ数
+  CHAT_AMBIENT_MIN_SEC: 25,            // 環境チャット間隔の下限（秒）
+  CHAT_AMBIENT_MAX_SEC: 70,            // 環境チャット間隔の上限（秒）
 
   WORLD_SIZE: 40,                       // 40x40 グリッド
   TICK_MS: 1000,                        // ゲームtick間隔
@@ -426,6 +445,11 @@ function toast(msg) {
   $("toast").appendChild(el);
   setTimeout(() => el.remove(), 3200);
 }
+/** innerHTML に差し込む前のHTMLエスケープ（プレイヤー入力の混入対策） */
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
 
 /* =====================================================================
  * [S04] PERSISTENCE — localStorage(セーブ) + IndexedDB(画像)
@@ -454,6 +478,8 @@ function migrateSave(data) {
       b.x = p.x; b.y = p.y;
     }
   }
+  // v2 → v3: 同盟チャットログを付与
+  if (!data.chat) data.chat = { messages: [], nextAmbientAt: 0, unseen: 0 };
   data.version = CONFIG.SAVE_VERSION;
   return data;
 }
@@ -671,6 +697,7 @@ function newGameState() {
     alliance: { id: "ally_player", name: "無名同盟", members: [{ id: "player", role: "盟主" }] },
     aiUsers,
     flags: { holyWon: false },
+    chat: { messages: [], nextAmbientAt: 0, unseen: 0 },
   };
 }
 
@@ -771,7 +798,7 @@ function finishUpgrades(t) {
     if (b.upgradeEndsAt && t >= b.upgradeEndsAt) {
       b.level++;
       b.upgradeEndsAt = null;
-      if (b.type === "castle") S.player.castleLevel = b.level;
+      if (b.type === "castle") { S.player.castleLevel = b.level; chatEvent("onPlayerCastleUp"); }
       toast(`${BUILDING_DEFS[b.type].emoji} ${BUILDING_DEFS[b.type].name} が Lv${b.level} になりました`);
     }
   }
@@ -849,10 +876,12 @@ function resolveMarches(t) {
       const bonus = CONFIG.DIAMOND_CAPTURE_BONUS_PER_LEVEL * tile.level;
       S.player.diamonds += bonus;
       toast(`⚔️ ${TILE_DEFS[tile.type].name}Lv${tile.level} を制圧！ 💎+${bonus}`);
+      chatEvent("onPlayerCapture", { ctx: { tile: TILE_DEFS[tile.type].name } }); // 同盟員が祝う
       if (tile.type === "holy" && !S.flags.holyWon) {
         S.flags.holyWon = true;
         $("winBanner").classList.add("show");
         toast("🎉 勝利条件達成！ 聖地を領有しました！");
+        chatEvent("onHolyWin");
       }
     } else {
       toast(`💥 出兵失敗… 戦力${fmt(m.power)} < 防御${fmt(def)}`);
@@ -936,6 +965,7 @@ function recruitAI(aiId) {
     ai.allianceId = S.alliance.id;
     S.alliance.members.push({ id: ai.id, role: "一般" });
     toast(`🤝 ${ai.name} が同盟に加入しました！`);
+    chatEvent("onJoin", { ai }); // 加入者本人が挨拶
   } else {
     ai.nextRecruitAt = now() + CONFIG.RECRUIT_COOLDOWN_SEC * 1000;
     toast(`😔 ${ai.name} に断られました（成功率${Math.round(chance * 100)}%）`);
@@ -944,7 +974,11 @@ function recruitAI(aiId) {
 }
 function setMemberRole(memberId, role) {
   const m = S.alliance.members.find(m => m.id === memberId);
-  if (m && m.role !== "盟主") m.role = role;
+  if (m && m.role !== "盟主") {
+    m.role = role;
+    const ai = S.aiUsers.find(a => a.id === memberId);
+    if (ai) chatEvent("onRole", { ai, sub: role }); // 任命された本人が応じる
+  }
 }
 
 /* =====================================================================
@@ -997,6 +1031,117 @@ function aiTickAll(t) {
     else if (ai.personality === "turtle") aiGrow(ai);
     else Math.random() < 0.5 ? aiExpand(ai) : aiGrow(ai);
   }
+}
+
+/* =====================================================================
+ * [S18] ALLIANCE CHAT — 同盟チャット（ルールベース再生）
+ *
+ * 方針(CLAUDE.md §6): 実行時にLLM/APIは使わない。Grokが性格別セリフプールと
+ * イベント別テンプレを増量し、ゲームは既存 aiUsers の性格・行動に紐付けて再生する。
+ *
+ * CHAT_LINES: セリフの静的プール（セーブに含めない）。**Grokはここを差し替え/増量する**。
+ *   - テンプレ変数: {name}=発言者名 / {ally}=同盟名 / {tile}=タイル名
+ *   - ambient は性格キー(expander/balanced/turtle)別。他はイベント種別。
+ *   - onRole はサブキー(役職名)別のネスト。
+ * S.chat: { messages:[{id,ts,senderId,text}], nextAmbientAt, unseen }
+ *   senderId: "player" | ai.id （systemは現状未使用）
+ * ===================================================================*/
+const CHAT_LINES = {
+  ambient: {
+    expander: [
+      "また隣の土地をいただいた。この{name}、止まらぬぞ！",
+      "版図を広げてこそ武門の誉れよ。",
+      "次はどこを攻める？ 血が滾るわ。",
+      "盟主殿、遠慮は無用。どんどん攻めましょうぞ。",
+    ],
+    balanced: [
+      "田畑も兵も、釣り合いが肝心にござる。",
+      "無理は禁物。着実にまいりましょう。",
+      "{ally}の内政、抜かりはござらぬ。",
+      "攻めと守り、どちらも大事にござるな。",
+    ],
+    turtle: [
+      "守りを固めておる。焦りは禁物じゃ。",
+      "この{name}、城を枕に討ち死にする覚悟よ。",
+      "備えあれば憂いなし、と申すでな。",
+      "壁の修繕は済ませておいたぞ。",
+    ],
+  },
+  onJoin: [
+    "{name}、只今より{ally}に加わり申した！ よしなに。",
+    "この{name}の武、存分にお使いくだされ！",
+    "御縁あって参陣つかまつる。共に天下を狙いましょうぞ。",
+  ],
+  onPlayerCapture: [
+    "見事な采配、盟主殿！ {tile}を我が手に。",
+    "おお、また一つ版図が広がったな！",
+    "{tile}の制圧、祝着至極にござる。",
+    "盟主殿の勢い、留まるところを知らぬな。",
+  ],
+  onPlayerCastleUp: [
+    "本城が一段と大きゅうなったな。頼もしい限り。",
+    "天守の偉容、味方ながら惚れ惚れするわ。",
+    "本城の普請、お見事にござる！",
+  ],
+  onRole: {
+    "将軍": ["この{name}、先陣は任されよ！ 一番槍はもらった。"],
+    "都督": ["兵站はこの{name}にお任せを。兵糧は切らさぬ。"],
+    "斥候": ["{name}、敵情はすべて掴んでご覧に入れる。"],
+    "軍師": ["{name}、謀は静かに巡らせましょうぞ。"],
+    "一般": ["{name}、いかなる役目も励みまする。"],
+  },
+  onHolyWin: [
+    "聖地を我らの手に！ {ally}の名は千年残るぞ！",
+    "やり申したな盟主殿！ この日を忘れはせぬ。",
+  ],
+  onPlayerSend: [
+    "おお、盟主殿からのお言葉だ。",
+    "御意にござる。",
+    "承知！ その意気やよし。",
+    "はっ、心得ましてござる。",
+  ],
+};
+
+/** チャットログへ1件追加（上限超過分は古い方から切り捨て） */
+function chatPush(senderId, text) {
+  if (!S.chat) S.chat = { messages: [], nextAmbientAt: 0, unseen: 0 };
+  S.chat.messages.push({ id: uid("msg"), ts: now(), senderId, text });
+  const over = S.chat.messages.length - CONFIG.CHAT_MAX_MESSAGES;
+  if (over > 0) S.chat.messages.splice(0, over);
+  if (activeTab !== "alliance") S.chat.unseen++;
+}
+/** テンプレ変数を補間（{name} 等）。未定義キーは空文字。 */
+function chatFill(tpl, ctx) { return tpl.replace(/\{(\w+)\}/g, (_, k) => (ctx[k] != null ? ctx[k] : "")); }
+/** 同盟所属AIから1人ランダムに返す（居なければ null） */
+function randomAllianceAI() {
+  const ids = S.alliance.members.filter(m => m.id !== "player").map(m => m.id);
+  if (!ids.length) return null;
+  return S.aiUsers.find(a => a.id === pick(ids)) || null;
+}
+/**
+ * イベント発火 → 該当プールから1つ選び同盟AIの発言として投稿。
+ * kind: ambient以外の CHAT_LINES キー。opts.ai指定でその人物、無指定でランダム同盟AI。
+ * opts.sub でネストプール(onRole)のサブキー、opts.ctx で追加テンプレ変数。
+ * 同盟にAIが1人も居なければ何も投稿しない。
+ */
+function chatEvent(kind, opts = {}) {
+  if (!S.chat) return;
+  let pool = CHAT_LINES[kind];
+  if (opts.sub) pool = pool && pool[opts.sub];
+  if (!pool || !pool.length) return;
+  const ai = opts.ai || randomAllianceAI();
+  if (!ai) return;
+  const ctx = { name: ai.name, ally: S.alliance.name, ...(opts.ctx || {}) };
+  chatPush(ai.id, chatFill(pick(pool), ctx));
+}
+/** 環境チャット: 一定間隔で同盟AIが性格に応じたセリフを1つ（tickから呼ぶ） */
+function chatTick(t) {
+  if (!S.chat || t < S.chat.nextAmbientAt) return;
+  S.chat.nextAmbientAt = t + randInt(CONFIG.CHAT_AMBIENT_MIN_SEC, CONFIG.CHAT_AMBIENT_MAX_SEC) * 1000;
+  const ai = randomAllianceAI();
+  if (!ai) return;
+  const pool = CHAT_LINES.ambient[ai.personality] || [];
+  if (pool.length) chatPush(ai.id, chatFill(pick(pool), { name: ai.name, ally: S.alliance.name }));
 }
 
 /* =====================================================================
@@ -1103,8 +1248,46 @@ function renderAlliance() {
     <div class="panel"><h3>🤝 ${S.alliance.name}（${S.alliance.members.length}名）</h3>
       <div class="dim small">発動中バフ: ${buffText}</div>${roleHelp}</div>
     ${memberRows}
+    <div class="panel">
+      <h3>💬 同盟チャット</h3>
+      <div class="chat-log" id="chatLog"></div>
+      <div class="chat-input-row">
+        <input id="chatInput" placeholder="盟主として一言…" maxlength="60"
+          onkeydown="if(event.key==='Enter')UIA.sendChat()">
+        <button class="primary" onclick="UIA.sendChat()">送信</button>
+      </div>
+    </div>
     <div class="panel dim small">マップ上の🏯（勧誘可マーク付き）をタップすると勧誘できます。<br>
     勧誘コスト: 🌾${CONFIG.RECRUIT_FOOD_COST} ｜ 成功率は自城とAI城のレベル差で変動</div>`;
+  renderChatLog(true);
+}
+/** チャットログ本体だけを再描画（メンバーselect/入力欄は温存。tickからも呼ぶ）。
+ *  forceBottom=true か、既に最下部付近にいる時のみ自動で最新へスクロール。 */
+function chatSenderName(senderId) {
+  if (senderId === "player") return "あなた";
+  const ai = S.aiUsers.find(a => a.id === senderId);
+  return ai ? ai.name : "";
+}
+function chatSenderColor(senderId) {
+  if (senderId === "player") return "var(--accent)";
+  const ai = S.aiUsers.find(a => a.id === senderId);
+  return ai ? ai.color : "var(--fg-dim)";
+}
+function renderChatLog(forceBottom) {
+  const box = $("chatLog"); if (!box) return;
+  const near = box.scrollHeight - box.scrollTop - box.clientHeight < 40;
+  const msgs = (S.chat && S.chat.messages) || [];
+  box.innerHTML = msgs.length
+    ? msgs.map(m => `<div class="chat-msg"><span class="chat-name" style="color:${chatSenderColor(m.senderId)}">${chatSenderName(m.senderId)}</span>${escapeHtml(m.text)}</div>`).join("")
+    : `<div class="dim small" style="padding:8px 2px">同盟員を勧誘すると、ここで会話が始まります。</div>`;
+  if (forceBottom || near) box.scrollTop = box.scrollHeight;
+}
+/** 同盟タブの未読バッジ更新（tickから呼ぶ） */
+function updateChatBadge() {
+  const el = $("chatBadge"); if (!el) return;
+  const n = (S.chat && S.chat.unseen) || 0;
+  el.textContent = n > 9 ? "9+" : (n || "");
+  el.style.display = n > 0 ? "" : "none";
 }
 
 /* =====================================================================
@@ -1303,6 +1486,14 @@ const UIA = {
     toast(`役職を ${role} に変更しました`);
     renderAlliance();
   },
+  sendChat() {
+    const inp = $("chatInput"); if (!inp) return;
+    const text = inp.value.trim(); if (!text) return;
+    chatPush("player", text);
+    inp.value = "";
+    if (randomAllianceAI() && Math.random() < 0.8) chatEvent("onPlayerSend"); // 同盟員が相槌
+    renderChatLog(true);
+  },
   reset() {
     if (confirm("セーブデータを完全に削除して最初からやり直しますか？")) resetGame();
   },
@@ -1485,8 +1676,10 @@ function switchTab(tab) {
   document.querySelectorAll(".tab-page").forEach(p => p.classList.toggle("active", p.id === "page-" + tab));
   document.querySelectorAll("#tabbar button").forEach(b => b.classList.toggle("active", b.dataset.tab === tab));
   closeSheet();
+  if (tab === "alliance" && S.chat) S.chat.unseen = 0; // 開いたら既読
   if (tab === "map") MapView.fit();
   renderActiveTab();
+  updateChatBadge();
 }
 
 /* tickの全再描画がタップ中のボタンを破壊して click を飲み込むのを防ぐ:
@@ -1506,9 +1699,15 @@ function tick() {
   finishUpgrades(t);
   resolveMarches(t);
   aiTickAll(t);
+  chatTick(t);
   renderHeader();
-  // 同盟タブはselect操作保護のため、またタップ中はclick保護のため再描画しない
-  if (activeTab !== "alliance" && !pointerHeld) renderActiveTab();
+  updateChatBadge();
+  // 同盟タブはselect操作保護のため full 再描画せず、チャットログのみ更新。
+  // タップ中はclick保護のため再描画しない。
+  if (!pointerHeld) {
+    if (activeTab === "alliance") renderChatLog();
+    else renderActiveTab();
+  }
 }
 
 async function boot() {
