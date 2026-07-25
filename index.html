@@ -1092,7 +1092,7 @@ const CHAT_LINES = {
       "城を守るばかりでは、やがて囲まれて終わるぞ。",
       "拡張の時は今だ。遅れれば後手に回る。",
       "資源地を一つ取れぬようでは、将の名が泣く。",
-      "北条庵め、また動かぬか……遅すぎる。",
+      "{other}め、また動かぬか……遅すぎる。",
       "領地が増えぬ日は、気が休まらん。",
       "攻め時を逃すな。逃せば二度と来ぬぞ。",
       "空地を見て見ぬふりなど、我が性分に合わぬ。",
@@ -1543,19 +1543,35 @@ function resolveChatPool(root, sub) {
   for (const v of Object.values(root)) if (Array.isArray(v)) flat.push(...v);
   return flat;
 }
+/** 発言者(excludeAi)以外の同盟AIを1人返す（居なければ null）。{other} 用 */
+function randomOtherAllianceAI(excludeAi) {
+  const ids = S.alliance.members
+    .filter(m => m.id !== "player" && (!excludeAi || m.id !== excludeAi.id))
+    .map(m => m.id);
+  if (!ids.length) return null;
+  const id = pick(ids);
+  return S.aiUsers.find(a => a.id === id) || null;
+}
 /**
  * イベント発火 → 該当プールから1つ選び同盟AIの発言として投稿。
- * kind: ambient以外の CHAT_LINES キー。opts.ai指定でその人物、無指定でランダム同盟AI。
- * opts.sub でネストプール(onRole)のサブキー、opts.ctx で追加テンプレ変数。
+ * kind: CHAT_LINES のキー（ambient も可）。opts.ai指定でその人物、無指定でランダム同盟AI。
+ * opts.sub でネストプール(性格別/役職別)のサブキー、opts.ctx で追加テンプレ変数。
+ * テンプレ変数 {other}（＝発言者以外の同盟AI名）は、該当者が居る時のみ解決される。
+ * 居ない場合に文が壊れないよう、{other} を含むセリフは候補から除外する。
  * 同盟にAIが1人も居なければ何も投稿しない。
  */
 function chatEvent(kind, opts = {}) {
   if (!S.chat) return;
-  const pool = resolveChatPool(CHAT_LINES[kind], opts.sub);
+  let pool = resolveChatPool(CHAT_LINES[kind], opts.sub);
   if (!pool || !pool.length) return;
   const ai = opts.ai || randomAllianceAI();
   if (!ai) return;
-  const ctx = { name: ai.name, ally: S.alliance.name, ...(opts.ctx || {}) };
+  const other = randomOtherAllianceAI(ai);
+  if (!other) {
+    pool = pool.filter(s => !s.includes("{other}")); // 相手が居ないセリフは使わない
+    if (!pool.length) return;
+  }
+  const ctx = { name: ai.name, ally: S.alliance.name, other: other ? other.name : "", ...(opts.ctx || {}) };
   chatPush(ai.id, chatFill(pick(pool), ctx));
 }
 /** 環境チャット: 一定間隔で同盟AIが性格に応じたセリフを1つ（tickから呼ぶ） */
@@ -1563,9 +1579,7 @@ function chatTick(t) {
   if (!S.chat || t < S.chat.nextAmbientAt) return;
   S.chat.nextAmbientAt = t + randInt(CONFIG.CHAT_AMBIENT_MIN_SEC, CONFIG.CHAT_AMBIENT_MAX_SEC) * 1000;
   const ai = randomAllianceAI();
-  if (!ai) return;
-  const pool = CHAT_LINES.ambient[ai.personality] || [];
-  if (pool.length) chatPush(ai.id, chatFill(pick(pool), { name: ai.name, ally: S.alliance.name }));
+  if (ai) chatEvent("ambient", { ai, sub: ai.personality }); // {other}解決も chatEvent に集約
 }
 
 /* =====================================================================

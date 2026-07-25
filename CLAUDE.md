@@ -155,6 +155,9 @@ Claude Code はセッション開始時にこのファイルを読むこと。
   **事件セリフはGrok第2弾153本を反映済み**（チャット全体で338本／CHAT_SCRIPT.md）。
   結末3種(onIgnore/onExile/onLeave)は**性格別プール対応済み**（`chatEvent` に `sub: ai.personality` を渡す）。
   `resolveChatPool` がフラット配列/サブキー別オブジェクトの両方を受け、キー欠落時は平坦化して発話を落とさない
+- **[DONE] `{other}` 変数** — 発言者以外の同盟AI名。`randomOtherAllianceAI()` が本人を除いて抽選し、
+  該当者が居ない時は `{other}` を含むセリフを候補から除外する（文が壊れない・自己言及も起きない）。
+  ambient も `chatEvent("ambient",…)` 経由に統一済み。AI同士の掛け合いセリフの土台
 
 ### ⬜ 未実装（優先度順）
 1. **戦闘の深掘り** — 兵種・兵数、出兵時のカード手動編成UI、複数部隊（`MAX_MARCHES`を兵舎Lvで増加）
