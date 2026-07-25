@@ -57,7 +57,10 @@ Claude Code はセッション開始時にこのファイルを読むこと。
 | `HANDOVER.md` | 引き継ぎ詳細（スキーマ・チェックリスト） |
 | `DESIGN.md` | 基本設計（データモデル・バランス方針） |
 | `IMAGE_PROMPTS.md` | 画像生成プロンプト集（imageKey対応表つき） |
-| `art/` | 建物画像 PNG（256×256・背景透過） |
+| `CHAT_SCRIPT.md` | 同盟チャット/事件のセリフ執筆ブリーフ（Grok担当） |
+| `UX_REVIEW.md` | UX検品ブリーフ（Gemini担当）。制約・撮影チェックリスト・出力形式 |
+| `tools/embed_art.py` | art/*.png を index.html へ base64 同梱（冪等・安全ガード付き） |
+| `art/` | 建物画像 PNG（256×256・背景透過・PNG8最適化済み） |
 
 ---
 
