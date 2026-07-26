@@ -297,7 +297,7 @@ const CONFIG = {
   DEV_MODE: false,                      // trueで開発用UI（ガチャタブの画像取り込み等）を表示
   SAVE_KEY: "hakoslg_save_v1",          // localStorageキー（名前空間 hakoslg_）
   ASSET_DB: "hakoslg_assets",           // IndexedDB名（画像アセット）
-  SAVE_VERSION: 9,                     // v9: 部隊の兵力(troops)・予備兵(reserves)・徴兵所
+  SAVE_VERSION: 10,                    // v10: 旧ワールドを地形ワールドV2へ安全に再生成
   LOG_MAX: 30,                         // 保持する出来事ログの最大件数
 
   // --- 初陣指南（[S15A]。最初の約1分でコアループを1周させる導線） ---
@@ -758,6 +758,57 @@ function migrateSave(data) {
     const p = DEFAULT_BUILDING_LAYOUT.camp;
     data.player.buildings.push({ id: "b_camp", type: "camp", level: 1, upgradeEndsAt: null, x: p.x, y: p.y });
   }
+
+  // v9 → v10: 地形ワールドV2を既存セーブにも適用する。
+  // 旧実装は world.version=1 / legacy_v1 を保持して tiles[] を更新しなかったため、
+  // GitHub Pagesを更新しても既存ブラウザでは旧マップが永続的に表示されていた。
+  // 建物・資源・カード・同盟などの進行は保持し、旧座標に依存する領地/進軍だけをリセットする。
+  const worldNeedsTerrainUpgrade = !data.world
+    || (data.world.version || 1) < CONFIG.WORLD_LAYOUT_VERSION
+    || data.world.ruleset !== CONFIG.WORLD_RULESET;
+  if (worldNeedsTerrainUpgrade) {
+    const oldAiById = Object.fromEntries((data.aiUsers || []).map(ai => [ai.id, ai]));
+    const newWorld = generateWorld();
+    const newAiUsers = generateAIUsers(newWorld);
+
+    // AIの育成・同盟状態はID単位で可能な範囲を引き継ぐ。位置と領地は新地形に合わせて再生成。
+    for (const ai of newAiUsers) {
+      const old = oldAiById[ai.id];
+      if (!old) continue;
+      ai.castleLevel = old.castleLevel || ai.castleLevel;
+      ai.personality = old.personality || ai.personality;
+      if (old.recruitable != null) ai.recruitable = old.recruitable;
+      ai.allianceId = old.allianceId || null;
+      ai.nextRecruitAt = old.nextRecruitAt || 0;
+      ai.loyalty = old.loyalty == null ? CONFIG.LOYALTY_START : old.loyalty;
+      ai.ownedTiles = [];
+      const castleTile = newWorld.tiles[idx(ai.x, ai.y)];
+      if (castleTile) castleTile.level = ai.castleLevel;
+    }
+
+    // プレイヤー本城の表示Lvは内政側の本城Lvに合わせる。
+    const castleBuilding = (data.player.buildings || []).find(b => b.type === "castle");
+    const playerCastleLv = castleBuilding ? castleBuilding.level : (data.player.castleLevel || 1);
+    const ps = newWorld.playerStart;
+    const playerCastleTile = newWorld.tiles[idx(ps.x, ps.y)];
+    if (playerCastleTile) playerCastleTile.level = playerCastleLv;
+
+    data.world = newWorld;
+    data.aiUsers = newAiUsers;
+    data.player.ownedTiles = [];
+    data.player.marches = [];
+    if (!data.flags) data.flags = {};
+    data.flags.holyWon = false;
+    data.flags.capitalWon = false;
+    data.incident = null;
+    data.nextIncidentCheckAt = 0;
+
+    // 移行が済んだことをログへ残す（トーストはboot前なのでここでは出さない）。
+    if (!data.log) data.log = [];
+    data.log.push({ id: uid("log"), ts: now(), kind: "world", text: "🗺️ 地形ワールドV2へ更新しました（山・川・埠頭・関所・皇都を追加）" });
+    if (data.log.length > CONFIG.LOG_MAX) data.log = data.log.slice(-CONFIG.LOG_MAX);
+  }
+
   data.version = CONFIG.SAVE_VERSION;
   return data;
 }
@@ -3859,7 +3910,9 @@ async function boot() {
   document.addEventListener("visibilitychange", () => { if (document.hidden) saveGame(); });
   // Service Worker（http(s)配信時のみ。file://ではスキップ）
   if ("serviceWorker" in navigator && location.protocol.startsWith("http")) {
-    navigator.serviceWorker.register("./sw.js").catch(e => console.warn("SW registration failed", e));
+    navigator.serviceWorker.register("./sw.js", { updateViaCache: "none" })
+      .then(reg => reg.update())
+      .catch(e => console.warn("SW registration failed", e));
   }
 }
 boot();
