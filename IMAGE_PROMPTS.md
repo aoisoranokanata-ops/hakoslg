@@ -13,53 +13,78 @@ shapes, warm painterly shading, rich saturated colors, dark navy background,
 no text, no watermark, centered composition.
 ```
 
-カードは縦長（3:4推奨）、アイコン類は正方形（1:1）で生成。
+**すべて正方形（1:1）で生成する**（カード・建物・アイコンとも）。
 
-## 1. キャラカード（レア度別の作り分け）
+## 1. キャラカード（imageKey: card_*）
 
-共通仕様: 上半身のキャラクター立ち絵＋レア度別の枠・エフェクト。レア度が上がるほど
-「枠の豪華さ」「背景エフェクト」「ポーズの派手さ」を強くする。
+### 技術前提（厳守）
 
-### N（imageKey: card_n_*）
-```
-[共通接頭辞] Portrait card of a humble common soldier, simple leather armor,
-plain expression, muted earth-tone palette, simple flat gray-silver card frame
-with thin border, plain dark background, no special effects, modest and
-unremarkable atmosphere. 3:4 aspect.
-```
-対象: card_n_taichi(足軽・槍), card_n_yosuke(農兵・鍬), card_n_kosuzu(少女斥候・鈴),
-card_n_gonroku(門衛・老兵), card_n_maruta(新兵・木刀), card_n_nihei(輜重兵・荷箱)
+- **1:1 の正方形・バストアップ**（顔と上半身が中心）。
+  ゲーム側の表示枠は正方形で `object-fit: cover` のため、**縦長で描くと顔が切れる**
+- **カード枠・レア度の縁取りは描かない**。枠と発光はゲーム側のCSSが付ける（描くと二重になる）
+- **背景は塗ってよい**（透過不要）。ただし人物が主役で、背景は雰囲気を出す程度
+- 表示サイズは**約152px四方**。遠目でも誰か分かる**明快な配色・シルエット**にする
+- 納品は 512×512 か 1024×1024 の PNG（Claude側で256pxへ縮小・最適化して同梱する）
 
-### R（imageKey: card_r_*）
-```
-[共通接頭辞] Portrait card of a capable samurai officer, well-made lacquered
-armor with clan crest, confident pose, cool blue accent lighting, polished
-blue metallic card frame with subtle geometric engraving, faint blue glow
-behind the character. 3:4 aspect.
-```
-対象: card_r_katsuma(侍大将), card_r_kota(槍兵), card_r_senri(参謀・書物),
-card_r_hayate(騎兵・馬上), card_r_katayama(守将・大盾)
+### 共通プロンプト（全カードで使う）
 
-### SR（imageKey: card_sr_*）
 ```
-[共通接頭辞] Portrait card of an elite legendary warrior, ornate purple and
-silver armor with flowing cape, dramatic wind-blown pose, glowing purple
-particle effects swirling around, luxurious amethyst card frame with engraved
-dragon motifs, radiant backlight. 3:4 aspect.
+512x512 px, 1:1 square. Bust-up portrait of a Japanese sengoku-fantasy
+character, facing the viewer, head and shoulders centered and fully inside
+the frame. Stylized mobile game art, clean bold shapes, warm painterly
+shading, rich saturated colors, strong readable silhouette.
+NO card frame, NO border, NO text, no watermark, no UI elements.
+Simple atmospheric background that does not distract from the face.
+Character: {下記}
 ```
-対象: card_sr_soji(剣豪・二刀), card_sr_genba(策士・軍配), card_sr_mitsuru(弓聖・大弓),
-card_sr_gantetsu(猛将・大斧), card_sr_kasumi(陰陽師・呪符)
 
-### SSR（imageKey: card_ssr_*）
-```
-[共通接頭辞] Portrait card of a mythic supreme hero, magnificent golden armor
-with divine ornaments, epic dynamic pose breaking out of the card frame,
-brilliant golden light rays and floating embers, prismatic rainbow flare,
-ultra-ornate gold card frame with phoenix and dragon reliefs, overwhelming
-aura of power. 3:4 aspect.
-```
-対象: card_ssr_tenba(覇王・大剣と王冠), card_ssr_byakuren(軍神・雷を纏う女神将),
-card_ssr_saya(聖女・光の錫杖), card_ssr_benimaru(鬼神・炎の金棒)
+### レア度で「格」を変える（枠ではなく人物と光で表現）
+
+| レア度 | 方向性 |
+|---|---|
+| **N** | 素朴な雑兵。粗末な革・布の装備、素朴な表情、くすんだ土色。演出なし |
+| **R** | 一人前の武将。漆塗りの当世具足に家紋、自信のある表情、青の差し色と淡い逆光 |
+| **SR** | 精鋭・名将。紫と銀の意匠、なびく羽織、紫の粒子エフェクト、強い逆光 |
+| **SSR** | 伝説の英傑。金の装飾と神格的な意匠、金色の光条と舞う火の粉、圧倒的な威圧感 |
+
+### ★兵種を見た目に反映する（今回の重要ポイント）
+
+ゲームに**兵種の三すくみ**が入ったため、**一目で兵種が分かる**ことが重要。
+
+| 兵種 | 見た目の指針 |
+|---|---|
+| 🛡️ **歩兵** infantry | 重めの鎧、盾・槍・刀。どっしり構えた姿勢 |
+| 🐎 **騎兵** cavalry | 軽快な装備、馬具・鞭・手綱、風になびく装飾。躍動感 |
+| 🏹 **弓兵** archer | 軽装、弓・矢筒・巻物などの遠距離/知略の小道具 |
+
+### 全20枚の一覧（この通りに発注）
+
+| imageKey | 名前 | レア | 兵種 | 人物像 |
+|---|---|---|---|---|
+| `card_ssr_tenba` | 覇王・天羽 | SSR | 🐎騎兵 | 王冠と大剣を持つ覇王。金の甲冑、馬上の威容 |
+| `card_ssr_byakuren` | 軍神・白蓮 | SSR | 🏹弓兵 | 雷を纏う女神将。白と金、雷光の大弓 |
+| `card_ssr_saya` | 聖女・沙耶 | SSR | 🛡️歩兵 | 光の錫杖を持つ聖女。桜の花びら、白金の法衣に軽い護り |
+| `card_ssr_benimaru` | 鬼神・紅丸 | SSR | 🛡️歩兵 | 炎の金棒を担ぐ鬼神。赤黒の重装、燃える双眸 |
+| `card_sr_soji` | 剣豪・宗二 | SR | 🛡️歩兵 | 二刀を構える剣豪。紫銀の具足、鋭い眼光 |
+| `card_sr_genba` | 策士・玄葉 | SR | 🏹弓兵 | 軍配と巻物を持つ策士。羽根飾り、涼しげな知略の表情 |
+| `card_sr_mitsuru` | 弓聖・美弦 | SR | 🏹弓兵 | 大弓を引き絞る弓の名手。長い髪、集中した横顔気味の構え |
+| `card_sr_gantetsu` | 猛将・岩鉄 | SR | 🛡️歩兵 | 大盾と大斧の巨漢。岩のような重装、豪快な笑み |
+| `card_sr_kasumi` | 陰陽師・霞 | SR | 🐎騎兵 | 呪符を操る陰陽師。三日月の意匠、翻る狩衣で疾走感 |
+| `card_r_katsuma` | 侍大将・勝真 | R | 🛡️歩兵 | 采配を執る侍大将。青の当世具足に家紋 |
+| `card_r_kota` | 槍働き・虎太 | R | 🛡️歩兵 | 十文字槍の若武者。日焼けした精悍な顔 |
+| `card_r_senri` | 参謀・千里 | R | 🏹弓兵 | 書物を抱えた参謀。眼鏡的な理知の雰囲気、矢筒を背負う |
+| `card_r_hayate` | 騎兵長・颯 | R | 🐎騎兵 | 手綱を握る騎兵長。風になびくマント、疾走の気配 |
+| `card_r_katayama` | 守将・堅山 | R | 🛡️歩兵 | 大盾を構える守将。城門を背にした不動の構え |
+| `card_n_taichi` | 足軽・太一 | N | 🛡️歩兵 | 槍を持つ若い足軽。粗末な陣笠と革鎧 |
+| `card_n_yosuke` | 農兵・与助 | N | 🛡️歩兵 | 鍬を手にした農民兵。日焼けした素朴な顔 |
+| `card_n_kosuzu` | 斥候・小鈴 | N | 🐎騎兵 | 鈴を下げた少女斥候。身軽な装束 |
+| `card_n_gonroku` | 衛兵・権六 | N | 🛡️歩兵 | 門を守る老衛兵。使い込まれた槍と履物 |
+| `card_n_maruta` | 新兵・丸太 | N | 🏹弓兵 | 木刀と粗末な弓の新兵。あどけない不安顔 |
+| `card_n_nihei` | 輜重兵・荷平 | N | 🏹弓兵 | 荷を背負う輜重兵。矢束を運ぶ実直な男 |
+
+**納品**: `card_<レア>_<名前>.png` の形式で（例 `card_ssr_tenba.png`）。
+一度に全部でなくてよく、**SSR4枚 → SR5枚 → R5枚 → N6枚** のように分割納品も可。
+届いた分から Claude が正方形256pxへ縮小・PNG8最適化し、`tools/embed_art.py` で同梱する。
 
 ## 2. 建築物アイコン（1:1・背景透過PNG・imageKey: bld_*）
 
