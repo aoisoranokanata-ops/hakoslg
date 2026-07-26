@@ -117,6 +117,8 @@ select{font:inherit;color:var(--fg);background:var(--bg3);border:1px solid var(-
 .squad-btn{display:flex;align-items:center;gap:8px;text-align:left;font-size:12px;padding:9px 10px}
 .squad-btn.can{border-color:#5aa05a}
 .squad-btn.cannot{opacity:.75}
+/* 勝てる＆相性有利＝この目標に対する最適解。一目で選べるよう強調する */
+.squad-btn.best{border-color:#8fd98f;background:rgba(120,200,120,.16);box-shadow:0 0 0 1px #8fd98f inset}
 .squad-pow{margin-left:auto;font-weight:700}
 .rel-good{color:#8fd98f;font-size:11px}
 .rel-bad{color:#e08080;font-size:11px}
@@ -296,6 +298,9 @@ const CONFIG = {
   TUTORIAL_GACHA_COUNT: 10,            // 教えるガチャの単位（10連）
   TUTORIAL_FINAL_TILE_COUNT: 2,        // 指南の終了条件となる領地数
   TUTORIAL_START_RESOURCE_TYPE: "food",// 自城の8近傍に資源地が無い時の保証用タイル種別
+  // 指南中はマップの高度な表示（目標コンパス／外交バッジ／記録ボタン）を抑えて
+  // 目の前の手順に集中させる。※タブや機能自体はロックしない（指南の設計方針）
+  TUTORIAL_HIDE_ADVANCED_UI: true,
 
   // --- 同盟チャット（Grok作セリフプールをルールベース再生。[S18]） ---
   CHAT_MAX_MESSAGES: 60,               // 保持する最大ログ数
@@ -1449,7 +1454,10 @@ function resolveMarches(t) {
       invalidateMarchable(); // 自領が広がると出兵可能範囲も変わる
       const bonus = CONFIG.DIAMOND_CAPTURE_BONUS_PER_LEVEL * tile.level;
       S.player.diamonds += bonus;
-      toast(`⚔️ ${TILE_DEFS[tile.type].name}Lv${tile.level} を制圧！ 💎+${bonus}`, "capture");
+      // 相性を突いて勝った時は「効いた」ことを明示する（三すくみを学ぶ手応えになる）
+      const win = troopMultiplier(m.troop, tile.defTroop);
+      const winTag = win > 1 ? `【${TROOP_DEFS[m.troop].name}が有利！】` : "";
+      toast(`⚔️ ${winTag}${TILE_DEFS[tile.type].name}Lv${tile.level} を制圧！ 💎+${bonus}`, "capture");
       // 初制圧時だけ「領地が継続的に何を生むか」を1本にまとめて明示する
       // （コアループの起点。初陣指南①の達成通知もこれが兼ねる）
       if (S.player.ownedTiles.length === 1) {
@@ -2343,6 +2351,9 @@ function openLogSheet() {
 /** 未読バッジを更新（タブバーのマップと、マップ内📜ボタンの両方） */
 function updateMapBadge() {
   const n = (S && S.logUnseen) || 0;
+  // 指南中は記録ボタンも隠す（この時期に見返すべき出来事はまだ無い）
+  const logBtn = $("logBtn");
+  if (logBtn) logBtn.style.display = (CONFIG.TUTORIAL_HIDE_ADVANCED_UI && S && getTutorialStep()) ? "none" : "";
   for (const id of ["mapBadge", "mapCtrlBadge"]) {
     const el = $(id); if (!el) continue;
     el.textContent = n > 9 ? "9+" : (n || "");
@@ -2775,6 +2786,9 @@ const MapView = {
     const pulse = (Math.sin(now() / 420) + 1) / 2;
     const marchable = CONFIG.MAP_HIGHLIGHT_MARCHABLE && !S.player.marches.length
       ? getMarchableTiles() : null;
+    // 初陣指南のあいだは目標コンパスと外交バッジを出さず、視線を手順に集中させる
+    // （機能自体は生きており、指南完了と同時に現れる）
+    const guiding = CONFIG.TUTORIAL_HIDE_ADVANCED_UI && !!getTutorialStep();
     for (let y = y0; y < y1; y++) {
       for (let x = x0; x < x1; x++) {
         const ti = idx(x, y);
@@ -2829,7 +2843,7 @@ const MapView = {
         }
         // AI城の外交状態バッジ。同盟員＝金の「盟」、勧誘できる相手＝緑の「勧」。
         // 1つずつタップして確かめなくても、マップを見るだけで勧誘先が分かるようにする。
-        else if (t.type === "castle" && t.ownerId && ts >= 15) {
+        else if (t.type === "castle" && t.ownerId && ts >= 15 && !guiding) {
           const ai = S.aiUsers.find(a => a.id === t.ownerId);
           const ally = ai && ai.allianceId;
           const canRecruit = ai && !ally && ai.recruitable;
@@ -2847,7 +2861,8 @@ const MapView = {
         }
       }
     }
-    if (CONFIG.MAP_HOLY_COMPASS) this.drawHolyCompass(ctx, ts, pulse);
+    if (CONFIG.MAP_HOLY_COMPASS && !guiding) this.drawHolyCompass(ctx, ts, pulse);
+    else if (guiding) this._compassHits = []; // 指南中はコンパスのタップ判定も消す
     // 出兵ラインと部隊ドット
     const t0 = now();
     for (const m of S.player.marches) {
@@ -2880,8 +2895,12 @@ function openTileSheet(ti) {
   const td = TILE_DEFS[t.type];
   const ai = t.ownerId && t.ownerId !== "player" ? S.aiUsers.find(a => a.id === t.ownerId) : null;
   const ownerText = t.ownerId === "player" ? "あなたの領地" : ai ? `${ai.name} の領地` : "未所有";
-  let body = `<h3>${td.emoji} ${td.name} Lv${t.level} <span class="dim small">(${t.x}, ${t.y})</span></h3>
-    <div class="dim small">${ownerText}</div>`;
+  // 通行不可の地形はレベルや所有者を出さない（攻略できそうに見えてしまうため）
+  let body = isBlockedType(t.type)
+    ? `<h3>${td.emoji} ${td.name} <span class="dim small">(${t.x}, ${t.y})</span></h3>
+       <div class="small" style="color:var(--danger)">⛔ 通行不可 — 兵を進めることはできません</div>`
+    : `<h3>${td.emoji} ${td.name} Lv${t.level} <span class="dim small">(${t.x}, ${t.y})</span></h3>
+       <div class="dim small">${ownerText}</div>`;
   if (td.desc) body += `<div class="small" style="margin-top:8px;line-height:1.6">${td.desc}</div>`;
   const actions = [];
   if (isBlockedType(t.type)) {
@@ -2906,8 +2925,12 @@ function openTileSheet(ti) {
       : t.type === "gate" ? "🛡️ 制圧するとこの先へ進める"
       : "制圧すると領地が広がる";
     const dt = t.defTroop ? TROOP_DEFS[t.defTroop] : null;
+    // 三すくみを暗記していなくても判断できるよう、「何をぶつければ有利か」を明示する
+    const counterKey = t.defTroop ? TROOP_KEYS.find(k => TROOP_DEFS[k].strong === t.defTroop) : null;
+    const ct = counterKey ? TROOP_DEFS[counterKey] : null;
     body += `<div class="small" style="margin-top:6px">防御力 ${fmt(def)}${
-      dt ? ` ｜ 守備 <span style="color:${dt.color}">${dt.emoji}${dt.name}</span>` : ""}<br>
+      dt ? ` ｜ 守備 <span style="color:${dt.color}">${dt.emoji}${dt.name}</span>` : ""}${
+      ct ? `<br><span class="rel-good">有利な兵種: ${ct.emoji}${ct.name}</span>` : ""}<br>
       ${resInfo}<br>💎ボーナス +${CONFIG.DIAMOND_CAPTURE_BONUS_PER_LEVEL * t.level}</div>`;
     // 部隊ごとに「この目標に対する」戦力（＝兵種相性込み）を出し、どれで攻めるか選ばせる
     const idle = getIdleSquads();
@@ -2921,7 +2944,9 @@ function openTileSheet(ti) {
         const relTag = rel > 1 ? `<span class="rel-good">有利×${rel}</span>`
           : rel < 1 ? `<span class="rel-bad">不利×${rel}</span>` : "";
         const trd = tr ? TROOP_DEFS[tr] : null;
-        return `<button class="squad-btn ${p >= def ? "can" : "cannot"}" onclick="UIA.march(${ti},'${sq.id}')">
+        // 勝てる部隊、かつ相性有利な部隊を最も目立たせて「これを出せばよい」と分かるようにする
+        const cls = (p >= def ? "can" : "cannot") + (rel > 1 && p >= def ? " best" : "");
+        return `<button class="squad-btn ${cls}" onclick="UIA.march(${ti},'${sq.id}')">
           <b>${sq.name}</b>${trd ? ` <span style="color:${trd.color}">${trd.emoji}</span>` : ""}
           <span class="squad-pow">${fmt(p)} ${p >= def ? "✅" : "⚠️"}</span>${relTag}</button>`;
       }).join("") + `</div>
@@ -3181,9 +3206,12 @@ function completeTutorial() {
       ダイヤで将を迎え、城と兵舎を鍛えれば軍は強くなる。<br>
       強くなった軍で、さらに遠き地へ進め。</div>
     <div class="guide-loop">領土 → ダイヤ → 戦力 → さらに領土</div>
+    <div class="dim small" style="margin-top:8px">🗺️ 地図に <b>目標コンパス</b>・<b>外交バッジ</b>・<b>📜記録</b> が現れました</div>
     <div class="actions"><button class="primary" onclick="closeSheet()">🏯 天下へ進む</button></div>`;
   $("sheet").classList.add("open");
   renderGuideBar();
+  updateMapBadge();
+  if (activeTab === "map") MapView.draw(); // 抑えていた表示をすぐ出す
 }
 
 /* =====================================================================
