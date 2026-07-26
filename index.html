@@ -17,7 +17,7 @@
 :root{
   --bg:#141821; --bg2:#1c222e; --bg3:#252d3d; --line:#333d52;
   --fg:#e8ecf4; --fg-dim:#9aa5bb; --accent:#e8b84a; --danger:#e06060;
-  --n:#8b95a8; --r:#5aa0e0; --sr:#b070e0; --ssr:#e8b84a;
+  --n:#8b95a8; --r:#5aa0e0; --sr:#b070e0; --ssr:#e8b84a; --ur:#ff78b4;
   --safe-b:env(safe-area-inset-bottom,0px);
 }
 *{margin:0;padding:0;box-sizing:border-box;-webkit-tap-highlight-color:transparent}
@@ -119,7 +119,8 @@ select{font:inherit;color:var(--fg);background:var(--bg3);border:1px solid var(-
 .squad-btn.cannot{opacity:.75}
 /* 勝てる＆相性有利＝この目標に対する最適解。一目で選べるよう強調する */
 .squad-btn.best{border-color:#8fd98f;background:rgba(120,200,120,.16);box-shadow:0 0 0 1px #8fd98f inset}
-.squad-pow{margin-left:auto;font-weight:700}
+.squad-eta{margin-left:auto;font-size:11px;color:var(--fg-dim)}
+.squad-pow{font-weight:700}
 .rel-good{color:#8fd98f;font-size:11px}
 .rel-bad{color:#e08080;font-size:11px}
 
@@ -148,6 +149,8 @@ select{font:inherit;color:var(--fg);background:var(--bg3);border:1px solid var(-
 .unit-card.rar-R{border-color:var(--r)} .unit-card.rar-R .rarity{color:var(--r)}
 .unit-card.rar-SR{border-color:var(--sr)} .unit-card.rar-SR .rarity{color:var(--sr)}
 .unit-card.rar-SSR{border-color:var(--ssr);box-shadow:0 0 8px rgba(232,184,74,.35)} .unit-card.rar-SSR .rarity{color:var(--ssr)}
+.unit-card.rar-UR{border-color:var(--ur);box-shadow:0 0 12px rgba(255,120,180,.5)} .unit-card.rar-UR .rarity{color:var(--ur)}
+.card-stars{font-size:10px;letter-spacing:-1px;color:var(--accent)}
 
 /* ボトムシート（タイル詳細） */
 #sheet{position:fixed;left:0;right:0;bottom:0;background:var(--bg2);border-top:1px solid var(--line);
@@ -343,7 +346,21 @@ const CONFIG = {
   AI_CAN_CAPTURE_CAPITAL: false,
   TICK_MS: 1000,                        // ゲームtick間隔
   AUTOSAVE_MS: 10000,                   // 自動保存間隔
-  OFFLINE_CAP_HOURS: 12,                // オフライン収益の上限時間
+  // ログアウト中は世界そのものが止まる（生産も普請も行軍もAIも進まない）。
+  // 起動時に全ての進行中タイマーを離席時間ぶん後ろへずらして再開する。
+  OFFLINE_PROGRESS: false,
+  OFFLINE_CAP_HOURS: 12,                // OFFLINE_PROGRESS=true の時のオフライン収益上限
+
+  // --- 内政の抑制（同時アップグレードと即完了はダイヤを要求する） ---
+  UPGRADE_FREE_SLOTS: 1,                // 無料で同時進行できるアップグレード数
+  UPGRADE_EXTRA_SLOT_DIAMONDS: 150,     // 枠を超えて着工する時のダイヤ
+  UPGRADE_RUSH_DIAMONDS_PER_MIN: 25,    // 即完了: 残り時間1分あたりのダイヤ（最低1）
+  // 本城はLv2以降、木材と石材を大量に要求する（倉庫を育てないと貯めきれない量）。
+  // 倉庫容量そのものには連動させない — 連動させると「倉庫を上げるほど本城が遠のく」
+  // という逆インセンティブになってしまうため。
+  CASTLE_WOOD_BASE: 1500,               // 本城Lv2→3で必要な木材
+  CASTLE_STONE_BASE: 1200,              // 同・石材
+  CASTLE_COST_GROWTH: 1.7,              // 本城レベルごとの増加率（倉庫の拡張が追いつく速さ）
 
   // --- 資源・生産 ---
   START_RESOURCES: { food: 1000, wood: 1000, stone: 600, iron: 300 },
@@ -358,8 +375,10 @@ const CONFIG = {
   DIAMOND_CAPTURE_BONUS_PER_LEVEL: 20,  // 新規制圧時の一時金
 
   // --- 戦闘 ---
-  MARCH_TILES_PER_SEC: 2,               // 行軍速度（タイル/秒）
-  MARCH_MIN_SEC: 3,
+  // 行軍速度（タイル/秒）。実プレイで速すぎたため大幅に低速化し、兵種差で緩急を付ける。
+  // 実効速度 = この値 × 部隊で最も遅い兵種の speed × 同盟の行軍バフ
+  MARCH_TILES_PER_SEC: 0.3,
+  MARCH_MIN_SEC: 8,                     // 最低行軍時間（隣接でもこれだけはかかる）
   MARCH_FOOD_COST: 100,                 // 出兵1回の食料コスト
   TILE_DEF_BASE: 80,                    // 防御 = BASE × level^1.5
   TILE_DEF_EMPTY_MULT: 0.3,             // 空地は防御3割
@@ -373,6 +392,8 @@ const CONFIG = {
   SQUAD_UNLOCK_BARRACKS_LV: [1, 5, 10], // 各部隊が解禁される兵舎レベル（＝最大3部隊）
   TROOP_ADVANTAGE: 1.25,                // 相性有利な時の戦力倍率
   TROOP_DISADVANTAGE: 0.8,              // 相性不利な時の戦力倍率
+  TROOP_SIEGE_VS_FORTRESS: 1.6,         // 兵器の攻城特効（関所/皇都/城/聖地）
+  TROOP_SIEGE_VS_FIELD: 0.75,           // 兵器は野戦では鈍重で不利
   TILE_TROOP_MIN_LEVEL: 5,              // このレベル以上のタイルに守備兵種が付く（序盤は無属性）
   REQUIRE_ADJACENCY: true,              // 自領に隣接するタイルのみ出兵可
 
@@ -384,7 +405,7 @@ const CONFIG = {
   // --- ガチャ（甘め設計） ---
   GACHA_COST_SINGLE: 100,
   GACHA_COST_TEN: 900,
-  GACHA_RATES: { SSR: 0.05, SR: 0.15, R: 0.35, N: 0.45 },
+  GACHA_RATES: { UR: 0.01, SSR: 0.04, SR: 0.15, R: 0.35, N: 0.45 },
   GACHA_PITY_SSR: 50,                   // 50連でSSR確定
   GACHA_TEN_GUARANTEE: "SR",            // 10連でSR以上1枚保証
 
@@ -468,22 +489,42 @@ const DEFAULT_BUILDING_LAYOUT = {
 };
 
 /**
- * 兵種の三すくみ。strong に指定した兵種に対して有利（TROOP_ADVANTAGE 倍）、
- * 逆に自分を strong と指す兵種には不利（TROOP_DISADVANTAGE 倍）になる。
- *   歩兵 → 騎兵 → 弓兵 → 歩兵
+ * 兵種。5種が一本の輪で循環し、兵器だけが輪の外の特殊枠になる。
+ *   歩兵 → 槍兵 → 騎兵 → 弓兵 → 楯兵 → 歩兵
+ *   （strong に指定した相手に有利／自分を strong と指す相手には不利）
+ * 兵器(siege)は野戦では相性を持たないが、関所・皇都・城といった要塞に特効を持つ。
+ * speed は行軍速度の倍率。部隊の速度は「最も遅い兵種」に合わせる（軍は鈍足に律速される）。
  */
 const TROOP_DEFS = {
-  infantry: { name: "歩兵", emoji: "🛡️", color: "#8fa8c8", strong: "cavalry" },
-  cavalry:  { name: "騎兵", emoji: "🐎", color: "#c8a06a", strong: "archer" },
-  archer:   { name: "弓兵", emoji: "🏹", color: "#9ac88f", strong: "infantry" },
+  infantry: { name: "歩兵", emoji: "🛡️", color: "#8fa8c8", strong: "spear",    speed: 1.0 },
+  spear:    { name: "槍兵", emoji: "🔱", color: "#c8c08f", strong: "cavalry",  speed: 0.9 },
+  cavalry:  { name: "騎兵", emoji: "🐎", color: "#c8a06a", strong: "archer",   speed: 1.7 },
+  archer:   { name: "弓兵", emoji: "🏹", color: "#9ac88f", strong: "shield",   speed: 1.0 },
+  shield:   { name: "楯兵", emoji: "🛡", color: "#a0a0b8", strong: "infantry", speed: 0.75 },
+  siege:    { name: "兵器", emoji: "🏗️", color: "#c88f8f", strong: null,       speed: 0.45,
+              fortress: true }, // 要塞（関所/皇都/城）に対してのみ特効
 };
 const TROOP_KEYS = Object.keys(TROOP_DEFS);
-/** 攻撃側兵種 vs 守備側兵種 の倍率（どちらか未設定なら等倍） */
-function troopMultiplier(atkTroop, defTroop) {
-  if (!atkTroop || !defTroop) return 1;
-  if (TROOP_DEFS[atkTroop] && TROOP_DEFS[atkTroop].strong === defTroop) return CONFIG.TROOP_ADVANTAGE;
-  if (TROOP_DEFS[defTroop] && TROOP_DEFS[defTroop].strong === atkTroop) return CONFIG.TROOP_DISADVANTAGE;
-  return 1;
+/* タイルの守備兵種に使う兵種。兵器は輪の外＝これを守備に置くと「有利な兵種」が
+ * 存在せず攻略法を示せなくなるため、守備側からは除外する（兵器は攻める側の特殊枠）。 */
+const DEFENDER_TROOPS = TROOP_KEYS.filter(k => k !== "siege");
+/** 要塞タイル（兵器の特効対象）か */
+const FORTRESS_TYPES = ["gate", "capital", "castle", "holy"];
+/**
+ * 攻撃側兵種 vs 守備側兵種 の倍率（どちらか未設定なら等倍）。
+ * tileType を渡すと兵器の攻城特効も加味する。
+ */
+function troopMultiplier(atkTroop, defTroop, tileType) {
+  let mult = 1;
+  if (atkTroop === "siege" && tileType && FORTRESS_TYPES.includes(tileType)) {
+    mult *= CONFIG.TROOP_SIEGE_VS_FORTRESS;         // 攻城兵器は要塞に強い
+  } else if (atkTroop === "siege" && tileType) {
+    mult *= CONFIG.TROOP_SIEGE_VS_FIELD;            // 野戦では鈍重で不利
+  }
+  if (!atkTroop || !defTroop) return mult;
+  if (TROOP_DEFS[atkTroop] && TROOP_DEFS[atkTroop].strong === defTroop) mult *= CONFIG.TROOP_ADVANTAGE;
+  else if (TROOP_DEFS[defTroop] && TROOP_DEFS[defTroop].strong === atkTroop) mult *= CONFIG.TROOP_DISADVANTAGE;
+  return Math.round(mult * 100) / 100;
 }
 
 /**
@@ -491,32 +532,42 @@ function troopMultiplier(atkTroop, defTroop) {
  * Card仕様: { id, name, rarity, atk(武力), int(知力), lead(統率), troop(兵種), imageKey, emoji }
  * imageKey は IndexedDB 内の画像キー。未登録なら emoji でプレースホルダー描画。
  */
-const RARITY_MULT = { N: 1.0, R: 1.2, SR: 1.5, SSR: 2.0 };
+const RARITY_MULT = { N: 1.0, R: 1.2, SR: 1.5, SSR: 2.0, UR: 2.6 };
+const RARITY_ORDER = { UR: 0, SSR: 1, SR: 2, R: 3, N: 4 };
+/** レア度の星表記（★1〜5）。UI ではレア度名と併記する */
+const RARITY_STARS = { N: 1, R: 2, SR: 3, SSR: 4, UR: 5 };
 const CARD_POOL = [
+  // --- UR（最高位。1体で戦局を変える） ---
+  { id: "ur_kagurazaka", name: "天佑・神楽坂", rarity: "UR", atk: 99, int: 99, lead: 99, troop: "cavalry", emoji: "🌟", imageKey: "card_ur_kagurazaka" },
+  { id: "ur_gouen",      name: "獄炎・業焔",   rarity: "UR", atk: 105, int: 70, lead: 92, troop: "siege",  emoji: "☄️", imageKey: "card_ur_gouen" },
+  { id: "ur_shirayuki",  name: "白雪・凍月",   rarity: "UR", atk: 82, int: 105, lead: 95, troop: "archer", emoji: "❄️", imageKey: "card_ur_shirayuki" },
   // --- SSR ---
   { id: "ssr_tenba",   name: "覇王・天羽",   rarity: "SSR", atk: 95, int: 70, lead: 90, troop: "cavalry",  emoji: "👑", imageKey: "card_ssr_tenba" },
   { id: "ssr_byakuren",name: "軍神・白蓮",   rarity: "SSR", atk: 88, int: 92, lead: 85, troop: "archer",   emoji: "⚡", imageKey: "card_ssr_byakuren" },
-  { id: "ssr_saya",    name: "聖女・沙耶",   rarity: "SSR", atk: 70, int: 95, lead: 88, troop: "infantry", emoji: "🌸", imageKey: "card_ssr_saya" },
+  { id: "ssr_saya",    name: "聖女・沙耶",   rarity: "SSR", atk: 70, int: 95, lead: 88, troop: "shield",   emoji: "🌸", imageKey: "card_ssr_saya" },
   { id: "ssr_benimaru",name: "鬼神・紅丸",   rarity: "SSR", atk: 97, int: 60, lead: 82, troop: "infantry", emoji: "🔥", imageKey: "card_ssr_benimaru" },
+  { id: "ssr_raiden",  name: "砲将・雷伝",   rarity: "SSR", atk: 90, int: 78, lead: 80, troop: "siege",    emoji: "💣", imageKey: "card_ssr_raiden" },
   // --- SR ---
   { id: "sr_soji",     name: "剣豪・宗二",   rarity: "SR", atk: 70, int: 45, lead: 55, troop: "infantry", emoji: "🗡️", imageKey: "card_sr_soji" },
   { id: "sr_genba",    name: "策士・玄葉",   rarity: "SR", atk: 45, int: 70, lead: 60, troop: "archer",   emoji: "🪶", imageKey: "card_sr_genba" },
   { id: "sr_mitsuru",  name: "弓聖・美弦",   rarity: "SR", atk: 65, int: 55, lead: 58, troop: "archer",   emoji: "🏹", imageKey: "card_sr_mitsuru" },
-  { id: "sr_gantetsu", name: "猛将・岩鉄",   rarity: "SR", atk: 68, int: 40, lead: 65, troop: "infantry", emoji: "🛡️", imageKey: "card_sr_gantetsu" },
+  { id: "sr_gantetsu", name: "猛将・岩鉄",   rarity: "SR", atk: 68, int: 40, lead: 65, troop: "shield",   emoji: "🛡️", imageKey: "card_sr_gantetsu" },
   { id: "sr_kasumi",   name: "陰陽師・霞",   rarity: "SR", atk: 50, int: 68, lead: 62, troop: "cavalry",  emoji: "🌙", imageKey: "card_sr_kasumi" },
+  { id: "sr_yariha",   name: "槍将・槍羽",   rarity: "SR", atk: 72, int: 42, lead: 60, troop: "spear",    emoji: "🔱", imageKey: "card_sr_yariha" },
   // --- R ---
   { id: "r_katsuma",   name: "侍大将・勝真", rarity: "R", atk: 50, int: 38, lead: 45, troop: "infantry", emoji: "⚔️", imageKey: "card_r_katsuma" },
-  { id: "r_kota",      name: "槍働き・虎太", rarity: "R", atk: 48, int: 35, lead: 40, troop: "infantry", emoji: "🔱", imageKey: "card_r_kota" },
+  { id: "r_kota",      name: "槍働き・虎太", rarity: "R", atk: 48, int: 35, lead: 40, troop: "spear",    emoji: "🔱", imageKey: "card_r_kota" },
   { id: "r_senri",     name: "参謀・千里",   rarity: "R", atk: 36, int: 50, lead: 42, troop: "archer",   emoji: "📖", imageKey: "card_r_senri" },
   { id: "r_hayate",    name: "騎兵長・颯",   rarity: "R", atk: 45, int: 38, lead: 48, troop: "cavalry",  emoji: "🐎", imageKey: "card_r_hayate" },
-  { id: "r_katayama",  name: "守将・堅山",   rarity: "R", atk: 40, int: 40, lead: 50, troop: "infantry", emoji: "🏰", imageKey: "card_r_katayama" },
+  { id: "r_katayama",  name: "守将・堅山",   rarity: "R", atk: 40, int: 40, lead: 50, troop: "shield",   emoji: "🏰", imageKey: "card_r_katayama" },
+  { id: "r_ishizuchi", name: "石槌・石鎚",   rarity: "R", atk: 52, int: 30, lead: 44, troop: "siege",    emoji: "🪨", imageKey: "card_r_ishizuchi" },
   // --- N ---
   { id: "n_taichi",    name: "足軽・太一",   rarity: "N", atk: 30, int: 20, lead: 25, troop: "infantry", emoji: "🪖", imageKey: "card_n_taichi" },
-  { id: "n_yosuke",    name: "農兵・与助",   rarity: "N", atk: 25, int: 22, lead: 28, troop: "infantry", emoji: "🌱", imageKey: "card_n_yosuke" },
+  { id: "n_yosuke",    name: "農兵・与助",   rarity: "N", atk: 25, int: 22, lead: 28, troop: "spear",    emoji: "🌱", imageKey: "card_n_yosuke" },
   { id: "n_kosuzu",    name: "斥候・小鈴",   rarity: "N", atk: 22, int: 32, lead: 24, troop: "cavalry",  emoji: "🔔", imageKey: "card_n_kosuzu" },
-  { id: "n_gonroku",   name: "衛兵・権六",   rarity: "N", atk: 28, int: 20, lead: 30, troop: "infantry", emoji: "🚪", imageKey: "card_n_gonroku" },
+  { id: "n_gonroku",   name: "衛兵・権六",   rarity: "N", atk: 28, int: 20, lead: 30, troop: "shield",   emoji: "🚪", imageKey: "card_n_gonroku" },
   { id: "n_maruta",    name: "新兵・丸太",   rarity: "N", atk: 26, int: 24, lead: 22, troop: "archer",   emoji: "🌰", imageKey: "card_n_maruta" },
-  { id: "n_nihei",     name: "輜重兵・荷平", rarity: "N", atk: 20, int: 28, lead: 30, troop: "archer",   emoji: "📦", imageKey: "card_n_nihei" },
+  { id: "n_nihei",     name: "輜重兵・荷平", rarity: "N", atk: 20, int: 28, lead: 30, troop: "siege",    emoji: "📦", imageKey: "card_n_nihei" },
 ];
 const CARD_BY_ID = Object.fromEntries(CARD_POOL.map(c => [c.id, c]));
 
@@ -890,9 +941,9 @@ function generateWorld() {
   // 7.5) 守備兵種。レベル確定後に付ける。序盤(低Lv)は無属性のままにして中盤から
   //      相性を考えさせ、関所・皇都・埠頭は必ず持たせる＝どの部隊で抜くかの判断が生まれる
   for (const t of tiles) {
-    if (t.type === "gate" || t.type === "capital" || t.type === "port") t.defTroop = pick(TROOP_KEYS);
+    if (t.type === "gate" || t.type === "capital" || t.type === "port") t.defTroop = pick(DEFENDER_TROOPS);
     else if (!isBlockedType(t.type) && t.type !== "castle" && t.level >= CONFIG.TILE_TROOP_MIN_LEVEL) {
-      t.defTroop = pick(TROOP_KEYS);
+      t.defTroop = pick(DEFENDER_TROOPS);
     }
   }
 
@@ -1131,6 +1182,25 @@ function applyEconomy(dtSec) {
   }
   S.player.diamonds += per.diamonds * dtSec / 3600;
 }
+/**
+ * ログアウト中は世界を止める。
+ * 進行中の絶対時刻タイマー（普請・行軍・AI・チャット・事件）を離席時間ぶん後ろへずらし、
+ * 「見ていない間に勝手に進んでいた」を無くす。生産も grantOfflineGains を呼ばないことで止まる。
+ */
+function shiftTimersForOffline() {
+  const gap = now() - S.lastTickAt;
+  if (gap < 2000) return 0;
+  for (const b of S.player.buildings) if (b.upgradeEndsAt) b.upgradeEndsAt += gap;
+  for (const m of S.player.marches) { m.departAt += gap; m.arriveAt += gap; }
+  for (const ai of S.aiUsers) {
+    if (ai.nextActionAt) ai.nextActionAt += gap;
+    if (ai.nextRecruitAt) ai.nextRecruitAt += gap;
+  }
+  if (S.chat && S.chat.nextAmbientAt) S.chat.nextAmbientAt += gap;
+  if (S.nextIncidentCheckAt) S.nextIncidentCheckAt += gap;
+  if (S.incident) { S.incident.createdAt += gap; S.incident.expiresAt += gap; }
+  return gap;
+}
 /** 起動時のオフライン精算（上限 OFFLINE_CAP_HOURS） */
 function grantOfflineGains() {
   const elapsedSec = (now() - S.lastTickAt) / 1000;
@@ -1157,22 +1227,61 @@ function getUpgradeCost(b) {
   for (const [k, v] of Object.entries(def.costBase)) {
     cost[k] = Math.ceil(v * Math.pow(def.costGrowth, b.level - 1));
   }
+  // 本城はLv2以降、木材と石材を大量に要求する＝倉庫を育てないと貯めきれず、
+  // 本城だけを一気に伸ばすことができない。
+  // （Lv1→2は従来コスト。初陣指南②が達成できなくなるのを避けるため）
+  if (b.type === "castle" && b.level >= 2) {
+    const g = Math.pow(CONFIG.CASTLE_COST_GROWTH, b.level - 2);
+    cost.wood = Math.max(cost.wood || 0, Math.floor(CONFIG.CASTLE_WOOD_BASE * g));
+    cost.stone = Math.max(cost.stone || 0, Math.floor(CONFIG.CASTLE_STONE_BASE * g));
+  }
   return cost;
 }
 function getUpgradeTimeSec(b) { return BUILDING_DEFS[b.type].timeBaseSec * b.level; }
 function canAfford(cost) { return Object.entries(cost).every(([k, v]) => S.player.resources[k] >= v); }
 function payCost(cost) { for (const [k, v] of Object.entries(cost)) S.player.resources[k] -= v; }
-/** アップグレード開始。失敗理由の文字列 or null(成功) を返す */
+/** 現在アップグレード中の建物数 */
+function countUpgrading() { return S.player.buildings.filter(b => b.upgradeEndsAt).length; }
+/** 枠を超えて着工する場合に必要なダイヤ（0なら無料） */
+function getExtraSlotCost() {
+  return countUpgrading() >= CONFIG.UPGRADE_FREE_SLOTS ? CONFIG.UPGRADE_EXTRA_SLOT_DIAMONDS : 0;
+}
+/** 残り時間を即完了させるダイヤ費用 */
+function getRushCost(b) {
+  if (!b.upgradeEndsAt) return 0;
+  const leftMin = Math.max(0, (b.upgradeEndsAt - now()) / 60000);
+  return Math.max(1, Math.ceil(leftMin * CONFIG.UPGRADE_RUSH_DIAMONDS_PER_MIN));
+}
+/**
+ * アップグレード開始。失敗理由の文字列 or null(成功) を返す。
+ * 同時進行は CONFIG.UPGRADE_FREE_SLOTS 件まで無料で、それを超える着工はダイヤを要求する
+ * （＝建設が並列に走りすぎて内政が一瞬で終わるのを防ぐ）。
+ */
 function startUpgrade(type) {
   const b = getBuilding(type);
   const def = BUILDING_DEFS[type];
   if (b.upgradeEndsAt) return "アップグレード中です";
   if (b.level >= def.maxLevel) return "最大レベルです";
   if (type !== "castle" && b.level >= S.player.castleLevel) return "本城レベルが必要です";
+  const extra = getExtraSlotCost();
+  if (extra && Math.floor(S.player.diamonds) < extra) {
+    return `他の普請が進行中です（同時に進めるには 💎${extra}）`;
+  }
   const cost = getUpgradeCost(b);
   if (!canAfford(cost)) return "資源が足りません";
   payCost(cost);
+  if (extra) S.player.diamonds -= extra;
   b.upgradeEndsAt = now() + getUpgradeTimeSec(b) * 1000;
+  return null;
+}
+/** ダイヤで普請を即完了。失敗理由 or null */
+function rushUpgrade(type) {
+  const b = getBuilding(type);
+  if (!b || !b.upgradeEndsAt) return "進行中の普請がありません";
+  const cost = getRushCost(b);
+  if (Math.floor(S.player.diamonds) < cost) return `ダイヤが足りません（💎${cost}必要）`;
+  S.player.diamonds -= cost;
+  b.upgradeEndsAt = now(); // 次のtickで完了する
   return null;
 }
 /** tickから呼ばれる。完了したアップグレードを反映 */
@@ -1258,6 +1367,19 @@ function getSquadCards(squadId) {
   return S.player.cards.filter(c => !used.has(c.uid))
     .sort((a, b) => cardPower(b.defId) - cardPower(a.defId))
     .slice(0, CONFIG.SQUAD_SIZE);
+}
+/** 部隊の行軍速度倍率。軍は最も遅い兵種に律速される（兵器を混ぜると鈍足になる） */
+function getSquadSpeedMult(squadId) {
+  const cards = getSquadCards(squadId);
+  if (!cards.length) return 1;
+  // 初期値を1にすると「1より速い兵種（騎兵1.7）」が反映されないので Infinity から絞る
+  let slowest = Infinity;
+  for (const c of cards) {
+    const d = CARD_BY_ID[c.defId];
+    const sp = d && TROOP_DEFS[d.troop] ? TROOP_DEFS[d.troop].speed : 1;
+    if (sp < slowest) slowest = sp;
+  }
+  return isFinite(slowest) ? slowest : 1;
 }
 /** 部隊の主兵種（最も多い兵種。同数なら戦力が高い方）。カード無しなら null */
 function getSquadTroop(squadId) {
@@ -1426,7 +1548,8 @@ function startMarch(ti, squadId) {
   S.player.resources.food -= CONFIG.MARCH_FOOD_COST;
   // 山河を迂回した実距離。川向こうは近く見えても埠頭まで回るぶん時間がかかる
   const dist = getMarchDistance(ti);
-  const speed = CONFIG.MARCH_TILES_PER_SEC * (getAllianceBuffs().speed || 1);
+  // 兵種で速度が変わる（騎兵は速く、兵器は鈍い）。部隊は最も遅い兵種に合わせる
+  const speed = CONFIG.MARCH_TILES_PER_SEC * getSquadSpeedMult(squad.id) * (getAllianceBuffs().speed || 1);
   const sec = Math.max(CONFIG.MARCH_MIN_SEC, dist / speed);
   // 出撃時点の戦力を確定させる（兵種相性はこの目標に対して計算済み）
   S.player.marches.push({
@@ -1512,7 +1635,7 @@ function rollRarity() {
   let r = Math.random();
   for (const [rar, p] of Object.entries(CONFIG.GACHA_RATES)) {
     if (r < p) {
-      if (rar === "SSR") S.player.gacha.sinceSSR = 0;
+      if (rar === "SSR" || rar === "UR") S.player.gacha.sinceSSR = 0; // URはSSR以上なので天井もリセット
       return rar;
     }
     r -= p;
@@ -2424,10 +2547,9 @@ function renderCards() {
   const nextUnlock = CONFIG.SQUAD_UNLOCK_BARRACKS_LV[slots];
 
   // 所持カード（1枚ずつ。部隊への出し入れができるよう uid 単位で並べる）
-  const order = { SSR: 0, SR: 1, R: 2, N: 3 };
   const list = S.player.cards.slice().sort((a, b) => {
     const da = CARD_BY_ID[a.defId], db = CARD_BY_ID[b.defId];
-    return order[da.rarity] - order[db.rarity] || cardPower(b.defId) - cardPower(a.defId);
+    return RARITY_ORDER[da.rarity] - RARITY_ORDER[db.rarity] || cardPower(b.defId) - cardPower(a.defId);
   });
   const cards = list.map(c => {
     const d = CARD_BY_ID[c.defId];
@@ -2438,7 +2560,7 @@ function renderCards() {
         onclick="UIA.toggleSquadCard('${sq.id}','${c.uid}')">
       <span class="rarity">${d.rarity}</span>
       <div class="art">${artHTML(d.imageKey, d.emoji)}</div>
-      <b>${d.name}</b>
+      <b>${d.name}</b> <span class="card-stars">${"★".repeat(RARITY_STARS[d.rarity])}</span>
       <div class="dim small">${trd ? `<span style="color:${trd.color}">${trd.emoji}${trd.name}</span> ｜ ` : ""}戦力${cardPower(c.defId)}</div>
       <div class="dim small">武${d.atk} 知${d.int} 統${d.lead}</div>
       ${picked ? '<span class="pick-badge">編成中</span>' : autoPicked ? '<span class="pick-badge auto">自動</span>' : ""}
@@ -2471,11 +2593,14 @@ function renderGacha() {
   const g = S.player.gacha;
   const rates = Object.entries(CONFIG.GACHA_RATES)
     .map(([r, p]) => `<tr><td>${r}</td><td>${(p * 100).toFixed(0)}%</td></tr>`).join("");
-  const results = lastGachaResults.map(d => `
-    <div class="unit-card rar-${d.rarity}">
+  const results = lastGachaResults.map(d => {
+    const trd = TROOP_DEFS[d.troop];
+    return `<div class="unit-card rar-${d.rarity}">
       <span class="rarity">${d.rarity}</span>
       <div class="art">${artHTML(d.imageKey, d.emoji)}</div>
-      <b>${d.name}</b></div>`).join("");
+      <b>${d.name}</b> <span class="card-stars">${"★".repeat(RARITY_STARS[d.rarity])}</span>
+      ${trd ? `<div class="dim small"><span style="color:${trd.color}">${trd.emoji}${trd.name}</span></div>` : ""}</div>`;
+  }).join("");
   $("page-gacha").innerHTML = `
     <div class="panel"><h3>💎 ガチャ（所持 ${fmt(S.player.diamonds)}）</h3>
       <div class="row" style="margin:8px 0">
@@ -2873,12 +2998,19 @@ const MapView = {
       const sx = this.offsetX + (ps.x + 0.5) * ts, sy = this.offsetY + (ps.y + 0.5) * ts;
       const ex = this.offsetX + (tt.x + 0.5) * ts, ey = this.offsetY + (tt.y + 0.5) * ts;
       const p = clamp((t0 - m.departAt) / (m.arriveAt - m.departAt), 0, 1);
-      ctx.strokeStyle = "rgba(232,184,74,.6)"; ctx.lineWidth = 2;
+      // 敵地・要塞への進軍は赤で示す（無主の空地などへの進出は金）
+      const hostile = !!tt.ownerId || FORTRESS_TYPES.includes(tt.type);
+      const line = hostile ? "rgba(230,80,80,.75)" : "rgba(232,184,74,.6)";
+      const dot = hostile ? "#e05050" : "#e8b84a";
+      ctx.strokeStyle = line; ctx.lineWidth = hostile ? 2.5 : 2;
       ctx.setLineDash([6, 4]);
       ctx.beginPath(); ctx.moveTo(sx, sy); ctx.lineTo(ex, ey); ctx.stroke();
       ctx.setLineDash([]);
-      ctx.fillStyle = "#e8b84a";
+      ctx.fillStyle = dot;
       ctx.beginPath(); ctx.arc(sx + (ex - sx) * p, sy + (ey - sy) * p, 5, 0, Math.PI * 2); ctx.fill();
+      // 目標地点に着弾マーカー
+      ctx.strokeStyle = line; ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.arc(ex, ey, 7 + Math.sin(now() / 200) * 1.5, 0, Math.PI * 2); ctx.stroke();
     }
     // 情報バー
     const ms = S.player.marches;
@@ -2948,8 +3080,12 @@ function openTileSheet(ti) {
         const trd = tr ? TROOP_DEFS[tr] : null;
         // 勝てる部隊、かつ相性有利な部隊を最も目立たせて「これを出せばよい」と分かるようにする
         const cls = (p >= def ? "can" : "cannot") + (rel > 1 && p >= def ? " best" : "");
+        // 兵種で行軍時間が変わるので、出撃前に所要時間も見せる
+        const spd = CONFIG.MARCH_TILES_PER_SEC * getSquadSpeedMult(sq.id) * (getAllianceBuffs().speed || 1);
+        const eta = fmtSec(Math.max(CONFIG.MARCH_MIN_SEC, getMarchDistance(ti) / spd));
         return `<button class="squad-btn ${cls}" onclick="UIA.march(${ti},'${sq.id}')">
           <b>${sq.name}</b>${trd ? ` <span style="color:${trd.color}">${trd.emoji}</span>` : ""}
+          <span class="squad-eta">🕐${eta}</span>
           <span class="squad-pow">${fmt(p)} ${p >= def ? "✅" : "⚠️"}</span>${relTag}</button>`;
       }).join("") + `</div>
       <div class="dim small" style="margin-top:4px">出兵コスト 🌾${CONFIG.MARCH_FOOD_COST}／部隊。編成は「カード」タブで変更できます</div>`;
@@ -2970,6 +3106,14 @@ const UIA = {
     const err = startUpgrade(type);
     if (err) toast("⚠️ " + err);
     renderCity(); renderHeader();
+    if (openBuildingType === type && $("sheet").classList.contains("open")) openBuildingSheet(type);
+  },
+  /** ダイヤで普請を即完了 */
+  rush(type) {
+    const err = rushUpgrade(type);
+    if (err) toast("⚠️ " + err); else toast("⚡ 普請を完了させました");
+    renderCity(); renderHeader();
+    if ($("sheet").classList.contains("open")) closeSheet();
   },
   march(ti, squadId) {
     const err = startMarch(ti, squadId);
@@ -3038,7 +3182,9 @@ const UIA = {
     const results = doGacha(count);
     if (!results) { toast("⚠️ ダイヤが足りません"); return; }
     lastGachaResults = results;
-    const best = results.some(c => c.rarity === "SSR") ? "🌟SSR!!" : results.some(c => c.rarity === "SR") ? "✨SR!" : "";
+    const best = results.some(c => c.rarity === "UR") ? "🌈UR!!!"
+      : results.some(c => c.rarity === "SSR") ? "🌟SSR!!"
+      : results.some(c => c.rarity === "SR") ? "✨SR!" : "";
     toast(`🎰 ${count}連ガチャ ${best}`);
     renderGacha(); renderHeader();
   },
@@ -3334,7 +3480,10 @@ function openBuildingSheet(type) {
     <div class="dim small" style="margin-top:4px">${prod}</div>`;
   const actions = [];
   if (b.upgradeEndsAt) {
+    const rush = getRushCost(b);
     body += `<div class="small" id="sheetCountdown" style="margin-top:8px;color:var(--accent)">⏳ 完成まで ${fmtSec((b.upgradeEndsAt - t) / 1000)}</div>`;
+    actions.push(`<button class="primary" ${Math.floor(S.player.diamonds) < rush ? "disabled" : ""}
+      onclick="UIA.rush('${type}')">⚡ 即完了（💎<span id="sheetRush">${rush}</span>）</button>`);
   } else if (b.level >= def.maxLevel) {
     body += `<div class="small" style="margin-top:8px">最大レベルに到達しています</div>`;
   } else {
@@ -3342,9 +3491,13 @@ function openBuildingSheet(type) {
     const gated = type !== "castle" && b.level >= S.player.castleLevel;
     const tierUp = buildingTier(b.level + 1) > tier
       ? `<br><span style="color:var(--accent)">✨ 外観が${TIER_LABEL[buildingTier(b.level + 1)]}に育ちます</span>` : "";
+    const extra = getExtraSlotCost();
+    const poorDia = extra && Math.floor(S.player.diamonds) < extra;
     body += `<div class="small" style="margin-top:8px">Lv${b.level + 1}へ ｜ ${fmtCost(cost)} ｜ ${fmtSec(getUpgradeTimeSec(b))}${
-      gated ? `<br><span style="color:var(--danger)">要 本城Lv${b.level + 1}</span>` : ""}${tierUp}</div>`;
-    actions.push(`<button class="primary" ${(!canAfford(cost) || gated) ? "disabled" : ""} onclick="UIA.upgrade('${type}')">⬆ アップグレード</button>`);
+      gated ? `<br><span style="color:var(--danger)">要 本城Lv${b.level + 1}</span>` : ""}${tierUp}${
+      extra ? `<br><span style="color:var(--accent)">⚒ 他の普請が進行中 — 同時に進めるには 💎${extra}</span>` : ""}</div>`;
+    actions.push(`<button class="primary" ${(!canAfford(cost) || gated || poorDia) ? "disabled" : ""} onclick="UIA.upgrade('${type}')">
+      ⬆ アップグレード${extra ? `（💎${extra}）` : ""}</button>`);
   }
   actions.push(`<button onclick="closeSheet()">閉じる</button>`);
   $("sheet").innerHTML = body + `<div class="actions">${actions.join("")}</div>`;
@@ -3435,7 +3588,12 @@ async function boot() {
   buildTerrainDistanceMap();
   MapView.init();
   MapView.startAnim();
-  grantOfflineGains();
+  if (CONFIG.OFFLINE_PROGRESS) {
+    grantOfflineGains();
+  } else {
+    const gap = shiftTimersForOffline();   // 離席中は世界を止め、続きから再開する
+    if (gap > 60000) toast(`⏸️ 離席中（${fmtSec(gap / 1000)}）は時が止まっていました`, "offline");
+  }
   S.lastTickAt = now();
   renderHeader();
   renderGuideBar();
