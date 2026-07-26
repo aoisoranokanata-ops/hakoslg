@@ -98,6 +98,29 @@ select{font:inherit;color:var(--fg);background:var(--bg3);border:1px solid var(-
 .loyalty-bar{flex:1;max-width:110px;height:5px;background:var(--bg3);border-radius:3px;overflow:hidden}
 .loyalty-bar i{display:block;height:100%;border-radius:3px;transition:width .3s}
 
+/* 部隊編成 */
+.squad-tabs{display:flex;gap:6px;flex-wrap:wrap;margin-top:6px}
+.squad-tab{flex:1;min-width:96px;font-size:12px;padding:7px 6px;position:relative}
+.squad-tab.on{background:var(--accent);color:#1a1408;border-color:var(--accent);font-weight:700}
+.squad-tab.on .dim{color:#5a4410}
+.squad-busy{display:block;font-size:9px;color:var(--danger)}
+.squad-tab.on .squad-busy{color:#7a2a10}
+.unit-card{cursor:pointer;transition:transform .1s}
+.unit-card.picked{box-shadow:0 0 0 2px var(--accent) inset}
+.unit-card.locked{opacity:.45}
+.pick-badge{position:absolute;bottom:4px;right:5px;font-size:9px;font-weight:700;padding:1px 5px;
+  border-radius:6px;background:var(--accent);color:#1a1408}
+.pick-badge.auto{background:#5a6a80;color:#e8ecf4}
+.pick-badge.lock{background:#3a3f4a;color:#9aa5bb}
+/* タイル詳細の部隊選択 */
+.squad-pick{display:flex;flex-direction:column;gap:6px;margin-top:8px}
+.squad-btn{display:flex;align-items:center;gap:8px;text-align:left;font-size:12px;padding:9px 10px}
+.squad-btn.can{border-color:#5aa05a}
+.squad-btn.cannot{opacity:.75}
+.squad-pow{margin-left:auto;font-weight:700}
+.rel-good{color:#8fd98f;font-size:11px}
+.rel-bad{color:#e08080;font-size:11px}
+
 /* 勧誘候補一覧 */
 .recruit-row{gap:6px}
 .recruit-row button{font-size:12px;padding:7px 9px;white-space:nowrap}
@@ -262,7 +285,7 @@ const CONFIG = {
   DEV_MODE: false,                      // trueで開発用UI（ガチャタブの画像取り込み等）を表示
   SAVE_KEY: "hakoslg_save_v1",          // localStorageキー（名前空間 hakoslg_）
   ASSET_DB: "hakoslg_assets",           // IndexedDB名（画像アセット）
-  SAVE_VERSION: 7,                     // v7: 地形ワールド（world.version/ruleset/playerStart）
+  SAVE_VERSION: 8,                     // v8: 部隊編成 player.squads と兵種
   LOG_MAX: 30,                         // 保持する出来事ログの最大件数
 
   // --- 初陣指南（[S15A]。最初の約1分でコアループを1周させる導線） ---
@@ -328,7 +351,6 @@ const CONFIG = {
   DIAMOND_CAPTURE_BONUS_PER_LEVEL: 20,  // 新規制圧時の一時金
 
   // --- 戦闘 ---
-  MAX_MARCHES: 1,                       // 同時出兵数（将来: 兵舎Lvで増やす想定）
   MARCH_TILES_PER_SEC: 2,               // 行軍速度（タイル/秒）
   MARCH_MIN_SEC: 3,
   MARCH_FOOD_COST: 100,                 // 出兵1回の食料コスト
@@ -336,9 +358,15 @@ const CONFIG = {
   TILE_DEF_EMPTY_MULT: 0.3,             // 空地は防御3割
   TILE_DEF_AI_PER_CASTLE_LV: 80,        // AI領有タイルは +AI城Lv×この値
   HOLY_DEF: 4000,                       // 聖地の固定防御力
-  ARMY_TOP_CARDS: 5,                    // 出撃編成: 戦力上位N枚を自動採用
   POWER_PER_BARRACKS_LV: 60,
   POWER_PER_CASTLE_LV: 25,
+
+  // --- 部隊・兵種（[S09]。硬い関所や皇都をどう抜くかの駆け引きを作る） ---
+  SQUAD_SIZE: 5,                        // 1部隊に編成できるカード枚数
+  SQUAD_UNLOCK_BARRACKS_LV: [1, 5, 10], // 各部隊が解禁される兵舎レベル（＝最大3部隊）
+  TROOP_ADVANTAGE: 1.25,                // 相性有利な時の戦力倍率
+  TROOP_DISADVANTAGE: 0.8,              // 相性不利な時の戦力倍率
+  TILE_TROOP_MIN_LEVEL: 5,              // このレベル以上のタイルに守備兵種が付く（序盤は無属性）
   REQUIRE_ADJACENCY: true,              // 自領に隣接するタイルのみ出兵可
 
   // --- マップの視覚的誘導（UX検品の指摘を受けて追加） ---
@@ -433,36 +461,55 @@ const DEFAULT_BUILDING_LAYOUT = {
 };
 
 /**
+ * 兵種の三すくみ。strong に指定した兵種に対して有利（TROOP_ADVANTAGE 倍）、
+ * 逆に自分を strong と指す兵種には不利（TROOP_DISADVANTAGE 倍）になる。
+ *   歩兵 → 騎兵 → 弓兵 → 歩兵
+ */
+const TROOP_DEFS = {
+  infantry: { name: "歩兵", emoji: "🛡️", color: "#8fa8c8", strong: "cavalry" },
+  cavalry:  { name: "騎兵", emoji: "🐎", color: "#c8a06a", strong: "archer" },
+  archer:   { name: "弓兵", emoji: "🏹", color: "#9ac88f", strong: "infantry" },
+};
+const TROOP_KEYS = Object.keys(TROOP_DEFS);
+/** 攻撃側兵種 vs 守備側兵種 の倍率（どちらか未設定なら等倍） */
+function troopMultiplier(atkTroop, defTroop) {
+  if (!atkTroop || !defTroop) return 1;
+  if (TROOP_DEFS[atkTroop] && TROOP_DEFS[atkTroop].strong === defTroop) return CONFIG.TROOP_ADVANTAGE;
+  if (TROOP_DEFS[defTroop] && TROOP_DEFS[defTroop].strong === atkTroop) return CONFIG.TROOP_DISADVANTAGE;
+  return 1;
+}
+
+/**
  * カードプール（ガチャ排出の全カード静的定義）。
- * Card仕様: { id, name, rarity, atk(武力), int(知力), lead(統率), imageKey, emoji }
+ * Card仕様: { id, name, rarity, atk(武力), int(知力), lead(統率), troop(兵種), imageKey, emoji }
  * imageKey は IndexedDB 内の画像キー。未登録なら emoji でプレースホルダー描画。
  */
 const RARITY_MULT = { N: 1.0, R: 1.2, SR: 1.5, SSR: 2.0 };
 const CARD_POOL = [
   // --- SSR ---
-  { id: "ssr_tenba",   name: "覇王・天羽",   rarity: "SSR", atk: 95, int: 70, lead: 90, emoji: "👑", imageKey: "card_ssr_tenba" },
-  { id: "ssr_byakuren",name: "軍神・白蓮",   rarity: "SSR", atk: 88, int: 92, lead: 85, emoji: "⚡", imageKey: "card_ssr_byakuren" },
-  { id: "ssr_saya",    name: "聖女・沙耶",   rarity: "SSR", atk: 70, int: 95, lead: 88, emoji: "🌸", imageKey: "card_ssr_saya" },
-  { id: "ssr_benimaru",name: "鬼神・紅丸",   rarity: "SSR", atk: 97, int: 60, lead: 82, emoji: "🔥", imageKey: "card_ssr_benimaru" },
+  { id: "ssr_tenba",   name: "覇王・天羽",   rarity: "SSR", atk: 95, int: 70, lead: 90, troop: "cavalry",  emoji: "👑", imageKey: "card_ssr_tenba" },
+  { id: "ssr_byakuren",name: "軍神・白蓮",   rarity: "SSR", atk: 88, int: 92, lead: 85, troop: "archer",   emoji: "⚡", imageKey: "card_ssr_byakuren" },
+  { id: "ssr_saya",    name: "聖女・沙耶",   rarity: "SSR", atk: 70, int: 95, lead: 88, troop: "infantry", emoji: "🌸", imageKey: "card_ssr_saya" },
+  { id: "ssr_benimaru",name: "鬼神・紅丸",   rarity: "SSR", atk: 97, int: 60, lead: 82, troop: "infantry", emoji: "🔥", imageKey: "card_ssr_benimaru" },
   // --- SR ---
-  { id: "sr_soji",     name: "剣豪・宗二",   rarity: "SR", atk: 70, int: 45, lead: 55, emoji: "🗡️", imageKey: "card_sr_soji" },
-  { id: "sr_genba",    name: "策士・玄葉",   rarity: "SR", atk: 45, int: 70, lead: 60, emoji: "🪶", imageKey: "card_sr_genba" },
-  { id: "sr_mitsuru",  name: "弓聖・美弦",   rarity: "SR", atk: 65, int: 55, lead: 58, emoji: "🏹", imageKey: "card_sr_mitsuru" },
-  { id: "sr_gantetsu", name: "猛将・岩鉄",   rarity: "SR", atk: 68, int: 40, lead: 65, emoji: "🛡️", imageKey: "card_sr_gantetsu" },
-  { id: "sr_kasumi",   name: "陰陽師・霞",   rarity: "SR", atk: 50, int: 68, lead: 62, emoji: "🌙", imageKey: "card_sr_kasumi" },
+  { id: "sr_soji",     name: "剣豪・宗二",   rarity: "SR", atk: 70, int: 45, lead: 55, troop: "infantry", emoji: "🗡️", imageKey: "card_sr_soji" },
+  { id: "sr_genba",    name: "策士・玄葉",   rarity: "SR", atk: 45, int: 70, lead: 60, troop: "archer",   emoji: "🪶", imageKey: "card_sr_genba" },
+  { id: "sr_mitsuru",  name: "弓聖・美弦",   rarity: "SR", atk: 65, int: 55, lead: 58, troop: "archer",   emoji: "🏹", imageKey: "card_sr_mitsuru" },
+  { id: "sr_gantetsu", name: "猛将・岩鉄",   rarity: "SR", atk: 68, int: 40, lead: 65, troop: "infantry", emoji: "🛡️", imageKey: "card_sr_gantetsu" },
+  { id: "sr_kasumi",   name: "陰陽師・霞",   rarity: "SR", atk: 50, int: 68, lead: 62, troop: "cavalry",  emoji: "🌙", imageKey: "card_sr_kasumi" },
   // --- R ---
-  { id: "r_katsuma",   name: "侍大将・勝真", rarity: "R", atk: 50, int: 38, lead: 45, emoji: "⚔️", imageKey: "card_r_katsuma" },
-  { id: "r_kota",      name: "槍働き・虎太", rarity: "R", atk: 48, int: 35, lead: 40, emoji: "🔱", imageKey: "card_r_kota" },
-  { id: "r_senri",     name: "参謀・千里",   rarity: "R", atk: 36, int: 50, lead: 42, emoji: "📖", imageKey: "card_r_senri" },
-  { id: "r_hayate",    name: "騎兵長・颯",   rarity: "R", atk: 45, int: 38, lead: 48, emoji: "🐎", imageKey: "card_r_hayate" },
-  { id: "r_katayama",  name: "守将・堅山",   rarity: "R", atk: 40, int: 40, lead: 50, emoji: "🏰", imageKey: "card_r_katayama" },
+  { id: "r_katsuma",   name: "侍大将・勝真", rarity: "R", atk: 50, int: 38, lead: 45, troop: "infantry", emoji: "⚔️", imageKey: "card_r_katsuma" },
+  { id: "r_kota",      name: "槍働き・虎太", rarity: "R", atk: 48, int: 35, lead: 40, troop: "infantry", emoji: "🔱", imageKey: "card_r_kota" },
+  { id: "r_senri",     name: "参謀・千里",   rarity: "R", atk: 36, int: 50, lead: 42, troop: "archer",   emoji: "📖", imageKey: "card_r_senri" },
+  { id: "r_hayate",    name: "騎兵長・颯",   rarity: "R", atk: 45, int: 38, lead: 48, troop: "cavalry",  emoji: "🐎", imageKey: "card_r_hayate" },
+  { id: "r_katayama",  name: "守将・堅山",   rarity: "R", atk: 40, int: 40, lead: 50, troop: "infantry", emoji: "🏰", imageKey: "card_r_katayama" },
   // --- N ---
-  { id: "n_taichi",    name: "足軽・太一",   rarity: "N", atk: 30, int: 20, lead: 25, emoji: "🪖", imageKey: "card_n_taichi" },
-  { id: "n_yosuke",    name: "農兵・与助",   rarity: "N", atk: 25, int: 22, lead: 28, emoji: "🌱", imageKey: "card_n_yosuke" },
-  { id: "n_kosuzu",    name: "斥候・小鈴",   rarity: "N", atk: 22, int: 32, lead: 24, emoji: "🔔", imageKey: "card_n_kosuzu" },
-  { id: "n_gonroku",   name: "衛兵・権六",   rarity: "N", atk: 28, int: 20, lead: 30, emoji: "🚪", imageKey: "card_n_gonroku" },
-  { id: "n_maruta",    name: "新兵・丸太",   rarity: "N", atk: 26, int: 24, lead: 22, emoji: "🌰", imageKey: "card_n_maruta" },
-  { id: "n_nihei",     name: "輜重兵・荷平", rarity: "N", atk: 20, int: 28, lead: 30, emoji: "📦", imageKey: "card_n_nihei" },
+  { id: "n_taichi",    name: "足軽・太一",   rarity: "N", atk: 30, int: 20, lead: 25, troop: "infantry", emoji: "🪖", imageKey: "card_n_taichi" },
+  { id: "n_yosuke",    name: "農兵・与助",   rarity: "N", atk: 25, int: 22, lead: 28, troop: "infantry", emoji: "🌱", imageKey: "card_n_yosuke" },
+  { id: "n_kosuzu",    name: "斥候・小鈴",   rarity: "N", atk: 22, int: 32, lead: 24, troop: "cavalry",  emoji: "🔔", imageKey: "card_n_kosuzu" },
+  { id: "n_gonroku",   name: "衛兵・権六",   rarity: "N", atk: 28, int: 20, lead: 30, troop: "infantry", emoji: "🚪", imageKey: "card_n_gonroku" },
+  { id: "n_maruta",    name: "新兵・丸太",   rarity: "N", atk: 26, int: 24, lead: 22, troop: "archer",   emoji: "🌰", imageKey: "card_n_maruta" },
+  { id: "n_nihei",     name: "輜重兵・荷平", rarity: "N", atk: 20, int: 28, lead: 30, troop: "archer",   emoji: "📦", imageKey: "card_n_nihei" },
 ];
 const CARD_BY_ID = Object.fromEntries(CARD_POOL.map(c => [c.id, c]));
 
@@ -612,6 +659,10 @@ function migrateSave(data) {
   }
   if (data.flags && data.flags.capitalWon == null) data.flags.capitalWon = false;
   for (const ai of (data.aiUsers || [])) if (ai.regionId === undefined) ai.regionId = null;
+  // v7 → v8: 部隊編成。既存プレイヤーは第一隊が空の状態で始まり、
+  // 出撃時に自動編成（従来と同じ「戦力上位N枚」）で埋まるため体験は変わらない
+  if (!data.player.squads) data.player.squads = [{ id: "sq_1", name: "第一隊", cardUids: [] }];
+  for (const m of (data.player.marches || [])) if (!m.squadId) m.squadId = "sq_1";
   data.version = CONFIG.SAVE_VERSION;
   return data;
 }
@@ -829,6 +880,15 @@ function generateWorld() {
     }
   }
 
+  // 7.5) 守備兵種。レベル確定後に付ける。序盤(低Lv)は無属性のままにして中盤から
+  //      相性を考えさせ、関所・皇都・埠頭は必ず持たせる＝どの部隊で抜くかの判断が生まれる
+  for (const t of tiles) {
+    if (t.type === "gate" || t.type === "capital" || t.type === "port") t.defTroop = pick(TROOP_KEYS);
+    else if (!isBlockedType(t.type) && t.type !== "castle" && t.level >= CONFIG.TILE_TROOP_MIN_LEVEL) {
+      t.defTroop = pick(TROOP_KEYS);
+    }
+  }
+
   // 8) プレイヤー本城と、初陣指南①が詰まないための隣接Lv1資源地
   put(PS.x, PS.y, "castle", 1);
   tiles[idx(PS.x, PS.y)].ownerId = "player";
@@ -956,6 +1016,8 @@ function generateAIUsers(world) {
  *     diamonds: number,         // プレミア通貨。容量キャップなし
  *     ownedTiles: [tileIndex],  // 制圧済みタイル（自城タイルは含まない）
  *     cards: [ {uid,defId,obtainedAt} ],   // ガチャ獲得カード（重複可）
+ *     squads: [ {id,name,cardUids[]} ],    // 出撃部隊([S09])。兵舎Lvで解禁数が増える
+ *                                          // cardUidsが空なら出撃時に自動編成で補う
  *     allianceId: string,
  *     marches: [ {id,targetIdx,power,departAt,arriveAt} ],
  *     gacha: { sinceSSR, total },          // 天井カウンタ・総回数
@@ -993,6 +1055,8 @@ function newGameState() {
         { uid: uid("c"), defId: "n_taichi", obtainedAt: t },
         { uid: uid("c"), defId: "n_kosuzu", obtainedAt: t },
       ],
+      // 出撃部隊。兵舎レベルで解禁数が増える（[S09]）。空なら自動編成で補われる
+      squads: [{ id: "sq_1", name: "第一隊", cardUids: [] }],
       allianceId: "ally_player",
       marches: [],
       gacha: { sinceSSR: 0, total: 0 },
@@ -1136,13 +1200,93 @@ function cardPower(defId) {
   const d = CARD_BY_ID[defId];
   return Math.round((d.atk * 1.2 + d.lead * 1.0 + d.int * 0.6) * RARITY_MULT[d.rarity]);
 }
-/** 出撃部隊の総戦力（戦力上位N枚 自動編成 + 兵舎 + 本城 + 将軍バフ） */
-function getArmyPower() {
-  const top = S.player.cards.map(c => cardPower(c.defId)).sort((a, b) => b - a).slice(0, CONFIG.ARMY_TOP_CARDS);
-  const base = top.reduce((a, b) => a + b, 0)
+/* --- 部隊（squad）-----------------------------------------------------
+ * 兵舎レベルで解禁数が増え、カードは部隊間で重複して編成できない。
+ * 「1部隊に集中して硬い関所を抜く」か「複数部隊で並行して資源地を取る」かの
+ * 選択が生まれるのが狙い。 */
+/** 現在解禁されている部隊数（兵舎レベル依存） */
+function getSquadSlots() {
+  const lv = getBuilding("barracks").level;
+  return CONFIG.SQUAD_UNLOCK_BARRACKS_LV.filter(need => lv >= need).length;
+}
+/** 解禁数に合わせて squads 配列を伸ばす（減らしはしない＝編成を失わない） */
+function ensureSquads() {
+  const slots = getSquadSlots();
+  const names = ["第一隊", "第二隊", "第三隊", "第四隊"];
+  while (S.player.squads.length < slots) {
+    const i = S.player.squads.length;
+    S.player.squads.push({ id: "sq_" + (i + 1), name: names[i] || `第${i + 1}隊`, cardUids: [] });
+  }
+  return S.player.squads;
+}
+function getSquad(squadId) { return S.player.squads.find(s => s.id === squadId) || S.player.squads[0]; }
+/** 他の部隊に既に編成されているカードuidの集合 */
+function cardsUsedByOtherSquads(squadId) {
+  const used = new Set();
+  for (const sq of S.player.squads) {
+    if (sq.id === squadId) continue;
+    for (const u of sq.cardUids) used.add(u);
+  }
+  return used;
+}
+/**
+ * 部隊の編成カード（実体）を返す。
+ * 未編成（cardUids が空）の部隊は、他部隊が使っていないカードから戦力上位を自動で借りる。
+ * これにより既存プレイヤーは何もしなくても従来どおり出撃できる。
+ */
+function getSquadCards(squadId) {
+  const sq = getSquad(squadId);
+  if (!sq) return [];
+  const byUid = new Map(S.player.cards.map(c => [c.uid, c]));
+  const picked = sq.cardUids.map(u => byUid.get(u)).filter(Boolean);
+  if (picked.length) return picked.slice(0, CONFIG.SQUAD_SIZE);
+  // 自動編成。全部隊が同じカードを取ってしまわないよう、
+  // 他部隊の手動編成分に加えて「自分より前の部隊が自動で取った分」も除外する。
+  const used = cardsUsedByOtherSquads(sq.id);
+  for (const other of S.player.squads) {
+    if (other.id === sq.id) break;                 // 自分より前の部隊だけ見る（再帰は前方向のみ）
+    if (other.cardUids.length) continue;           // 手動編成分は上で除外済み
+    for (const c of getSquadCards(other.id)) used.add(c.uid);
+  }
+  return S.player.cards.filter(c => !used.has(c.uid))
+    .sort((a, b) => cardPower(b.defId) - cardPower(a.defId))
+    .slice(0, CONFIG.SQUAD_SIZE);
+}
+/** 部隊の主兵種（最も多い兵種。同数なら戦力が高い方）。カード無しなら null */
+function getSquadTroop(squadId) {
+  const cards = getSquadCards(squadId);
+  if (!cards.length) return null;
+  const score = {};
+  for (const c of cards) {
+    const d = CARD_BY_ID[c.defId]; if (!d || !d.troop) continue;
+    score[d.troop] = (score[d.troop] || 0) + 1 + cardPower(c.defId) / 10000; // 同数は戦力で決着
+  }
+  let best = null;
+  for (const [k, v] of Object.entries(score)) if (!best || v > score[best]) best = k;
+  return best;
+}
+/**
+ * 部隊の戦力。カード戦力 + 兵舎 + 本城 に将軍バフを掛ける。
+ * defTroop を渡すと兵種相性の倍率も掛かる（実際の戦闘判定・UIの見積り両方で使う）。
+ */
+function getSquadPower(squadId, defTroop) {
+  const cards = getSquadCards(squadId);
+  const base = cards.reduce((a, c) => a + cardPower(c.defId), 0)
     + getBuilding("barracks").level * CONFIG.POWER_PER_BARRACKS_LV
     + S.player.castleLevel * CONFIG.POWER_PER_CASTLE_LV;
-  return Math.round(base * (getAllianceBuffs().power || 1));
+  const mult = (getAllianceBuffs().power || 1) * troopMultiplier(getSquadTroop(squadId), defTroop);
+  return Math.round(base * mult);
+}
+/** 出撃可能な（＝行軍中でない）部隊の一覧 */
+function getIdleSquads() {
+  ensureSquads();
+  const busy = new Set(S.player.marches.map(m => m.squadId));
+  return S.player.squads.slice(0, getSquadSlots()).filter(s => !busy.has(s.id));
+}
+/** 代表戦力（マップの情報バーなどの概算表示用）。第一隊の相性なし戦力 */
+function getArmyPower() {
+  ensureSquads();
+  return getSquadPower(S.player.squads[0].id, null);
 }
 /** タイルの防御力 */
 function getTileDefense(ti) {
@@ -1260,10 +1404,13 @@ function getMarchDistance(ti) {
   const t = S.world.tiles[ti], p = getPlayerStart();
   return chebyshev(t.x, t.y, p.x, p.y);
 }
-/** 出兵開始。失敗理由 or null */
-function startMarch(ti) {
+/** 出兵開始。squadId 省略時は空いている部隊を自動で選ぶ。失敗理由 or null */
+function startMarch(ti, squadId) {
   const t = S.world.tiles[ti];
-  if (S.player.marches.length >= CONFIG.MAX_MARCHES) return "出兵中の部隊が帰還していません";
+  const idle = getIdleSquads();
+  const squad = squadId ? idle.find(s => s.id === squadId) : idle[0];
+  if (!squad) return "出撃できる部隊がありません（全部隊が行軍中）";
+  if (!getSquadCards(squad.id).length) return "この部隊に武将が編成されていません";
   if (t.ownerId === "player") return "すでに領有しています";
   if (t.type === "castle") return "他プレイヤーの城は攻撃できません（未実装）";
   if (isBlockedType(t.type)) return `${TILE_DEFS[t.type].name}は越えられません`;
@@ -1274,7 +1421,13 @@ function startMarch(ti) {
   const dist = getMarchDistance(ti);
   const speed = CONFIG.MARCH_TILES_PER_SEC * (getAllianceBuffs().speed || 1);
   const sec = Math.max(CONFIG.MARCH_MIN_SEC, dist / speed);
-  S.player.marches.push({ id: uid("m"), targetIdx: ti, power: getArmyPower(), departAt: now(), arriveAt: now() + sec * 1000 });
+  // 出撃時点の戦力を確定させる（兵種相性はこの目標に対して計算済み）
+  S.player.marches.push({
+    id: uid("m"), squadId: squad.id, targetIdx: ti,
+    power: getSquadPower(squad.id, t.defTroop),
+    troop: getSquadTroop(squad.id),
+    departAt: now(), arriveAt: now() + sec * 1000,
+  });
   return null;
 }
 /** tickから呼ばれる。到着した出兵を解決（帰還は省略＝即時） */
@@ -1321,7 +1474,10 @@ function resolveMarches(t) {
         chatEvent("onHolyWin");
       }
     } else {
-      toast(`💥 ${TILE_DEFS[tile.type].name}Lv${tile.level} への出兵失敗… 戦力${fmt(m.power)} < 防御${fmt(def)}`, "defeat");
+      // 負けた理由が分かるよう、相性が不利だった場合はそれも書く
+      const rel = troopMultiplier(m.troop, tile.defTroop);
+      const relTxt = rel < 1 ? `（${TROOP_DEFS[m.troop].name}は${TROOP_DEFS[tile.defTroop].name}に不利）` : "";
+      toast(`💥 ${TILE_DEFS[tile.type].name}Lv${tile.level} への出兵失敗… 戦力${fmt(m.power)} < 防御${fmt(def)}${relTxt}`, "defeat");
     }
   }
 }
@@ -2230,23 +2386,70 @@ function renderCity() {
   if (openBuildingType && $("sheet").classList.contains("open")) openBuildingSheet(openBuildingType);
 }
 
+/* 編成中の部隊（UI状態なのでセーブしない） */
+let editingSquadId = null;
 function renderCards() {
-  // defIdごとにグルーピングして枚数表示
-  const counts = {};
-  for (const c of S.player.cards) counts[c.defId] = (counts[c.defId] || 0) + 1;
+  ensureSquads();
+  const slots = getSquadSlots();
+  const squads = S.player.squads.slice(0, slots);
+  if (!editingSquadId || !squads.some(s => s.id === editingSquadId)) editingSquadId = squads[0].id;
+  const sq = getSquad(editingSquadId);
+  const busy = new Set(S.player.marches.map(m => m.squadId));
+  const usedByOthers = cardsUsedByOtherSquads(sq.id);
+  const inThis = new Set(sq.cardUids);
+  const auto = sq.cardUids.length === 0;
+  const autoUids = new Set(auto ? getSquadCards(sq.id).map(c => c.uid) : []);
+
+  // 部隊タブ
+  const tabs = squads.map(s => {
+    const tr = getSquadTroop(s.id), trd = tr ? TROOP_DEFS[tr] : null;
+    return `<button class="squad-tab ${s.id === sq.id ? "on" : ""}" onclick="UIA.selectSquad('${s.id}')">
+      ${s.name}${trd ? ` <span style="color:${trd.color}">${trd.emoji}</span>` : ""}
+      <span class="dim small">${fmt(getSquadPower(s.id, null))}</span>
+      ${busy.has(s.id) ? '<span class="squad-busy">行軍中</span>' : ""}</button>`;
+  }).join("");
+  const nextUnlock = CONFIG.SQUAD_UNLOCK_BARRACKS_LV[slots];
+
+  // 所持カード（1枚ずつ。部隊への出し入れができるよう uid 単位で並べる）
   const order = { SSR: 0, SR: 1, R: 2, N: 3 };
-  const defs = Object.keys(counts).map(id => CARD_BY_ID[id])
-    .sort((a, b) => order[a.rarity] - order[b.rarity] || cardPower(b.id) - cardPower(a.id));
-  const cards = defs.map(d => `
-    <div class="unit-card rar-${d.rarity}">
+  const list = S.player.cards.slice().sort((a, b) => {
+    const da = CARD_BY_ID[a.defId], db = CARD_BY_ID[b.defId];
+    return order[da.rarity] - order[db.rarity] || cardPower(b.defId) - cardPower(a.defId);
+  });
+  const cards = list.map(c => {
+    const d = CARD_BY_ID[c.defId];
+    const trd = TROOP_DEFS[d.troop];
+    const picked = inThis.has(c.uid), autoPicked = autoUids.has(c.uid);
+    const locked = usedByOthers.has(c.uid);
+    return `<div class="unit-card rar-${d.rarity} ${picked ? "picked" : ""} ${locked ? "locked" : ""}"
+        onclick="UIA.toggleSquadCard('${sq.id}','${c.uid}')">
       <span class="rarity">${d.rarity}</span>
       <div class="art">${artHTML(d.imageKey, d.emoji)}</div>
-      <b>${d.name}</b> <span class="dim small">×${counts[d.id]}</span>
-      <div class="dim small">武${d.atk} 知${d.int} 統${d.lead} ｜ 戦力${cardPower(d.id)}</div>
-    </div>`).join("");
+      <b>${d.name}</b>
+      <div class="dim small">${trd ? `<span style="color:${trd.color}">${trd.emoji}${trd.name}</span> ｜ ` : ""}戦力${cardPower(c.defId)}</div>
+      <div class="dim small">武${d.atk} 知${d.int} 統${d.lead}</div>
+      ${picked ? '<span class="pick-badge">編成中</span>' : autoPicked ? '<span class="pick-badge auto">自動</span>' : ""}
+      ${locked ? '<span class="pick-badge lock">他隊</span>' : ""}
+    </div>`;
+  }).join("");
+
+  const tr = getSquadTroop(sq.id), trd = tr ? TROOP_DEFS[tr] : null;
   $("page-cards").innerHTML = `
-    <div class="panel"><h3>🎴 所持カード ${S.player.cards.length}枚</h3>
-      <div class="dim small">出撃編成: 戦力上位${CONFIG.ARMY_TOP_CARDS}枚を自動採用 ｜ 部隊戦力 ${fmt(getArmyPower())}</div></div>
+    <div class="panel">
+      <h3>⚔️ 部隊編成</h3>
+      <div class="squad-tabs">${tabs}</div>
+      ${nextUnlock ? `<div class="dim small" style="margin-top:6px">次の部隊は兵舎Lv${nextUnlock}で解禁</div>` : ""}
+    </div>
+    <div class="panel">
+      <div class="row"><div class="grow">
+        <b>${sq.name}</b> <span class="dim small">${sq.cardUids.length || getSquadCards(sq.id).length}/${CONFIG.SQUAD_SIZE}枚</span>
+        <div class="dim small">主兵種 ${trd ? `<span style="color:${trd.color}">${trd.emoji}${trd.name}</span>` : "—"}
+          ｜ 戦力 ${fmt(getSquadPower(sq.id, null))}${auto ? "（自動編成）" : ""}</div>
+      </div>
+      ${auto ? "" : `<button onclick="UIA.autoSquad('${sq.id}')">自動編成に戻す</button>`}</div>
+      <div class="dim small" style="margin-top:6px">三すくみ: 🛡️歩兵 → 🐎騎兵 → 🏹弓兵 → 🛡️歩兵（有利×${CONFIG.TROOP_ADVANTAGE} / 不利×${CONFIG.TROOP_DISADVANTAGE}）</div>
+    </div>
+    <div class="panel dim small">カードをタップで編成に出し入れ（部隊をまたいで同じ武将は使えません）</div>
     <div class="card-grid">${cards || '<div class="dim">カードなし</div>'}</div>`;
 }
 
@@ -2661,10 +2864,13 @@ const MapView = {
       ctx.beginPath(); ctx.arc(sx + (ex - sx) * p, sy + (ey - sy) * p, 5, 0, Math.PI * 2); ctx.fill();
     }
     // 情報バー
-    const march = S.player.marches[0];
-    $("mapInfo").textContent = march
-      ? `⚔️ 出兵中… 到着まで ${fmtSec((march.arriveAt - t0) / 1000)}`
-      : `領地 ${S.player.ownedTiles.length}枚 ｜ 戦力 ${fmt(getArmyPower())} ｜ 光る枠のタイルへ出兵できます`;
+    const ms = S.player.marches;
+    const idleCount = getIdleSquads().length, slots = getSquadSlots();
+    $("mapInfo").textContent = ms.length
+      ? `⚔️ ${ms.length}部隊が行軍中… 最短 ${fmtSec(Math.min(...ms.map(m => (m.arriveAt - t0) / 1000)))}`
+        + (idleCount ? ` ｜ 待機${idleCount}隊` : "")
+      : `領地 ${S.player.ownedTiles.length}枚 ｜ 戦力 ${fmt(getArmyPower())}`
+        + (slots > 1 ? ` ｜ ${slots}部隊` : "") + ` ｜ 光る枠へ出兵`;
   },
 };
 
@@ -2692,7 +2898,6 @@ function openTileSheet(ti) {
     actions.push(`<button class="danger" onclick="UIA.abandon(${ti})">🏳️ 放棄する</button>`);
   } else if (t.ownerId !== "player" && t.type !== "castle") {
     const def = getTileDefense(ti);
-    const power = getArmyPower();
     const resInfo = RES_KEYS.includes(t.type)
       ? `制圧すると ${RES_DEFS[t.type].emoji}+${fmt(CONFIG.TILE_PROD_PER_LEVEL_PER_HOUR * t.level)}/h`
       : t.type === "holy" && isLegacyRuleset() ? "🎉 制圧すると勝利条件達成！"
@@ -2700,8 +2905,28 @@ function openTileSheet(ti) {
       : t.type === "port" ? "⚓ 制圧すると対岸へ進軍できる"
       : t.type === "gate" ? "🛡️ 制圧するとこの先へ進める"
       : "制圧すると領地が広がる";
-    body += `<div class="small" style="margin-top:6px">防御力 ${fmt(def)} ｜ 自軍戦力 ${fmt(power)} ${power >= def ? "✅" : "⚠️戦力不足"}<br>${resInfo}<br>💎ボーナス +${CONFIG.DIAMOND_CAPTURE_BONUS_PER_LEVEL * t.level}</div>`;
-    actions.push(`<button class="primary" onclick="UIA.march(${ti})">⚔️ 出兵する（🌾${CONFIG.MARCH_FOOD_COST}）</button>`);
+    const dt = t.defTroop ? TROOP_DEFS[t.defTroop] : null;
+    body += `<div class="small" style="margin-top:6px">防御力 ${fmt(def)}${
+      dt ? ` ｜ 守備 <span style="color:${dt.color}">${dt.emoji}${dt.name}</span>` : ""}<br>
+      ${resInfo}<br>💎ボーナス +${CONFIG.DIAMOND_CAPTURE_BONUS_PER_LEVEL * t.level}</div>`;
+    // 部隊ごとに「この目標に対する」戦力（＝兵種相性込み）を出し、どれで攻めるか選ばせる
+    const idle = getIdleSquads();
+    if (!idle.length) {
+      body += `<div class="small" style="margin-top:8px;color:var(--danger)">全部隊が行軍中です</div>`;
+    } else {
+      body += `<div class="squad-pick">` + idle.map(sq => {
+        const p = getSquadPower(sq.id, t.defTroop);
+        const tr = getSquadTroop(sq.id);
+        const rel = troopMultiplier(tr, t.defTroop);
+        const relTag = rel > 1 ? `<span class="rel-good">有利×${rel}</span>`
+          : rel < 1 ? `<span class="rel-bad">不利×${rel}</span>` : "";
+        const trd = tr ? TROOP_DEFS[tr] : null;
+        return `<button class="squad-btn ${p >= def ? "can" : "cannot"}" onclick="UIA.march(${ti},'${sq.id}')">
+          <b>${sq.name}</b>${trd ? ` <span style="color:${trd.color}">${trd.emoji}</span>` : ""}
+          <span class="squad-pow">${fmt(p)} ${p >= def ? "✅" : "⚠️"}</span>${relTag}</button>`;
+      }).join("") + `</div>
+      <div class="dim small" style="margin-top:4px">出兵コスト 🌾${CONFIG.MARCH_FOOD_COST}／部隊。編成は「カード」タブで変更できます</div>`;
+    }
   }
   actions.push(`<button onclick="closeSheet()">閉じる</button>`);
   $("sheet").innerHTML = body + `<div class="actions">${actions.join("")}</div>`;
@@ -2719,10 +2944,32 @@ const UIA = {
     if (err) toast("⚠️ " + err);
     renderCity(); renderHeader();
   },
-  march(ti) {
-    const err = startMarch(ti);
-    if (err) toast("⚠️ " + err); else toast("⚔️ 出兵しました");
+  march(ti, squadId) {
+    const err = startMarch(ti, squadId);
+    if (err) toast("⚠️ " + err);
+    else toast(`⚔️ ${squadId ? getSquad(squadId).name : "部隊"} が出撃しました`);
     closeSheet(); MapView.draw(); renderHeader();
+  },
+  /** 部隊にカードを入れる/外す（同じカードは1部隊にしか入らない） */
+  toggleSquadCard(squadId, uid) {
+    const sq = getSquad(squadId); if (!sq) return;
+    const i = sq.cardUids.indexOf(uid);
+    if (i >= 0) sq.cardUids.splice(i, 1);
+    else {
+      if (sq.cardUids.length >= CONFIG.SQUAD_SIZE) { toast(`⚠️ 1部隊は${CONFIG.SQUAD_SIZE}枚までです`); return; }
+      if (cardsUsedByOtherSquads(squadId).has(uid)) { toast("⚠️ 他の部隊に編成済みです"); return; }
+      sq.cardUids.push(uid);
+    }
+    renderCards();
+  },
+  /** 編成中の部隊を切り替える（表示のみ。保存不要なのでUI状態として持つ） */
+  selectSquad(squadId) { editingSquadId = squadId; renderCards(); },
+  /** 部隊の編成を空にして自動編成（戦力上位）に戻す */
+  autoSquad(squadId) {
+    const sq = getSquad(squadId); if (!sq) return;
+    sq.cardUids = [];
+    toast(`${sq.name} を自動編成に戻しました`);
+    renderCards();
   },
   abandon(ti) {
     const err = abandonTile(ti);
