@@ -125,6 +125,11 @@ select{font:inherit;color:var(--fg);background:var(--bg3);border:1px solid var(-
 /* 駐留（[S23]） */
 .garrison-list{margin-top:6px}
 .garrison-row{display:flex;align-items:center;gap:8px;padding:3px 0;border-top:1px solid var(--line)}
+/* 同盟倉庫（[S24]） */
+.vault-row{display:flex;align-items:center;gap:8px;margin-top:5px}
+.vault-ico{width:20px;text-align:center}
+.vault-bar{flex:1;height:8px;background:var(--bg3);border-radius:5px;overflow:hidden}
+.vault-bar i{display:block;height:100%;background:linear-gradient(90deg,#6f8fbf,#9ab6e0)}
 .stack-btn{flex-shrink:0;width:30px;height:26px;padding:0;font-size:15px;line-height:1;border-radius:6px}
 .stack-state{flex:1;text-align:center;font-size:11px;color:var(--fg-dim)}
 .stack-state .dim{font-size:10px}
@@ -330,7 +335,7 @@ const CONFIG = {
   DEV_MODE: false,                      // trueで開発用UI（ガチャタブの画像取り込み等）を表示
   SAVE_KEY: "hakoslg_save_v1",          // localStorageキー（名前空間 hakoslg_）
   ASSET_DB: "hakoslg_assets",           // IndexedDB名（画像アセット）
-  SAVE_VERSION: 14,                    // v14: 幕舎・駐留（outposts / squads[].stationedAt）
+  SAVE_VERSION: 15,                    // v15: 同盟倉庫（alliance.vault）
   LOG_MAX: 30,                         // 保持する出来事ログの最大件数
 
   // --- 初陣指南（[S15A]。最初の約1分でコアループを1周させる導線） ---
@@ -512,6 +517,12 @@ const CONFIG = {
   INTERCEPT_RANGE_ARCHER: 4,            // 弓兵を含む部隊の射程
   INTERCEPT_RATIO: 0.25,                // 迎撃で削る敵戦力の割合（駐留戦力比に応じる）
   INTERCEPT_RATIO_ARCHER: 0.4,          // 同（弓兵を含む場合）
+
+  // --- 同盟倉庫（[S24]。加入AIから微量ずつ集まる共通の備蓄） ---
+  // 同盟に人を入れておく理由を、バフだけでなく「資源が貯まる」形でも作る。
+  // 徴収量は忠誠に比例するので、忠誠を保つ動機がさらに増える。
+  VAULT_PER_CASTLE_LV_PER_MIN: 1.2,     // 徴収 = AI城Lv × この値 × (忠誠/100) ／分／資源
+  VAULT_CAP_PER_MEMBER: 20000,          // 同盟倉庫の容量 = 加入AI数 × この値
 
   // --- 防衛施設（[S23]。本城Lv10で解禁する固定防御） ---
   // 幕舎が「動くための拠点」なのに対し、防衛施設は「守るための建造物」。
@@ -915,6 +926,9 @@ function migrateSave(data) {
     const p = DEFAULT_BUILDING_LAYOUT.camp;
     data.player.buildings.push({ id: "b_camp", type: "camp", level: 1, upgradeEndsAt: null, x: p.x, y: p.y });
   }
+
+  // v14 → v15: 同盟倉庫。空の倉庫が増えるだけで既存の進行に影響しない
+  if (data.alliance && !data.alliance.vault) data.alliance.vault = { food: 0, wood: 0, stone: 0, iron: 0 };
 
   // v13 → v14: 幕舎・駐留。既存の部隊は全て本城詰め（stationedAt=null）から始まる
   if (!data.player.outposts) data.player.outposts = [];
@@ -1374,7 +1388,7 @@ function generateAIUsers(world) {
  *     gacha: { sinceSSR, total },          // 天井カウンタ・総回数
  *     research: { done:[id], active:{id,endsAt}|null },  // 研究ツリー([S21])。同時1件
  *   },
- *   alliance: { id, name, members:[{id,role}] },  // 現状プレイヤー同盟1つのみ
+ *   alliance: { id, name, members:[{id,role}], vault:{food,wood,stone,iron} }, // vault=同盟倉庫([S24])
  *   aiUsers: [ AIUser ],        // スキーマは generateAIUsers 参照。defeated=true は滅亡済み
  *   aiMarches: [ {id,aiId,targetIdx,power,departAt,arriveAt} ],  // AIからの攻撃([S12])
  *   flags: { holyWon: bool },   // 一度きりイベントの発火記録
@@ -1419,7 +1433,8 @@ function newGameState() {
       // 研究ツリー([S21])。done は完了した研究id、active は進行中の1件
       research: { done: [], active: null },
     },
-    alliance: { id: "ally_player", name: "無名同盟", members: [{ id: "player", role: "盟主" }] },
+    alliance: { id: "ally_player", name: "無名同盟", members: [{ id: "player", role: "盟主" }],
+      vault: { food: 0, wood: 0, stone: 0, iron: 0 } },   // 同盟倉庫（[S24]）
     aiUsers,
     aiMarches: [],             // AIからプレイヤー領への攻撃部隊（[S12]）。到着で解決される
     flags: { holyWon: false, capitalWon: false },
@@ -2395,6 +2410,56 @@ function setMemberRole(memberId, role) {
     const ai = S.aiUsers.find(a => a.id === memberId);
     if (ai) chatEvent("onRole", { ai, sub: role }); // 任命された本人が応じる
   }
+}
+
+/* =====================================================================
+ * [S24] ALLIANCE VAULT — 同盟倉庫
+ *
+ * 加入したAIが毎分わずかずつ資源を納め、共通の備蓄になる。
+ * 納入量は忠誠に比例するので、忠誠を保つ意味がバフ以外にも生まれる。
+ * 引き出すと自分の資源になる（自分の倉庫容量を超えるぶんは受け取れない）。
+ * ===================================================================*/
+/** 同盟倉庫の容量（加入AIの数に比例） */
+function getVaultCap() {
+  return allianceAIs().length * CONFIG.VAULT_CAP_PER_MEMBER;
+}
+/** 1分あたりの納入量（1資源あたり）。忠誠が低い相手はあまり納めない */
+function getVaultRatePerMin() {
+  return allianceAIs().reduce((a, ai) =>
+    a + ai.castleLevel * CONFIG.VAULT_PER_CASTLE_LV_PER_MIN * clamp(ai.loyalty / 100, 0, 1), 0);
+}
+/** tickから呼ばれる。加入AIからの納入を積む */
+function applyVaultCollection(dtSec) {
+  if (!S.alliance || !S.alliance.vault) return;
+  const cap = getVaultCap();
+  if (cap <= 0) {
+    // 加入者が居なくなれば納入源も消える。中途半端な端数を残さない
+    for (const k of RES_KEYS) if (S.alliance.vault[k]) S.alliance.vault[k] = 0;
+    return;
+  }
+  const add = getVaultRatePerMin() * (dtSec / 60);
+  if (add <= 0) return;
+  for (const k of RES_KEYS) S.alliance.vault[k] = Math.min(cap, (S.alliance.vault[k] || 0) + add);
+}
+/** 同盟倉庫から引き出す。自分の倉庫容量を超えるぶんは残る。失敗理由 or null */
+function withdrawVault(resKey) {
+  const v = S.alliance && S.alliance.vault;
+  if (!v) return "同盟倉庫がありません";
+  const keys = resKey ? [resKey] : RES_KEYS;
+  const cap = getStorageCap();
+  const got = {};
+  let any = 0;
+  for (const k of keys) {
+    const room = Math.max(0, cap - S.player.resources[k]);
+    const take = Math.floor(Math.min(v[k] || 0, room));
+    if (take <= 0) continue;
+    v[k] -= take;
+    S.player.resources[k] += take;
+    got[k] = take; any += take;
+  }
+  if (!any) return "引き出せる資源がありません（倉庫が満杯か、備蓄がありません）";
+  toast(`🏛 同盟倉庫から受け取った: ${RES_KEYS.filter(k => got[k]).map(k => RES_DEFS[k].emoji + fmt(got[k])).join(" ")}`, "ally");
+  return null;
 }
 
 /* =====================================================================
@@ -3937,7 +4002,10 @@ function allianceSignature() {
   // 勧誘候補の顔ぶれとクールダウンの有無・食料の充足（ボタンの活性が変わる条件）
   const rec = getRecruitCandidates().map(c => c.ai.id + (t < c.ai.nextRecruitAt ? "!" : "")).join(",");
   const poor = S.player.resources.food < CONFIG.RECRUIT_FOOD_COST ? "p" : "-";
-  return inc + "|" + mem + "|" + rec + "|" + poor;
+  // 同盟倉庫は「引き出せるか」が変わった時だけ再描画する（数値は1万刻みで判定）
+  const v = S.alliance.vault || {};
+  const vault = RES_KEYS.map(k => Math.floor((v[k] || 0) / 10000)).join(".");
+  return inc + "|" + mem + "|" + rec + "|" + poor + "|" + vault;
 }
 /** 軽量更新: 事件パネルと勧誘クールダウンの残り時間だけ書き換える（全再描画を避ける） */
 function updateIncidentCountdown() {
@@ -3996,6 +4064,34 @@ function incidentPanelHTML() {
     <div class="dim small" style="margin-top:6px">※追放した相手は二度と勧誘できません</div>
   </div>`;
 }
+/**
+ * 同盟倉庫のパネル。加入AIが居ない間は容量0なので出さない。
+ * 「誰がどれだけ納めているか」が見えるよう納入レートも出す。
+ */
+function vaultPanelHTML() {
+  const v = S.alliance && S.alliance.vault;
+  const cap = getVaultCap();
+  if (!v || cap <= 0) {
+    return `<div class="panel"><h3>🏛 同盟倉庫</h3>
+      <div class="dim small">AIを勧誘すると、加入者が毎分わずかずつ資源を納めるようになります</div></div>`;
+  }
+  const rate = getVaultRatePerMin();
+  const rows = RES_KEYS.map(k => {
+    const cur = Math.floor(v[k] || 0);
+    const pct = cap > 0 ? clamp(cur / cap * 100, 0, 100) : 0;
+    return `<div class="vault-row"><span class="vault-ico">${RES_DEFS[k].emoji}</span>
+      <div class="vault-bar"><i style="width:${pct}%"></i></div>
+      <span class="dim small">${fmt(cur)}</span></div>`;
+  }).join("");
+  const total = RES_KEYS.reduce((a, k) => a + Math.floor(v[k] || 0), 0);
+  return `<div class="panel"><h3>🏛 同盟倉庫 <span class="dim small">容量 ${fmt(cap)}／資源</span></h3>
+    <div class="dim small">加入者が納入中: 毎分 +${rate.toFixed(1)}／資源（忠誠が高いほど多く納めます）</div>
+    ${rows}
+    <div class="row" style="margin-top:8px">
+      <button class="primary grow" ${total <= 0 ? "disabled" : ""} onclick="UIA.withdrawVault()">📦 すべて引き出す</button>
+    </div>
+    <div class="dim small">自分の倉庫容量を超えるぶんは同盟倉庫に残ります</div></div>`;
+}
 function renderAlliance() {
   allianceSig = allianceSignature();
   const memberRows = S.alliance.members.map(m => {
@@ -4020,6 +4116,7 @@ function renderAlliance() {
     buffs.power ? `戦力+${Math.round((buffs.power - 1) * 100)}%` : null,
     buffs.prod ? `生産+${Math.round((buffs.prod - 1) * 100)}%` : null,
     buffs.speed ? `行軍+${Math.round((buffs.speed - 1) * 100)}%` : null,
+    buffs.research ? `研究時間-${Math.round((1 - buffs.research) * 100)}%` : null,
   ].filter(Boolean).join(" ") || "なし";
   const roleHelp = ASSIGNABLE_ROLES.filter(r => r !== "一般")
     .map(r => `<div class="small dim">${r}: ${ROLE_DEFS[r].desc}</div>`).join("");
@@ -4027,6 +4124,7 @@ function renderAlliance() {
     <div class="panel"><h3>🤝 ${S.alliance.name}（${S.alliance.members.length}名）</h3>
       <div class="dim small">発動中バフ: ${buffText}</div>${roleHelp}</div>
     ${incidentPanelHTML()}
+    ${vaultPanelHTML()}
     ${memberRows}
     <div class="panel">
       <h3>💬 同盟チャット</h3>
@@ -4546,6 +4644,12 @@ const UIA = {
     if (err) toast("⚠️ " + err); else toast("⚡ 普請を完了させました");
     renderCity(); renderHeader();
     if ($("sheet").classList.contains("open")) closeSheet();
+  },
+  /* --- 同盟倉庫([S24]) --- */
+  withdrawVault() {
+    const err = withdrawVault();
+    if (err) { toast("⚠️ " + err); return; }
+    renderAlliance(); renderHeader();
   },
   /* --- 幕舎・駐留([S23]) --- */
   buildOutpost(ti) {
@@ -5119,6 +5223,7 @@ function tick() {
   S.lastTickAt = t;
   applyEconomy(dtSec);
   applyTroopRecovery(dtSec);
+  applyVaultCollection(dtSec);
   finishUpgrades(t);
   finishResearch(t);
   resolveMarches(t);
