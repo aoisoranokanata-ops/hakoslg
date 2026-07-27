@@ -307,7 +307,7 @@ const CONFIG = {
   DEV_MODE: false,                      // trueで開発用UI（ガチャタブの画像取り込み等）を表示
   SAVE_KEY: "hakoslg_save_v1",          // localStorageキー（名前空間 hakoslg_）
   ASSET_DB: "hakoslg_assets",           // IndexedDB名（画像アセット）
-  SAVE_VERSION: 10,                    // v10: 旧ワールドを地形ワールドV2へ安全に再生成
+  SAVE_VERSION: 11,                    // v11: AIの攻撃・反撃（aiMarches / ai.defeated）
   LOG_MAX: 30,                         // 保持する出来事ログの最大件数
 
   // --- 初陣指南（[S15A]。最初の約1分でコアループを1周させる導線） ---
@@ -403,6 +403,30 @@ const CONFIG = {
   HOLY_DEF: 4000,                       // 聖地の固定防御力
   POWER_PER_BARRACKS_LV: 60,
   POWER_PER_CASTLE_LV: 25,
+
+  // --- AI城への攻撃（[S09]。AIを滅ぼして地方の主になる） ---
+  // 防御 = BASE × 城Lv^EXP。関所1,500 と 皇都4,000 の間に収まるよう指数を1未満にしてある。
+  // Lv1=1,200／Lv3=3,160／Lv5=4,970／Lv10=9,110。
+  // AIはすぐ城Lv10に育つので、指数を1より大きくすると城が皇都の数倍という破綻が起きる。
+  CASTLE_DEF_BASE: 1200,
+  CASTLE_DEF_EXP: 0.88,
+  CASTLE_CAPTURE_DIAMONDS: 500,         // AI撃破の報酬💎
+
+  // --- AIからの反撃（[S12]。奪われる緊張が「対人感」を作る） ---
+  AI_ATTACK_ENABLED: true,
+  AI_ATTACK_MIN_PLAYER_TILES: 3,        // 領地がこれ未満の間は攻めてこない（序盤・指南中の保護）
+  AI_ATTACK_CHANCE: { expander: 0.45, balanced: 0.2, turtle: 0.05 }, // 行動1回あたりの攻撃確率
+  // 攻撃戦力 = BASE × 城Lv^EXP。Lv3=750／Lv10=3,591。
+  // 下の自領防御と噛み合わせて「内政を伸ばせば守れる／放置すれば削られる」を作る:
+  //   本城Lv5・兵舎Lv5 で Lv6タイルの守り約2,580（Lv10のAIには奪われる）
+  //   本城Lv10・兵舎Lv10 で約3,980（Lv10のAIを撃退できる）
+  AI_ATTACK_POWER_BASE: 180,
+  AI_ATTACK_POWER_EXP: 1.3,
+  AI_MARCH_TILES_PER_SEC: 0.25,
+  AI_MARCH_MIN_SEC: 25,                 // 気付いて対処する猶予を必ず残す（即時に奪わない）
+  AI_MAX_CONCURRENT_MARCHES: 3,         // 同時に飛んでくる攻撃の上限
+  TILE_DEF_PLAYER_PER_CASTLE_LV: 160,   // 自領の防御 += 本城Lv×この値（内政が防衛になる）
+  TILE_DEF_PLAYER_PER_BARRACKS_LV: 120, // 自領の防御 += 兵舎Lv×この値
 
   // --- 部隊・兵種（[S09]。硬い関所や皇都をどう抜くかの駆け引きを作る） ---
   SQUAD_SIZE: 5,                        // 1部隊に編成できるカード枚数
@@ -772,6 +796,11 @@ function migrateSave(data) {
     data.player.buildings.push({ id: "b_camp", type: "camp", level: 1, upgradeEndsAt: null, x: p.x, y: p.y });
   }
 
+  // v10 → v11: AIの攻撃・反撃。攻撃部隊の配列と、AIの滅亡フラグを足すだけの純粋な追加。
+  // 既存セーブは「AIがまだ一度も攻めてきていない状態」から始まる。
+  if (!data.aiMarches) data.aiMarches = [];
+  for (const ai of (data.aiUsers || [])) if (ai.defeated == null) ai.defeated = false;
+
   // v9 → v10: 地形ワールドV2を既存セーブにも適用する。
   // 旧実装は world.version=1 / legacy_v1 を保持して tiles[] を更新しなかったため、
   // GitHub Pagesを更新しても既存ブラウザでは旧マップが永続的に表示されていた。
@@ -810,6 +839,7 @@ function migrateSave(data) {
     data.aiUsers = newAiUsers;
     data.player.ownedTiles = [];
     data.player.marches = [];
+    data.aiMarches = [];   // 旧座標に紐づくAIの進軍は破棄する
     if (!data.flags) data.flags = {};
     data.flags.holyWon = false;
     data.flags.capitalWon = false;
@@ -1178,6 +1208,7 @@ function generateAIUsers(world) {
         nextRecruitAt: 0,        // 勧誘再試行可能時刻(ms)
         loyalty: CONFIG.LOYALTY_START, // 同盟内の忠誠度0-100。加入後に低下し事件の引き金になる([S19])
         regionId: region,        // 所属地方。V1では配置のみで外交的な意味は持たない
+        defeated: false,         // プレイヤーに城を落とされた勢力。以降は行動せず勧誘もできない([S12])
       };
       world.tiles[idx(x, y)] = { x, y, type: "castle", level: ai.castleLevel, ownerId: ai.id };
       users.push(ai);
@@ -1207,11 +1238,12 @@ function generateAIUsers(world) {
  *                                          // troops=現在兵力（-1は未初期化＝満タンで開始）
  *     reserves: number,                    // 徴兵所の予備兵プール（負傷兵の補充に使う）
  *     allianceId: string,
- *     marches: [ {id,targetIdx,power,departAt,arriveAt} ],
+ *     marches: [ {id,squadId,targetIdx,targetAiId,power,troop,departAt,arriveAt} ],
  *     gacha: { sinceSSR, total },          // 天井カウンタ・総回数
  *   },
  *   alliance: { id, name, members:[{id,role}] },  // 現状プレイヤー同盟1つのみ
- *   aiUsers: [ AIUser ],        // スキーマは generateAIUsers 参照
+ *   aiUsers: [ AIUser ],        // スキーマは generateAIUsers 参照。defeated=true は滅亡済み
+ *   aiMarches: [ {id,aiId,targetIdx,power,departAt,arriveAt} ],  // AIからの攻撃([S12])
  *   flags: { holyWon: bool },   // 一度きりイベントの発火記録
  *   chat: { messages:[{id,ts,senderId,text}], nextAmbientAt, unseen },  // 同盟チャット([S18])
  *   incident: {id,aiId,kind,createdAt,expiresAt}|null,  // 発生中の同盟内事件([S19])。同時1件
@@ -1253,6 +1285,7 @@ function newGameState() {
     },
     alliance: { id: "ally_player", name: "無名同盟", members: [{ id: "player", role: "盟主" }] },
     aiUsers,
+    aiMarches: [],             // AIからプレイヤー領への攻撃部隊（[S12]）。到着で解決される
     flags: { holyWon: false, capitalWon: false },
     chat: { messages: [], nextAmbientAt: 0, unseen: 0 },
     incident: null,            // 発生中の同盟内事件 {id,aiId,kind,createdAt,expiresAt} or null（同時1件）
@@ -1368,6 +1401,7 @@ function shiftTimersForOffline() {
   if (gap < 2000) return 0;
   for (const b of S.player.buildings) if (b.upgradeEndsAt) b.upgradeEndsAt += gap;
   for (const m of S.player.marches) { m.departAt += gap; m.arriveAt += gap; }
+  for (const m of (S.aiMarches || [])) { m.departAt += gap; m.arriveAt += gap; }
   for (const ai of S.aiUsers) {
     if (ai.nextActionAt) ai.nextActionAt += gap;
     if (ai.nextRecruitAt) ai.nextRecruitAt += gap;
@@ -1678,6 +1712,8 @@ function getTileDefense(ti) {
   if (t.type === "capital") return CONFIG.CAPITAL_DEF;
   if (t.type === "gate") return CONFIG.GATE_DEF;
   if (t.type === "port") return CONFIG.PORT_DEF;
+  // AI城は資源タイルとは桁が違う。城Lvの累乗で伸びるので「まず地方の小城から」の順序ができる
+  if (t.type === "castle") return Math.round(CONFIG.CASTLE_DEF_BASE * Math.pow(Math.max(1, t.level), CONFIG.CASTLE_DEF_EXP));
   let def = CONFIG.TILE_DEF_BASE * Math.pow(t.level, 1.5);
   if (t.type === "empty") def *= CONFIG.TILE_DEF_EMPTY_MULT;
   if (t.ownerId && t.ownerId !== "player") {
@@ -1685,6 +1721,15 @@ function getTileDefense(ti) {
     if (ai) def += ai.castleLevel * CONFIG.TILE_DEF_AI_PER_CASTLE_LV;
   }
   return Math.round(def);
+}
+/**
+ * 自領がAIの攻撃を受けた時の防御力。素の地形防御に**内政の成果**を上乗せする。
+ * 守備部隊という新概念を足さずに「本城と兵舎を育てれば領地を守れる」を成立させるのが狙い。
+ */
+function getPlayerTileDefense(ti) {
+  return Math.round(getTileDefense(ti)
+    + S.player.castleLevel * CONFIG.TILE_DEF_PLAYER_PER_CASTLE_LV
+    + getBuilding("barracks").level * CONFIG.TILE_DEF_PLAYER_PER_BARRACKS_LV);
 }
 
 /* --- 地形の通行判定 --------------------------------------------------
@@ -1707,10 +1752,19 @@ function canStepBetween(fromIdx, toIdx) {
   }
   return true;
 }
-/** 出兵の対象になりうるタイルか（山・川・城は不可） */
+/** 攻め落とせるAI城か（同盟員の城は不可＝追放してからでないと攻められない） */
+function isAttackableCastle(ti) {
+  const t = S.world.tiles[ti];
+  if (t.type !== "castle" || !t.ownerId || t.ownerId === "player") return false;
+  const ai = S.aiUsers.find(a => a.id === t.ownerId);
+  return !!ai && !ai.defeated && ai.allianceId !== S.alliance.id;
+}
+/** 出兵の対象になりうるタイルか（山・川は不可。AI城は攻略対象、自城は不可） */
 function isCapturableTile(ti) {
   const t = S.world.tiles[ti];
-  return !isBlockedType(t.type) && t.type !== "castle";
+  if (isBlockedType(t.type)) return false;
+  if (t.type === "castle") return isAttackableCastle(ti);
+  return true;
 }
 /** タイルが自領（自城含む）に8方向で隣接しているか（地形で遮られていないこと） */
 function isAdjacentToOwned(ti) {
@@ -1762,11 +1816,12 @@ function getMarchableTiles(range) {
         if (!inBounds(nx, ny)) continue;
         const ti = idx(nx, ny);
         const t = S.world.tiles[ti];
-        if (t.ownerId === "player" || t.type === "castle") continue; // 自領・城は対象外
-        if (!isCapturableTile(ti) || !canStepBetween(si, ti)) continue; // 山・川・角抜けは不可
+        if (t.ownerId === "player") continue;                          // 自領は対象外
+        if (!isCapturableTile(ti) || !canStepBetween(si, ti)) continue; // 山・川・角抜け・自城は不可
         set.add(ti);
-        // 2歩目の足場にできるのは「要衝でない未所有タイル」だけ
-        if (!seen.has(ti) && !["gate", "port", "capital"].includes(t.type)) {
+        // 2歩目の足場にできるのは「要衝でない未所有タイル」だけ。
+        // AI城も足場にはできない（城を飛び越えて奥の領地を叩けてしまうため）
+        if (!seen.has(ti) && !["gate", "port", "capital", "castle"].includes(t.type)) {
           seen.add(ti); next.push(ti);
         }
       }
@@ -1818,7 +1873,12 @@ function startMarch(ti, squadId) {
   if (!squad) return "出撃できる部隊がありません（全部隊が行軍中）";
   if (!getSquadCards(squad.id).length) return "この部隊に武将が編成されていません";
   if (t.ownerId === "player") return "すでに領有しています";
-  if (t.type === "castle") return "他プレイヤーの城は攻撃できません（未実装）";
+  if (t.type === "castle" && !isAttackableCastle(ti)) {
+    const ai = S.aiUsers.find(a => a.id === t.ownerId);
+    return ai && ai.allianceId === S.alliance.id
+      ? `${ai.name} は同盟員です（攻めるには同盟から追放してください）`
+      : "この城は攻撃できません";
+  }
   if (isBlockedType(t.type)) return `${TILE_DEFS[t.type].name}は越えられません`;
   // 兵力が尽きた部隊は出撃できない（休ませるか補充する判断を促す）
   const ratio = getSquadTroopRatio(squad.id);
@@ -1841,6 +1901,8 @@ function startMarch(ti, squadId) {
   // 出撃時点の戦力を確定させる（兵種相性はこの目標に対して計算済み）
   S.player.marches.push({
     id: uid("m"), squadId: squad.id, targetIdx: ti,
+    // AI城への攻撃なら撃破処理のために相手を覚えておく（到着時には所有者が変わっている）
+    targetAiId: t.type === "castle" ? t.ownerId : null,
     power: getSquadPower(squad.id, t.defTroop, t.type),
     troop: getSquadTroop(squad.id),
     departAt: now(), arriveAt: now() + sec * 1000,
@@ -1862,6 +1924,28 @@ function applyCasualties(squadId, enemyDef, ownPower, won) {
   const lost = Math.min(before, Math.round(before * raw * getSquadCasualtyMult(squadId)));
   sq.troops = Math.max(0, before - lost);
   return lost;
+}
+/**
+ * AIを撃破する。城はプレイヤー領となり、そのAIの領有タイルは**無主に戻る**。
+ * （プレイヤーへ一括譲渡すると一度の勝利で地方が丸ごと手に入り、
+ *   以降の攻略が消えてしまうため。旧領は自力で取り直す）
+ */
+function defeatAI(ai) {
+  for (const ti of ai.ownedTiles) {
+    const t = S.world.tiles[ti];
+    if (t && t.ownerId === ai.id) t.ownerId = null;
+  }
+  const lostTiles = ai.ownedTiles.length;
+  ai.ownedTiles = [];
+  ai.defeated = true;
+  ai.recruitable = false;
+  ai.allianceId = null;
+  // 進軍中だった攻撃は霧散する
+  S.aiMarches = (S.aiMarches || []).filter(m => m.aiId !== ai.id);
+  // 同盟員なら同盟からも外れる（撃破前に追放が必要なので通常はここに来ない）
+  S.alliance.members = S.alliance.members.filter(m => m.id !== ai.id);
+  if (S.incident && S.incident.aiId === ai.id) S.incident = null;
+  return lostTiles;
 }
 /** tickから呼ばれる。到着した出兵を解決（帰還は省略＝即時） */
 function resolveMarches(t) {
@@ -1886,8 +1970,18 @@ function resolveMarches(t) {
       const win = troopMultiplier(m.troop, tile.defTroop, tile.type);
       const winTag = win > 1 ? `【${TROOP_DEFS[m.troop].name}が有利！】` : "";
       const lost = applyCasualties(m.squadId, def, m.power, true);
-      toast(`⚔️ ${winTag}${TILE_DEFS[tile.type].name}Lv${tile.level} を制圧！ 💎+${bonus}`
-        + (lost ? ` ／ 損耗 -${fmt(lost)}兵` : ""), "capture");
+      if (m.targetAiId) {
+        // AI城を落とした＝その勢力を滅ぼした
+        const ai = S.aiUsers.find(a => a.id === m.targetAiId);
+        const freed = ai ? defeatAI(ai) : 0;
+        S.player.diamonds += CONFIG.CASTLE_CAPTURE_DIAMONDS;
+        toast(`🏯 ${winTag}${ai ? ai.name : "敵勢力"} の城を攻め落とした！ 💎+${CONFIG.CASTLE_CAPTURE_DIAMONDS}`
+          + (freed ? ` ／ ${freed}枚の領地が無主に戻った` : "")
+          + (lost ? ` ／ 損耗 -${fmt(lost)}兵` : ""), "capture");
+      } else {
+        toast(`⚔️ ${winTag}${TILE_DEFS[tile.type].name}Lv${tile.level} を制圧！ 💎+${bonus}`
+          + (lost ? ` ／ 損耗 -${fmt(lost)}兵` : ""), "capture");
+      }
       // 初制圧時だけ「領地が継続的に何を生むか」を1本にまとめて明示する
       // （コアループの起点。初陣指南①の達成通知もこれが兼ねる）
       if (S.player.ownedTiles.length === 1) {
@@ -1917,7 +2011,9 @@ function resolveMarches(t) {
       const relTxt = rel < 1 && m.troop && tile.defTroop
         ? `（${TROOP_DEFS[m.troop].name}は${TROOP_DEFS[tile.defTroop].name}に不利）` : "";
       const lost = applyCasualties(m.squadId, def, m.power, false);
-      toast(`💥 ${TILE_DEFS[tile.type].name}Lv${tile.level} への出兵失敗… 戦力${fmt(m.power)} < 防御${fmt(def)}${relTxt}`
+      const ai = m.targetAiId ? S.aiUsers.find(a => a.id === m.targetAiId) : null;
+      const label = ai ? `${ai.name} の城(Lv${tile.level})` : `${TILE_DEFS[tile.type].name}Lv${tile.level}`;
+      toast(`💥 ${label} への出兵失敗… 戦力${fmt(m.power)} < 防御${fmt(def)}${relTxt}`
         + (lost ? ` ／ 損耗 -${fmt(lost)}兵` : ""), "defeat");
     }
   }
@@ -2085,15 +2181,93 @@ function aiGrow(ai) {
     S.world.tiles[idx(ai.x, ai.y)].level = ai.castleLevel;
   }
 }
+/* --- AIからの反撃 ------------------------------------------------------
+ * AIが自領に隣接するプレイヤー領へ攻撃部隊を出す。奪われる緊張が「対人感」を作る。
+ * 即時に奪わず **AI_MARCH_MIN_SEC 以上かけて進軍する**（マップに赤線で見える）ので、
+ * プレイヤーは気付いて対処（本城/兵舎を上げる・取り返す）できる。 */
+/** AIの攻撃戦力。城レベルの累乗で伸びる */
+function getAIAttackPower(ai) {
+  return Math.round(CONFIG.AI_ATTACK_POWER_BASE * Math.pow(Math.max(1, ai.castleLevel), CONFIG.AI_ATTACK_POWER_EXP));
+}
+/** そのAIが今まさに攻撃してよいか（同盟員・撃破済み・序盤保護を除外） */
+function canAIAttack(ai) {
+  if (!CONFIG.AI_ATTACK_ENABLED || ai.defeated) return false;
+  if (ai.allianceId === S.alliance.id) return false;                 // 同盟員は攻めてこない
+  if (S.player.ownedTiles.length < CONFIG.AI_ATTACK_MIN_PLAYER_TILES) return false; // 序盤は保護
+  if ((S.aiMarches || []).length >= CONFIG.AI_MAX_CONCURRENT_MARCHES) return false;
+  return true;
+}
+/**
+ * AIが自領（城＋領有タイル）に隣接するプレイヤー領を1枚選んで攻撃する。
+ * 狙いは「防御が低い＝守りが薄い領地」。プレイヤーに優先して守る場所を意識させる。
+ */
+function aiAttack(ai) {
+  if (!canAIAttack(ai)) return false;
+  const targeted = new Set((S.aiMarches || []).map(m => m.targetIdx));
+  const seeds = [idx(ai.x, ai.y), ...ai.ownedTiles];
+  const candidates = [];
+  for (const si of seeds) {
+    const st = S.world.tiles[si]; if (!st) continue;
+    for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+      if (!dx && !dy) continue;
+      const nx = st.x + dx, ny = st.y + dy;
+      if (!inBounds(nx, ny)) continue;
+      const ti = idx(nx, ny);
+      const t = S.world.tiles[ti];
+      if (t.ownerId !== "player" || t.type === "castle") continue; // 本城は落とされない
+      if (targeted.has(ti) || !canStepBetween(si, ti)) continue;   // 二重攻撃と角抜けを防ぐ
+      candidates.push(ti);
+    }
+  }
+  if (!candidates.length) return false;
+  candidates.sort((a, b) => getPlayerTileDefense(a) - getPlayerTileDefense(b)); // 守りの薄い順
+  const ti = candidates[0];
+  const dist = chebyshev(S.world.tiles[ti].x, S.world.tiles[ti].y, ai.x, ai.y);
+  const sec = Math.max(CONFIG.AI_MARCH_MIN_SEC, dist / CONFIG.AI_MARCH_TILES_PER_SEC);
+  S.aiMarches.push({
+    id: uid("am"), aiId: ai.id, targetIdx: ti, power: getAIAttackPower(ai),
+    departAt: now(), arriveAt: now() + sec * 1000,
+  });
+  toast(`🚨 ${ai.name} の軍が ${TILE_DEFS[S.world.tiles[ti].type].name}(${S.world.tiles[ti].x}, ${S.world.tiles[ti].y}) へ進軍中！ 到着まで ${fmtSec(sec)}`, "raid");
+  return true;
+}
+/** 到着したAIの攻撃を解決する。tickから呼ばれる */
+function resolveAIMarches(t) {
+  if (!S.aiMarches || !S.aiMarches.length) return;
+  const done = S.aiMarches.filter(m => t >= m.arriveAt);
+  if (!done.length) return;
+  S.aiMarches = S.aiMarches.filter(m => t < m.arriveAt);
+  for (const m of done) {
+    const ai = S.aiUsers.find(a => a.id === m.aiId);
+    const tile = S.world.tiles[m.targetIdx];
+    // 到着までに自分で放棄した／すでに奪われた等で自領でなくなっていたら何も起きない
+    if (!ai || ai.defeated || !tile || tile.ownerId !== "player") continue;
+    const def = getPlayerTileDefense(m.targetIdx);
+    const name = `${TILE_DEFS[tile.type].name}Lv${tile.level}(${tile.x}, ${tile.y})`;
+    if (m.power >= def) {
+      tile.ownerId = ai.id;
+      ai.ownedTiles.push(m.targetIdx);
+      S.player.ownedTiles = S.player.ownedTiles.filter(i => i !== m.targetIdx);
+      invalidateMarchable();
+      toast(`🔥 ${ai.name} に ${name} を奪われた… 敵戦力${fmt(m.power)} > 守り${fmt(def)}`, "raid");
+    } else {
+      toast(`🛡️ ${ai.name} の攻撃を撃退！ ${name} を守り抜いた（守り${fmt(def)} > 敵${fmt(m.power)}）`, "defend");
+    }
+  }
+}
 function aiTickAll(t) {
   for (const ai of S.aiUsers) {
+    if (ai.defeated) continue;                    // 滅ぼされた勢力は行動しない
     if (t < ai.nextActionAt) continue;
     const [lo, hi] = AI_ACTION_INTERVALS[ai.personality];
     ai.nextActionAt = t + randInt(lo, hi) * 1000;
+    // 拡張・内政より先に「攻撃するか」を判定する。成立した時はその行動を攻撃に充てる
+    if (Math.random() < (CONFIG.AI_ATTACK_CHANCE[ai.personality] || 0) && aiAttack(ai)) continue;
     if (ai.personality === "expander") aiExpand(ai);
     else if (ai.personality === "turtle") aiGrow(ai);
     else Math.random() < 0.5 ? aiExpand(ai) : aiGrow(ai);
   }
+  resolveAIMarches(t);
 }
 
 /* =====================================================================
@@ -2745,6 +2919,8 @@ function resolveIncident(action, auto) {
 const LOG_KINDS = {
   capture:  { color: "#8fd98f" },  // 制圧成功
   defeat:   { color: "#e08080" },  // 出兵失敗（見逃すと最も困る）
+  raid:     { color: "#ff6b6b" },  // AIの侵攻予告・領地を奪われた（最も強く目立たせる）
+  defend:   { color: "#7fd4c0" },  // AIの攻撃を撃退した
   win:      { color: "#e8b84a" },  // 聖地制圧＝勝利
   build:    { color: "#9ab6e0" },  // 建物の強化完了
   ally:     { color: "#d0a0e0" },  // 同盟（勧誘・事件の結末）
@@ -3298,7 +3474,8 @@ const MapView = {
           ctx.fillText(TILE_DEFS[t.type].emoji, px + ts / 2, py + ts / 2 + 1);
         }
         // 自城は主人公として際立たせる（AI城と見分けがつかない問題への対処）
-        if (t.type === "castle" && t.ownerId === "player") {
+        // 「自城」は本拠地1つだけ。AIから奪った城も ownerId=player なので座標で区別する
+        if (t.type === "castle" && t.ownerId === "player" && ti === playerStartIdx()) {
           ctx.strokeStyle = `rgba(255,215,110,${0.6 + 0.4 * pulse})`;
           ctx.lineWidth = 2.5;
           ctx.beginPath();
@@ -3359,10 +3536,27 @@ const MapView = {
       ctx.strokeStyle = line; ctx.lineWidth = 2;
       ctx.beginPath(); ctx.arc(ex, ey, 7 + Math.sin(now() / 200) * 1.5, 0, Math.PI * 2); ctx.stroke();
     }
-    // 情報バー
-    const ms = S.player.marches;
+    // AIからの侵攻。自分の出兵と区別できるよう実線＋濃い赤、狙われたタイルは警告リングで囲む
+    for (const m of (S.aiMarches || [])) {
+      const ai = S.aiUsers.find(a => a.id === m.aiId); if (!ai) continue;
+      const tt = S.world.tiles[m.targetIdx]; if (!tt) continue;
+      const sx = this.offsetX + (ai.x + 0.5) * ts, sy = this.offsetY + (ai.y + 0.5) * ts;
+      const ex = this.offsetX + (tt.x + 0.5) * ts, ey = this.offsetY + (tt.y + 0.5) * ts;
+      const p = clamp((t0 - m.departAt) / (m.arriveAt - m.departAt), 0, 1);
+      ctx.strokeStyle = "rgba(255,60,60,.9)"; ctx.lineWidth = 3;
+      ctx.beginPath(); ctx.moveTo(sx, sy); ctx.lineTo(ex, ey); ctx.stroke();
+      // 狙われたタイルを脈動リングで囲む（どこが危ないかを一目で分かるようにする）
+      ctx.strokeStyle = `rgba(255,60,60,${0.5 + pulse * 0.5})`; ctx.lineWidth = 3;
+      ctx.strokeRect(this.offsetX + tt.x * ts + 1, this.offsetY + tt.y * ts + 1, ts - 2, ts - 2);
+      ctx.fillStyle = "#ff3c3c";
+      ctx.beginPath(); ctx.arc(sx + (ex - sx) * p, sy + (ey - sy) * p, 6, 0, Math.PI * 2); ctx.fill();
+    }
+    // 情報バー。侵攻は自分の行軍より優先して知らせる
+    const ms = S.player.marches, am = S.aiMarches || [];
     const idleCount = getIdleSquads().length, slots = getSquadSlots();
-    $("mapInfo").textContent = ms.length
+    $("mapInfo").textContent = am.length
+      ? `🚨 敵${am.length}部隊が侵攻中！ 着弾まで ${fmtSec(Math.min(...am.map(m => (m.arriveAt - t0) / 1000)))}`
+      : ms.length
       ? `⚔️ ${ms.length}部隊が行軍中… 最短 ${fmtSec(Math.min(...ms.map(m => (m.arriveAt - t0) / 1000)))}`
         + (idleCount ? ` ｜ 待機${idleCount}隊` : "")
       : `領地 ${S.player.ownedTiles.length}枚 ｜ 戦力 ${fmt(getArmyPower())}`
@@ -3370,6 +3564,39 @@ const MapView = {
   },
 };
 
+/**
+ * 出撃部隊の選択ボタン群のHTML。資源タイルにもAI城にも同じUIを出すため切り出した。
+ * 部隊ごとに「この目標に対する」戦力（＝兵種相性込み）と所要時間を見せ、どれで攻めるか選ばせる。
+ */
+function squadPickHTML(ti, t) {
+  const def = getTileDefense(ti);
+  const idle = getIdleSquads();
+  if (!idle.length) return `<div class="small" style="margin-top:8px;color:var(--danger)">全部隊が行軍中です</div>`;
+  return `<div class="squad-pick">` + idle.map(sq => {
+    const p = getSquadPower(sq.id, t.defTroop, t.type);
+    const tr = getSquadTroop(sq.id);
+    const rel = troopMultiplier(tr, t.defTroop, t.type);
+    const tRatio = getSquadTroopRatio(sq.id);
+    const canMarch = tRatio >= CONFIG.TROOPS_MIN_RATIO_TO_MARCH
+      && getMarchableTiles(getSquadRange(sq.id)).has(ti);
+    const relTag = rel > 1 ? `<span class="rel-good">有利×${rel}</span>`
+      : rel < 1 ? `<span class="rel-bad">不利×${rel}</span>` : "";
+    const trd = tr ? TROOP_DEFS[tr] : null;
+    // 勝てる部隊、かつ相性有利な部隊を最も目立たせて「これを出せばよい」と分かるようにする
+    const cls = (canMarch && p >= def ? "can" : "cannot") + (rel > 1 && p >= def && canMarch ? " best" : "");
+    // 兵種で行軍時間が変わるので、出撃前に所要時間も見せる
+    const spd = CONFIG.MARCH_TILES_PER_SEC * getSquadSpeedMult(sq.id) * (getAllianceBuffs().speed || 1);
+    const eta = fmtSec(Math.max(CONFIG.MARCH_MIN_SEC, getMarchDistance(ti) / spd));
+    const note = tRatio < CONFIG.TROOPS_MIN_RATIO_TO_MARCH ? `<span class="rel-bad">兵力不足</span>`
+      : !canMarch ? `<span class="rel-bad">射程外</span>` : "";
+    return `<button class="squad-btn ${cls}" ${canMarch ? "" : "disabled"} onclick="UIA.march(${ti},'${sq.id}')">
+      <b>${sq.name}</b>${trd ? ` <span style="color:${trd.color}">${trd.emoji}</span>` : ""}
+      <span class="dim small">兵${Math.round(tRatio * 100)}%</span>
+      <span class="squad-eta">🕐${eta}</span>
+      <span class="squad-pow">${fmt(p)} ${p >= def ? "✅" : "⚠️"}</span>${relTag}${note}</button>`;
+  }).join("") + `</div>
+  <div class="dim small" style="margin-top:4px">出兵コスト 🌾${CONFIG.MARCH_FOOD_COST}／部隊。編成は「カード」タブで変更できます</div>`;
+}
 /** タイル詳細ボトムシートを開く */
 function openTileSheet(ti) {
   const t = S.world.tiles[ti];
@@ -3387,14 +3614,34 @@ function openTileSheet(ti) {
   if (isBlockedType(t.type)) {
     // 山・川は出兵対象にならない。説明だけ出して終わる
   } else if (t.type === "castle" && ai) {
-    // AI城: 勧誘UI
+    // AI城: 勧誘 と 攻略（滅ぼす）の二択を同じ場所で見せる
     body += `<div class="small" style="margin-top:6px">城Lv${ai.castleLevel} ｜ 性格: ${
       { expander: "拡張志向", balanced: "バランス型", turtle: "内政重視" }[ai.personality]}
-      ｜ ${ai.allianceId ? "🤝 同盟員" : ai.recruitable ? "✅ 勧誘可能" : "❌ 勧誘不可"}</div>`;
-    if (ai.recruitable && !ai.allianceId) {
+      ｜ ${ai.defeated ? "☠️ 滅亡" : ai.allianceId ? "🤝 同盟員" : ai.recruitable ? "✅ 勧誘可能" : "❌ 勧誘不可"}</div>`;
+    if (ai.recruitable && !ai.allianceId && !ai.defeated) {
       actions.push(`<button class="primary" onclick="UIA.recruit('${ai.id}')">🤝 勧誘する（🌾${CONFIG.RECRUIT_FOOD_COST}）</button>`);
     }
+    if (ai.defeated) {
+      body += `<div class="small" style="margin-top:8px;color:var(--fg-dim)">この勢力はすでに滅んでいます</div>`;
+    } else if (ai.allianceId === S.alliance.id) {
+      body += `<div class="small" style="margin-top:8px;color:var(--fg-dim)">同盟員の城は攻められません（同盟タブで追放すれば攻略対象になります）</div>`;
+    } else {
+      body += `<div class="small" style="margin-top:8px">防御力 ${fmt(getTileDefense(ti))}<br>
+        <span style="color:var(--danger)">🏯 落とせば ${ai.name} は滅亡し、領有していた ${ai.ownedTiles.length} 枚が無主に戻ります</span><br>
+        💎ボーナス +${CONFIG.CASTLE_CAPTURE_DIAMONDS}</div>`;
+      body += squadPickHTML(ti, t);
+    }
   } else if (t.ownerId === "player" && t.type !== "castle") {
+    // 自領は「どれくらい守れているか」を見せる（AIの侵攻に備える判断材料）
+    const threat = (S.aiMarches || []).find(m => m.targetIdx === ti);
+    body += `<div class="small" style="margin-top:6px">🛡️ 守り ${fmt(getPlayerTileDefense(ti))}
+      <span class="dim">（本城Lv${S.player.castleLevel}・兵舎Lv${getBuilding("barracks").level}で上昇）</span></div>`;
+    if (threat) {
+      const ta = S.aiUsers.find(a => a.id === threat.aiId);
+      body += `<div class="small" style="margin-top:6px;color:var(--danger)">🚨 ${ta ? ta.name : "敵"} が侵攻中！
+        敵戦力 ${fmt(threat.power)} ／ 着弾まで ${fmtSec((threat.arriveAt - now()) / 1000)}
+        — ${threat.power >= getPlayerTileDefense(ti) ? "このままでは奪われます" : "守り切れます"}</div>`;
+    }
     actions.push(`<button class="danger" onclick="UIA.abandon(${ti})">🏳️ 放棄する</button>`);
   } else if (t.ownerId !== "player" && t.type !== "castle") {
     const def = getTileDefense(ti);
@@ -3413,36 +3660,7 @@ function openTileSheet(ti) {
       dt ? ` ｜ 守備 <span style="color:${dt.color}">${dt.emoji}${dt.name}</span>` : ""}${
       ct ? `<br><span class="rel-good">有利な兵種: ${ct.emoji}${ct.name}</span>` : ""}<br>
       ${resInfo}<br>💎ボーナス +${CONFIG.DIAMOND_CAPTURE_BONUS_PER_LEVEL * t.level}</div>`;
-    // 部隊ごとに「この目標に対する」戦力（＝兵種相性込み）を出し、どれで攻めるか選ばせる
-    const idle = getIdleSquads();
-    if (!idle.length) {
-      body += `<div class="small" style="margin-top:8px;color:var(--danger)">全部隊が行軍中です</div>`;
-    } else {
-      body += `<div class="squad-pick">` + idle.map(sq => {
-        const p = getSquadPower(sq.id, t.defTroop, t.type);
-        const tr = getSquadTroop(sq.id);
-        const rel = troopMultiplier(tr, t.defTroop, t.type);
-        const tRatio = getSquadTroopRatio(sq.id);
-        const canMarch = tRatio >= CONFIG.TROOPS_MIN_RATIO_TO_MARCH
-          && getMarchableTiles(getSquadRange(sq.id)).has(ti);
-        const relTag = rel > 1 ? `<span class="rel-good">有利×${rel}</span>`
-          : rel < 1 ? `<span class="rel-bad">不利×${rel}</span>` : "";
-        const trd = tr ? TROOP_DEFS[tr] : null;
-        // 勝てる部隊、かつ相性有利な部隊を最も目立たせて「これを出せばよい」と分かるようにする
-        const cls = (canMarch && p >= def ? "can" : "cannot") + (rel > 1 && p >= def && canMarch ? " best" : "");
-        // 兵種で行軍時間が変わるので、出撃前に所要時間も見せる
-        const spd = CONFIG.MARCH_TILES_PER_SEC * getSquadSpeedMult(sq.id) * (getAllianceBuffs().speed || 1);
-        const eta = fmtSec(Math.max(CONFIG.MARCH_MIN_SEC, getMarchDistance(ti) / spd));
-        const note = tRatio < CONFIG.TROOPS_MIN_RATIO_TO_MARCH ? `<span class="rel-bad">兵力不足</span>`
-          : !canMarch ? `<span class="rel-bad">射程外</span>` : "";
-        return `<button class="squad-btn ${cls}" ${canMarch ? "" : "disabled"} onclick="UIA.march(${ti},'${sq.id}')">
-          <b>${sq.name}</b>${trd ? ` <span style="color:${trd.color}">${trd.emoji}</span>` : ""}
-          <span class="dim small">兵${Math.round(tRatio * 100)}%</span>
-          <span class="squad-eta">🕐${eta}</span>
-          <span class="squad-pow">${fmt(p)} ${p >= def ? "✅" : "⚠️"}</span>${relTag}${note}</button>`;
-      }).join("") + `</div>
-      <div class="dim small" style="margin-top:4px">出兵コスト 🌾${CONFIG.MARCH_FOOD_COST}／部隊。編成は「カード」タブで変更できます</div>`;
-    }
+    body += squadPickHTML(ti, t);
   }
   actions.push(`<button onclick="closeSheet()">閉じる</button>`);
   $("sheet").innerHTML = body + `<div class="actions">${actions.join("")}</div>`;
