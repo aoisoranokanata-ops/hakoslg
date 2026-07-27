@@ -2044,6 +2044,7 @@ function resolveMarches(t) {
         toast(`🏯 ${winTag}${ai ? ai.name : "敵勢力"} の城を攻め落とした！ 💎+${CONFIG.CASTLE_CAPTURE_DIAMONDS}`
           + (freed ? ` ／ ${freed}枚の領地が無主に戻った` : "")
           + (lost ? ` ／ 損耗 -${fmt(lost)}兵` : ""), "capture");
+        warChat("onCastleFall", { enemy: ai ? ai.name : "敵勢力" });
       } else {
         toast(`⚔️ ${winTag}${TILE_DEFS[tile.type].name}Lv${tile.level} を制圧！ 💎+${bonus}`
           + (lost ? ` ／ 損耗 -${fmt(lost)}兵` : ""), "capture");
@@ -2081,6 +2082,7 @@ function resolveMarches(t) {
       const label = ai ? `${ai.name} の城(Lv${tile.level})` : `${TILE_DEFS[tile.type].name}Lv${tile.level}`;
       toast(`💥 ${label} への出兵失敗… 戦力${fmt(m.power)} < 防御${fmt(def)}${relTxt}`
         + (lost ? ` ／ 損耗 -${fmt(lost)}兵` : ""), "defeat");
+      if (ai) warChat("onCastleFail", { enemy: ai.name });
     }
   }
 }
@@ -2380,6 +2382,7 @@ function aiAttack(ai) {
     departAt: now(), arriveAt: now() + sec * 1000,
   });
   toast(`🚨 ${ai.name} の軍が ${TILE_DEFS[S.world.tiles[ti].type].name}(${S.world.tiles[ti].x}, ${S.world.tiles[ti].y}) へ進軍中！ 到着まで ${fmtSec(sec)}`, "raid");
+  warChat("onEnemyRaid", { enemy: ai.name, tile: TILE_DEFS[S.world.tiles[ti].type].name });
   return true;
 }
 /** 到着したAIの攻撃を解決する。tickから呼ばれる */
@@ -2401,8 +2404,10 @@ function resolveAIMarches(t) {
       S.player.ownedTiles = S.player.ownedTiles.filter(i => i !== m.targetIdx);
       invalidateMarchable();
       toast(`🔥 ${ai.name} に ${name} を奪われた… 敵戦力${fmt(m.power)} > 守り${fmt(def)}`, "raid");
+      warChat("onTileLost", { enemy: ai.name, tile: TILE_DEFS[tile.type].name });
     } else {
       toast(`🛡️ ${ai.name} の攻撃を撃退！ ${name} を守り抜いた（守り${fmt(def)} > 敵${fmt(m.power)}）`, "defend");
+      warChat("onDefend", { enemy: ai.name, tile: TILE_DEFS[tile.type].name });
     }
   }
 }
@@ -2642,6 +2647,17 @@ const CHAT_LINES = {
     "これで終わりではない。だが、大きな一歩だ。",
   ],
 
+  /* --- 戦争（[S09]/[S12] のAI攻撃・反撃に連動）------------------------
+   * Grok第3弾の納品待ち。空配列のままでも chatEvent が黙って何もしないので、
+   * セリフが届くまで同盟員が戦争に無反応になるだけで、動作は壊れない。
+   * onTileLost / onCastleFall は話し手の性格別プール（expander/balanced/turtle）。
+   * 変数は {enemy}=相手勢力名 / {tile}=対象タイル名 / {name} {ally} {other}。 */
+  onEnemyRaid: [],                                        // 敵が侵攻を始めた（着弾前の警告）
+  onTileLost: { expander: [], balanced: [], turtle: [] }, // 領地を奪われた
+  onDefend: [],                                           // 侵攻を撃退した
+  onCastleFall: { expander: [], balanced: [], turtle: [] }, // 敵城を落として一勢力を滅ぼした
+  onCastleFail: [],                                       // 敵城攻めに失敗した
+
   // 盟主がチャットで発言した時の相槌（短め）
   onPlayerSend: [
     "御意。",
@@ -2872,6 +2888,17 @@ function chatPush(senderId, text) {
 }
 /** テンプレ変数を補間（{name} 等）。未定義キーは空文字。 */
 function chatFill(tpl, ctx) { return tpl.replace(/\{(\w+)\}/g, (_, k) => (ctx[k] != null ? ctx[k] : "")); }
+/**
+ * 戦争イベントの発話。**話し手を先に決めてから** chatEvent に渡すのが要点で、
+ * こうしないと sub（性格別プール）に何を渡せばよいか分からない（ambient と同じ作法）。
+ * セリフプールが未執筆のキーでは chatEvent が黙って何もしないので、
+ * CHAT_LINES へ追記されるまでこの呼び出しは無害に空振りする。
+ */
+function warChat(kind, ctx) {
+  const sp = randomAllianceAI();
+  if (!sp) return;                       // 同盟員が居なければ誰も喋らない
+  chatEvent(kind, { ai: sp, sub: sp.personality, ctx });
+}
 /** 同盟所属AIから1人ランダムに返す（居なければ null） */
 function randomAllianceAI() {
   const ids = S.alliance.members.filter(m => m.id !== "player").map(m => m.id);
