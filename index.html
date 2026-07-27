@@ -167,6 +167,19 @@ select{font:inherit;color:var(--fg);background:var(--bg3);border:1px solid var(-
 .unit-card.rar-UR{border-color:var(--ur);box-shadow:0 0 12px rgba(255,120,180,.5)} .unit-card.rar-UR .rarity{color:var(--ur)}
 .card-stars{font-size:10px;letter-spacing:-1px;color:var(--accent)}
 
+/* 研究ツリー（[S21]）。系統ごとに縦1列で「上から順に開いていく」ことを形で示す */
+.research-branch{margin-top:10px}
+.research-head{font-size:12px;font-weight:700;color:var(--fg-dim);border-bottom:1px solid var(--line);padding-bottom:3px;margin-bottom:6px}
+.research-node{border:1px solid var(--line);border-left-width:3px;border-radius:8px;padding:7px 9px;margin-bottom:6px;background:var(--bg2)}
+.research-node .research-title{font-size:13px}
+.research-status{margin-top:5px;font-size:11px;color:var(--fg-dim)}
+/* 取れる研究だけを明るくし、条件不足は沈める＝次に何をすべきかが一目で分かる */
+.research-node.ready{border-left-color:var(--accent);background:var(--bg3)}
+.research-node.active{border-left-color:var(--accent);box-shadow:0 0 8px rgba(232,184,74,.25)}
+.research-node.done{border-left-color:#5acd96;opacity:.7}
+.research-node.locked{opacity:.5}
+.research-go{padding:4px 10px;font-size:12px}
+
 /* ボトムシート（タイル詳細） */
 #sheet{position:fixed;left:0;right:0;bottom:0;background:var(--bg2);border-top:1px solid var(--line);
   border-radius:14px 14px 0 0;padding:14px 16px calc(14px + var(--safe-b));transform:translateY(105%);
@@ -307,7 +320,7 @@ const CONFIG = {
   DEV_MODE: false,                      // trueで開発用UI（ガチャタブの画像取り込み等）を表示
   SAVE_KEY: "hakoslg_save_v1",          // localStorageキー（名前空間 hakoslg_）
   ASSET_DB: "hakoslg_assets",           // IndexedDB名（画像アセット）
-  SAVE_VERSION: 11,                    // v11: AIの攻撃・反撃（aiMarches / ai.defeated）
+  SAVE_VERSION: 12,                    // v12: 研究ツリー（player.research）
   LOG_MAX: 30,                         // 保持する出来事ログの最大件数
 
   // --- 初陣指南（[S15A]。最初の約1分でコアループを1周させる導線） ---
@@ -528,7 +541,7 @@ const BUILDING_DEFS = {
                desc: "部隊戦力 +" + CONFIG.POWER_PER_BARRACKS_LV + "/Lv" },
   lab:       { name: "研究所", emoji: "📜", imageKey: "bld_lab",       prodType: null,    prodBase: 0,
                maxLevel: 15, costBase: { wood: 200, stone: 150, iron: 100 },            costGrowth: 1.6, timeBaseSec: 18,
-               desc: "全資源生産 +2%/Lv（研究ツリーは未実装）" },
+               desc: "全資源生産 +2%/Lv ｜ 研究ツリーを解禁" },
   warehouse: { name: "倉庫",   emoji: "🏬", imageKey: "bld_warehouse", prodType: null,    prodBase: 0,
                maxLevel: 15, costBase: { wood: 150, stone: 150 },                       costGrowth: 1.5, timeBaseSec: 12,
                desc: "資源の保管容量を拡大" },
@@ -639,12 +652,58 @@ const CARD_BY_ID = Object.fromEntries(CARD_POOL.map(c => [c.id, c]));
 /** 役職定義。buff は getAllianceBuffs() が参照する乗数。 */
 const ROLE_DEFS = {
   "盟主": { desc: "同盟の長（プレイヤー固定）", buff: {} },
-  "軍師": { desc: "軍略の補佐（現在は効果なし）", buff: {} }, // TODO: 研究ツリー実装時にバフを付与
+  "軍師": { desc: "研究時間 -25%", buff: { research: 0.75 } },
   "将軍": { desc: "部隊戦力 +10%",   buff: { power: 1.10 } },
   "都督": { desc: "全資源生産 +10%", buff: { prod: 1.10 } },
   "斥候": { desc: "行軍速度 +20%",   buff: { speed: 1.20 } },
   "一般": { desc: "役職なし", buff: {} },
 };
+
+/**
+ * 研究ツリー（[S21]）。研究所で1つずつ解禁していく恒久バフ。
+ * 3系統×3段の直列。同時に進められるのは1件だけ（普請と同じ「基本は一つ」の方針）。
+ *
+ * effect のキーは getResearchBuffs() が集計する乗数で、値は「1からのズレ」を足していく:
+ *   prod=生産 / cap=倉庫容量 / buildTime=普請時間 / power=部隊戦力 / casualty=損耗 /
+ *   tileDef=自領防御 / speed=行軍速度 / troops=最大兵力 / diamond=ダイヤ獲得
+ * casualty と buildTime は小さいほど良い（LOWER_IS_BETTER_RESEARCH）。
+ */
+const RESEARCH_DEFS = [
+  // --- 内政 ---
+  { id: "farming",  name: "農法改良",  icon: "🌱", branch: "内政", labLv: 1, requires: null,
+    desc: "全資源の生産 +10%", effect: { prod: 1.10 },
+    cost: { food: 2000, wood: 2000 }, sec: 180 },
+  { id: "storage",  name: "蔵前普請",  icon: "🏬", branch: "内政", labLv: 3, requires: "farming",
+    desc: "倉庫の容量 +25%", effect: { cap: 1.25 },
+    cost: { wood: 12000, stone: 12000 }, sec: 600 },
+  { id: "masonry",  name: "石工術",    icon: "⛏️", branch: "内政", labLv: 6, requires: "storage",
+    desc: "普請にかかる時間 -20%", effect: { buildTime: 0.80 },
+    cost: { stone: 60000, iron: 40000 }, sec: 1500 },
+  // --- 軍事 ---
+  { id: "tactics",  name: "兵法",      icon: "📖", branch: "軍事", labLv: 2, requires: null,
+    desc: "部隊の戦力 +10%", effect: { power: 1.10 },
+    cost: { food: 4000, iron: 2000 }, sec: 300 },
+  { id: "armor",    name: "甲冑改良",  icon: "🛡", branch: "軍事", labLv: 5, requires: "tactics",
+    desc: "戦闘での損耗 -20%", effect: { casualty: 0.80 },
+    cost: { iron: 30000, stone: 20000 }, sec: 900 },
+  { id: "rampart",  name: "城塞普請",  icon: "🏯", branch: "軍事", labLv: 8, requires: "armor",
+    desc: "自領の防御 +30%（AIの侵攻を退けやすくなる）", effect: { tileDef: 1.30 },
+    cost: { stone: 90000, iron: 60000 }, sec: 1800 },
+  // --- 開拓 ---
+  { id: "roads",    name: "街道整備",  icon: "🛤️", branch: "開拓", labLv: 3, requires: null,
+    desc: "行軍速度 +20%", effect: { speed: 1.20 },
+    cost: { wood: 8000, stone: 8000 }, sec: 480 },
+  { id: "levy",     name: "徴兵制",    icon: "⛺", branch: "開拓", labLv: 6, requires: "roads",
+    desc: "部隊の最大兵力 +15%", effect: { troops: 1.15 },
+    cost: { food: 50000, iron: 25000 }, sec: 1200 },
+  { id: "tribute",  name: "徴税制度",  icon: "💎", branch: "開拓", labLv: 10, requires: "levy",
+    desc: "領地から得るダイヤ +25%", effect: { diamond: 1.25 },
+    cost: { food: 120000, wood: 80000, stone: 80000 }, sec: 2400 },
+];
+const RESEARCH_BY_ID = Object.fromEntries(RESEARCH_DEFS.map(r => [r.id, r]));
+const RESEARCH_BRANCHES = ["内政", "軍事", "開拓"];
+/** 小さいほど強い研究バフ（複数取っても掛け算で減っていく） */
+const LOWER_IS_BETTER_RESEARCH = ["casualty", "buildTime"];
 const ASSIGNABLE_ROLES = ["一般", "軍師", "将軍", "都督", "斥候"];
 
 /** AI城の名前・カラーパレット（生成時にindex順で使用） */
@@ -795,6 +854,9 @@ function migrateSave(data) {
     const p = DEFAULT_BUILDING_LAYOUT.camp;
     data.player.buildings.push({ id: "b_camp", type: "camp", level: 1, upgradeEndsAt: null, x: p.x, y: p.y });
   }
+
+  // v11 → v12: 研究ツリー。未研究の状態から始まるだけなので既存の進行に影響しない
+  if (!data.player.research) data.player.research = { done: [], active: null };
 
   // v10 → v11: AIの攻撃・反撃。攻撃部隊の配列と、AIの滅亡フラグを足すだけの純粋な追加。
   // 既存セーブは「AIがまだ一度も攻めてきていない状態」から始まる。
@@ -1240,6 +1302,7 @@ function generateAIUsers(world) {
  *     allianceId: string,
  *     marches: [ {id,squadId,targetIdx,targetAiId,power,troop,departAt,arriveAt} ],
  *     gacha: { sinceSSR, total },          // 天井カウンタ・総回数
+ *     research: { done:[id], active:{id,endsAt}|null },  // 研究ツリー([S21])。同時1件
  *   },
  *   alliance: { id, name, members:[{id,role}] },  // 現状プレイヤー同盟1つのみ
  *   aiUsers: [ AIUser ],        // スキーマは generateAIUsers 参照。defeated=true は滅亡済み
@@ -1282,6 +1345,8 @@ function newGameState() {
       allianceId: "ally_player",
       marches: [],
       gacha: { sinceSSR: 0, total: 0 },
+      // 研究ツリー([S21])。done は完了した研究id、active は進行中の1件
+      research: { done: [], active: null },
     },
     alliance: { id: "ally_player", name: "無名同盟", members: [{ id: "player", role: "盟主" }] },
     aiUsers,
@@ -1307,7 +1372,8 @@ let S = null; // グローバル可変状態（唯一）
 function getProdPerHour() {
   const buffs = getAllianceBuffs();
   const labLv = getBuilding("lab").level;
-  const mult = (1 + CONFIG.LAB_PROD_BONUS_PER_LEVEL * labLv) * (buffs.prod || 1);
+  const rb = getResearchBuffs();
+  const mult = (1 + CONFIG.LAB_PROD_BONUS_PER_LEVEL * labLv) * (buffs.prod || 1) * (rb.prod || 1);
   const out = { food: 0, wood: 0, stone: 0, iron: 0, diamonds: 0 };
   // 建物生産
   for (const b of S.player.buildings) {
@@ -1330,13 +1396,13 @@ function getProdPerHour() {
     }
   }
   for (const k of RES_KEYS) out[k] *= mult;
-  out.diamonds = tileLevelSum * CONFIG.DIAMOND_PER_TILELEVEL_PER_HOUR;
+  out.diamonds = tileLevelSum * CONFIG.DIAMOND_PER_TILELEVEL_PER_HOUR * (rb.diamond || 1);
   return out;
 }
 /** 倉庫容量（食料/木材/石材/鉄の各上限） */
 function getStorageCap() {
   const lv = getBuilding("warehouse").level;
-  return Math.floor(CONFIG.WAREHOUSE_CAP_BASE * Math.pow(lv, 1.7));
+  return Math.floor(CONFIG.WAREHOUSE_CAP_BASE * Math.pow(lv, 1.7) * researchMult("cap"));
 }
 /**
  * 兵力の自然回復と、徴兵所による予備兵の蓄積（tickから呼ぶ）。
@@ -1447,7 +1513,7 @@ function getUpgradeCost(b) {
   }
   return cost;
 }
-function getUpgradeTimeSec(b) { return BUILDING_DEFS[b.type].timeBaseSec * b.level; }
+function getUpgradeTimeSec(b) { return Math.max(1, Math.round(BUILDING_DEFS[b.type].timeBaseSec * b.level * researchMult("buildTime"))); }
 function canAfford(cost) { return Object.entries(cost).every(([k, v]) => S.player.resources[k] >= v); }
 function payCost(cost) { for (const [k, v] of Object.entries(cost)) S.player.resources[k] -= v; }
 /** 現在アップグレード中の建物数 */
@@ -1589,8 +1655,8 @@ function getSquadCards(squadId) {
 function getSquadMaxTroops(squadId) {
   const cards = getSquadCards(squadId);
   const lead = cards.reduce((a, c) => a + (CARD_BY_ID[c.defId] ? CARD_BY_ID[c.defId].lead : 0), 0);
-  return Math.max(1, Math.round(lead * CONFIG.TROOPS_PER_LEAD
-    + getBuilding("barracks").level * CONFIG.TROOPS_PER_BARRACKS_LV));
+  return Math.max(1, Math.round((lead * CONFIG.TROOPS_PER_LEAD
+    + getBuilding("barracks").level * CONFIG.TROOPS_PER_BARRACKS_LV) * researchMult("troops")));
 }
 /** 部隊の現在兵力。未初期化(-1)なら満タンで初期化する */
 function getSquadTroops(squadId) {
@@ -1689,7 +1755,7 @@ function getSquadPower(squadId, defTroop, tileType) {
     + getBuilding("barracks").level * CONFIG.POWER_PER_BARRACKS_LV
     + S.player.castleLevel * CONFIG.POWER_PER_CASTLE_LV;
   // 兵力が減っている部隊は、その割合ぶん弱くなる（負傷兵の反映）
-  const mult = (getAllianceBuffs().power || 1)
+  const mult = (getAllianceBuffs().power || 1) * researchMult("power")
     * troopMultiplier(getSquadTroop(squadId), defTroop, tileType)
     * getSquadTroopRatio(squadId);
   return Math.round(base * mult);
@@ -1727,9 +1793,9 @@ function getTileDefense(ti) {
  * 守備部隊という新概念を足さずに「本城と兵舎を育てれば領地を守れる」を成立させるのが狙い。
  */
 function getPlayerTileDefense(ti) {
-  return Math.round(getTileDefense(ti)
+  return Math.round((getTileDefense(ti)
     + S.player.castleLevel * CONFIG.TILE_DEF_PLAYER_PER_CASTLE_LV
-    + getBuilding("barracks").level * CONFIG.TILE_DEF_PLAYER_PER_BARRACKS_LV);
+    + getBuilding("barracks").level * CONFIG.TILE_DEF_PLAYER_PER_BARRACKS_LV) * researchMult("tileDef"));
 }
 
 /* --- 地形の通行判定 --------------------------------------------------
@@ -1896,7 +1962,7 @@ function startMarch(ti, squadId) {
   // 山河を迂回した実距離。川向こうは近く見えても埠頭まで回るぶん時間がかかる
   const dist = getMarchDistance(ti);
   // 兵種で速度が変わる（騎兵は速く、兵器は鈍い）。部隊は最も遅い兵種に合わせる
-  const speed = CONFIG.MARCH_TILES_PER_SEC * getSquadSpeedMult(squad.id) * (getAllianceBuffs().speed || 1);
+  const speed = CONFIG.MARCH_TILES_PER_SEC * getSquadSpeedMult(squad.id) * (getAllianceBuffs().speed || 1) * researchMult("speed");
   const sec = Math.max(CONFIG.MARCH_MIN_SEC, dist / speed);
   // 出撃時点の戦力を確定させる（兵種相性はこの目標に対して計算済み）
   S.player.marches.push({
@@ -1921,7 +1987,7 @@ function applyCasualties(squadId, enemyDef, ownPower, won) {
   const raw = won
     ? clamp(ratio * CONFIG.CASUALTY_WIN_FACTOR, CONFIG.CASUALTY_WIN_MIN, CONFIG.CASUALTY_WIN_MAX)
     : clamp(ratio * CONFIG.CASUALTY_LOSE_FACTOR, CONFIG.CASUALTY_LOSE_MIN, CONFIG.CASUALTY_LOSE_MAX);
-  const lost = Math.min(before, Math.round(before * raw * getSquadCasualtyMult(squadId)));
+  const lost = Math.min(before, Math.round(before * raw * getSquadCasualtyMult(squadId) * researchMult("casualty")));
   sq.troops = Math.max(0, before - lost);
   return lost;
 }
@@ -2073,13 +2139,18 @@ function doGacha(count) {
 /* =====================================================================
  * [S11] ALLIANCE — 勧誘・役職・バフ
  * ===================================================================*/
-/** 同盟の役職バフを集計。{power,prod,speed} の乗数（未設定は1） */
+/** 値が小さいほど強いバフのキー（時間短縮など）。集計は max ではなく min で行う */
+const LOWER_IS_BETTER_BUFFS = ["research"];
+/** 同盟の役職バフを集計。{power,prod,speed,research} の乗数（未設定は1） */
 function getAllianceBuffs() {
   const out = {};
   if (!S) return out;
   for (const m of S.alliance.members) {
     const buff = (ROLE_DEFS[m.role] || {}).buff || {};
-    for (const [k, v] of Object.entries(buff)) out[k] = Math.max(out[k] || 1, v);
+    for (const [k, v] of Object.entries(buff)) {
+      out[k] = LOWER_IS_BETTER_BUFFS.includes(k) ? Math.min(out[k] == null ? 1 : out[k], v)
+                                                 : Math.max(out[k] || 1, v);
+    }
   }
   return out;
 }
@@ -2123,6 +2194,86 @@ function setMemberRole(memberId, role) {
     const ai = S.aiUsers.find(a => a.id === memberId);
     if (ai) chatEvent("onRole", { ai, sub: role }); // 任命された本人が応じる
   }
+}
+
+/* =====================================================================
+ * [S21] RESEARCH — 研究ツリー（研究所で解禁する恒久バフ）
+ *
+ * 研究所がこれまで「生産+2%/Lv」だけだったのを、蓄積した資源の使い道にする。
+ * 同時に1件のみ。完了した研究は S.player.research.done[] に id で積むだけなので、
+ * 定義（RESEARCH_DEFS）を書き換えても既存セーブは壊れない。
+ * ===================================================================*/
+/** 完了済み研究の効果を集計した乗数。{prod,cap,power,...}（未取得は1） */
+function getResearchBuffs() {
+  const out = {};
+  const done = (S && S.player.research && S.player.research.done) || [];
+  for (const id of done) {
+    const def = RESEARCH_BY_ID[id]; if (!def) continue;   // 定義から消えた研究は無視する
+    for (const [k, v] of Object.entries(def.effect)) out[k] = (out[k] == null ? 1 : out[k]) * v;
+  }
+  return out;
+}
+/** 単一キーの研究倍率。呼び出し側を短く保つためのヘルパー */
+function researchMult(key) {
+  const v = getResearchBuffs()[key];
+  return v == null ? 1 : v;
+}
+function isResearchDone(id) {
+  return !!(S.player.research && S.player.research.done.includes(id));
+}
+/** その研究に着手できるか。できない場合は理由文字列を返す */
+function getResearchBlocker(def) {
+  if (isResearchDone(def.id)) return "研究済み";
+  // 恒久的な条件（研究所Lv・前提研究）を先に返す。「他の研究が進行中」を先に出すと、
+  // 進行中の間だけ全ノードが同じ理由になり「次に何を目指すか」が読めなくなる。
+  const labLv = getBuilding("lab").level;
+  if (labLv < def.labLv) return `研究所Lv${def.labLv}が必要`;
+  if (def.requires && !isResearchDone(def.requires)) return `先に「${RESEARCH_BY_ID[def.requires].name}」が必要`;
+  if (S.player.research.active) return "他の研究が進行中";
+  if (!canAfford(def.cost)) return "資源が足りません";
+  return null;
+}
+/** 研究の所要時間（秒）。軍師の役職バフで短縮される */
+function getResearchTimeSec(def) {
+  return Math.max(1, Math.round(def.sec * (getAllianceBuffs().research || 1)));
+}
+/** 研究開始。失敗理由 or null */
+function startResearch(id) {
+  const def = RESEARCH_BY_ID[id];
+  if (!def) return "存在しない研究です";
+  const blocked = getResearchBlocker(def);
+  if (blocked) return blocked;
+  payCost(def.cost);
+  S.player.research.active = { id, endsAt: now() + getResearchTimeSec(def) * 1000 };
+  toast(`🔬 ${def.icon} ${def.name} の研究を開始（${fmtSec(getResearchTimeSec(def))}）`);
+  return null;
+}
+/** 研究の即完了に必要なダイヤ（普請と同じ「残り時間×単価」） */
+function getResearchRushCost() {
+  const a = S.player.research.active; if (!a) return 0;
+  return Math.max(1, Math.ceil((a.endsAt - now()) / 60000 * CONFIG.UPGRADE_RUSH_DIAMONDS_PER_MIN));
+}
+function rushResearch() {
+  const a = S.player.research.active;
+  if (!a) return "研究していません";
+  const cost = getResearchRushCost();
+  if (Math.floor(S.player.diamonds) < cost) return `ダイヤが足りません（💎${cost}必要）`;
+  S.player.diamonds -= cost;
+  a.endsAt = now();
+  return null;
+}
+/** tickから呼ばれる。完了した研究を done[] へ移す */
+function finishResearch(t) {
+  const a = S.player.research && S.player.research.active;
+  if (!a || t < a.endsAt) return;
+  S.player.research.active = null;
+  // 「徴兵制」は最大兵力を上げる。充足率を保たずに完了させると、最大だけ増えて
+  // 現在兵力が据え置かれ **研究したのに部隊が弱くなる**（戦力に充足率が掛かるため）。
+  withTroopRatioPreserved(S.player.squads.map(sq => sq.id), () => {
+    if (!S.player.research.done.includes(a.id)) S.player.research.done.push(a.id);
+  });
+  const def = RESEARCH_BY_ID[a.id];
+  if (def) toast(`🔬 研究完了: ${def.icon} ${def.name} — ${def.desc}`, "research");
 }
 
 /* =====================================================================
@@ -2921,6 +3072,7 @@ const LOG_KINDS = {
   defeat:   { color: "#e08080" },  // 出兵失敗（見逃すと最も困る）
   raid:     { color: "#ff6b6b" },  // AIの侵攻予告・領地を奪われた（最も強く目立たせる）
   defend:   { color: "#7fd4c0" },  // AIの攻撃を撃退した
+  research: { color: "#8fd0e8" },  // 研究完了
   win:      { color: "#e8b84a" },  // 聖地制圧＝勝利
   build:    { color: "#9ab6e0" },  // 建物の強化完了
   ally:     { color: "#d0a0e0" },  // 同盟（勧誘・事件の結末）
@@ -3585,7 +3737,7 @@ function squadPickHTML(ti, t) {
     // 勝てる部隊、かつ相性有利な部隊を最も目立たせて「これを出せばよい」と分かるようにする
     const cls = (canMarch && p >= def ? "can" : "cannot") + (rel > 1 && p >= def && canMarch ? " best" : "");
     // 兵種で行軍時間が変わるので、出撃前に所要時間も見せる
-    const spd = CONFIG.MARCH_TILES_PER_SEC * getSquadSpeedMult(sq.id) * (getAllianceBuffs().speed || 1);
+    const spd = CONFIG.MARCH_TILES_PER_SEC * getSquadSpeedMult(sq.id) * (getAllianceBuffs().speed || 1) * researchMult("speed");
     const eta = fmtSec(Math.max(CONFIG.MARCH_MIN_SEC, getMarchDistance(ti) / spd));
     const note = tRatio < CONFIG.TROOPS_MIN_RATIO_TO_MARCH ? `<span class="rel-bad">兵力不足</span>`
       : !canMarch ? `<span class="rel-bad">射程外</span>` : "";
@@ -3666,7 +3818,7 @@ function openTileSheet(ti) {
   $("sheet").innerHTML = body + `<div class="actions">${actions.join("")}</div>`;
   $("sheet").classList.add("open");
 }
-function closeSheet() { $("sheet").classList.remove("open"); openBuildingType = null; }
+function closeSheet() { $("sheet").classList.remove("open"); openBuildingType = null; researchSheetOpen = false; }
 
 /* =====================================================================
  * [S15] UI: ACTIONS — ボタンonclickから呼ばれる操作群
@@ -3685,6 +3837,19 @@ const UIA = {
     if (err) toast("⚠️ " + err); else toast("⚡ 普請を完了させました");
     renderCity(); renderHeader();
     if ($("sheet").classList.contains("open")) closeSheet();
+  },
+  /* --- 研究ツリー([S21]) --- */
+  openResearch() { openResearchSheet(); },
+  research(id) {
+    const err = startResearch(id);
+    if (err) { toast("⚠️ " + err); return; }
+    renderHeader(); openResearchSheet();
+  },
+  rushResearch() {
+    const err = rushResearch();
+    if (err) { toast("⚠️ " + err); return; }
+    finishResearch(now());
+    renderHeader(); openResearchSheet();
   },
   march(ti, squadId) {
     const err = startMarch(ti, squadId);
@@ -4091,6 +4256,62 @@ function openBuildingSheet(type) {
     actions.push(`<button class="primary" ${(!canAfford(cost) || gated || poorDia) ? "disabled" : ""} onclick="UIA.upgrade('${type}')">
       ⬆ アップグレード${extra ? `（💎${extra}）` : ""}</button>`);
   }
+  // 研究所からは研究ツリーへ入れる（研究所を「貯めた資源の使い道がある建物」にする）
+  if (type === "lab") {
+    const a = S.player.research.active;
+    body += `<div class="small" style="margin-top:8px">🔬 研究 ${S.player.research.done.length}/${RESEARCH_DEFS.length} 完了${
+      a ? ` ｜ <span style="color:var(--accent)">${RESEARCH_BY_ID[a.id].name} 研究中</span>` : ""}</div>`;
+    actions.push(`<button class="primary" onclick="UIA.openResearch()">🔬 研究ツリー</button>`);
+  }
+  actions.push(`<button onclick="closeSheet()">閉じる</button>`);
+  $("sheet").innerHTML = body + `<div class="actions">${actions.join("")}</div>`;
+  $("sheet").classList.add("open");
+}
+
+/**
+ * 研究ツリーのボトムシート。系統ごとに直列3段を並べ、
+ * 「取れる／条件が足りない／研究済み」を見た目で区別する。
+ */
+let researchSheetOpen = false;
+function openResearchSheet() {
+  openBuildingType = null;
+  researchSheetOpen = true;
+  const a = S.player.research.active;
+  const labLv = getBuilding("lab").level;
+  let body = `<h3>🔬 研究ツリー <span class="dim small">研究所Lv${labLv} ｜ ${S.player.research.done.length}/${RESEARCH_DEFS.length} 完了</span></h3>`;
+  if (a) {
+    const def = RESEARCH_BY_ID[a.id];
+    body += `<div class="panel" style="margin-top:8px">
+      <div class="small" id="researchCountdown" style="color:var(--accent)">⏳ ${def.icon} ${def.name} — 完成まで ${fmtSec((a.endsAt - now()) / 1000)}</div>
+      <div class="dim small">${def.desc}</div></div>`;
+  } else {
+    body += `<div class="dim small" style="margin-top:4px">進められる研究は同時に1つだけです</div>`;
+  }
+  for (const branch of RESEARCH_BRANCHES) {
+    body += `<div class="research-branch"><div class="research-head">${branch}</div>`;
+    for (const def of RESEARCH_DEFS.filter(r => r.branch === branch)) {
+      const done = isResearchDone(def.id);
+      const blocker = getResearchBlocker(def);
+      const researching = a && a.id === def.id;
+      const cls = done ? "done" : researching ? "active" : blocker ? "locked" : "ready";
+      const status = done ? "✅ 研究済み"
+        : researching ? "⏳ 研究中"
+        : blocker ? `🔒 ${blocker}`
+        : `<button class="primary research-go" onclick="UIA.research('${def.id}')">研究する</button>`;
+      body += `<div class="research-node ${cls}">
+        <div class="research-title">${def.icon} <b>${def.name}</b> <span class="dim small">研究所Lv${def.labLv}</span></div>
+        <div class="dim small">${def.desc}</div>
+        ${done ? "" : `<div class="dim small">${fmtCost(def.cost)} ｜ 🕐${fmtSec(getResearchTimeSec(def))}</div>`}
+        <div class="research-status">${status}</div></div>`;
+    }
+    body += `</div>`;
+  }
+  const actions = [];
+  if (a) {
+    const rush = getResearchRushCost();
+    actions.push(`<button class="primary" ${Math.floor(S.player.diamonds) < rush ? "disabled" : ""}
+      onclick="UIA.rushResearch()">⚡ 即完了（💎<span id="researchRush">${rush}</span>）</button>`);
+  }
   actions.push(`<button onclick="closeSheet()">閉じる</button>`);
   $("sheet").innerHTML = body + `<div class="actions">${actions.join("")}</div>`;
   $("sheet").classList.add("open");
@@ -4107,6 +4328,15 @@ function updateCityLive() {
   if (openBuildingType) {
     const b = getBuilding(openBuildingType), cd = $("sheetCountdown");
     if (cd && b && b.upgradeEndsAt) cd.textContent = "⏳ 完成まで " + fmtSec((b.upgradeEndsAt - t) / 1000);
+  }
+  // 研究シートを開いている間のカウントダウン。完了したらシートを組み直して結果を反映する
+  if (researchSheetOpen) {
+    const a = S.player.research.active, cd = $("researchCountdown");
+    if (a && cd) {
+      cd.textContent = `⏳ ${RESEARCH_BY_ID[a.id].icon} ${RESEARCH_BY_ID[a.id].name} — 完成まで ` + fmtSec((a.endsAt - t) / 1000);
+      const rush = $("researchRush");
+      if (rush) rush.textContent = getResearchRushCost();
+    } else if (!a && cd) openResearchSheet();
   }
 }
 
@@ -4147,6 +4377,7 @@ function tick() {
   applyEconomy(dtSec);
   applyTroopRecovery(dtSec);
   finishUpgrades(t);
+  finishResearch(t);
   resolveMarches(t);
   aiTickAll(t);
   chatTick(t);
