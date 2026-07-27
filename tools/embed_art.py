@@ -1,14 +1,18 @@
 #!/usr/bin/env python3
-"""art/*.png を base64 で index.html の [S02b] ART_DATA ブロックへ埋め込む（冪等）。
+"""art/*.png / art/*.jpg を base64 で index.html の [S02b] ART_DATA ブロックへ埋め込む（冪等）。
 
 使い方（リポジトリ直下で）:
     python tools/embed_art.py
 
-- art/ 内の <imageKey>.png すべてを対象に ART_DATA を再生成する。
+- art/ 内の <imageKey>.png / <imageKey>.jpg すべてを対象に ART_DATA を再生成する。
   例: 建物ティアアートを足す時は art/bld_castle_t2.png 等を置いて再実行するだけ。
 - 既存の [S02b] ブロックがあれば置換、無ければ ASSET_URLS 行の直後に挿入。
-- 画像は 256x256・透過PNG 推奨（大きすぎる素材は事前に縮小しておくこと）。
-- 実行後は index.html が変わるので sw.js の CACHE バージョンも上げること。
+- 画像は 256x256。用途で形式を使い分ける:
+    建物 (bld_*)  = 透過PNG。PIL FASTOCTREE 256色で PNG8 化して同梱
+    カード(card_*) = 不透明JPEG q80。背景ありの全面イラストなので 256色に落とすと
+                     グラデーションが破綻する。透過不要なので JPEG のほうが軽く綺麗
+- 実行後は index.html が変わる。sw.js は v25 でネットワーク優先になったため
+  CACHE バージョンを上げる必要はない。
 
 artHTML の解決順は IndexedDB取り込み > この埋め込み(ART_DATA) > 絵文字。
 ティアキーは artTierKey() が bld_x_t3 > bld_x_t2 > bld_x の順にフォールバック。
@@ -28,19 +32,32 @@ SENTINELS = ["const CONFIG =", "const BUILDING_DEFS =", "const CARD_POOL =",
 BLOCK_RE = re.compile(r"/\* =+\n \* \[S02b\][\s\S]*?\nconst ART_DATA = \{[\s\S]*?\n\};\n")
 ANCHOR = "const ASSET_URLS = {}; // imageKey → objectURL\n"
 
+MIME = {".png": "image/png", ".jpg": "image/jpeg"}
+
 def build_block():
-    keys = sorted(os.path.splitext(os.path.basename(p))[0] for p in glob.glob(os.path.join(ART, "*.png")))
-    if not keys:
-        sys.exit("no PNGs in art/")
+    # imageKey → ファイルパス。同名で .png と .jpg が両方あると同梱先が曖昧になるので弾く。
+    files = {}
+    for ext in MIME:
+        for p in glob.glob(os.path.join(ART, "*" + ext)):
+            k = os.path.splitext(os.path.basename(p))[0]
+            if k in files:
+                sys.exit(f"ABORT: duplicate imageKey '{k}' ({os.path.basename(files[k])} vs {os.path.basename(p)})")
+            files[k] = p
+    if not files:
+        sys.exit("no images in art/")
+    keys = sorted(files)
     lines, total = [], 0
     for k in keys:
-        b = open(os.path.join(ART, k + ".png"), "rb").read(); total += len(b)
-        lines.append(f'  "{k}": "data:image/png;base64,{base64.b64encode(b).decode()}",')
+        p = files[k]
+        b = open(p, "rb").read(); total += len(b)
+        mime = MIME[os.path.splitext(p)[1].lower()]
+        lines.append(f'  "{k}": "data:{mime};base64,{base64.b64encode(b).decode()}",')
     block = (
         "/* =====================================================================\n"
-        " * [S02b] EMBEDDED ART — 建物アート(256px透過PNG)を base64 で同梱。\n"
+        " * [S02b] EMBEDDED ART — 建物・カードアート(256px)を base64 で同梱。\n"
         " *   全オリジン(公開/file://)で初回から表示するため。差し替え・追加は\n"
-        " *   art/<imageKey>.png を置いて `python tools/embed_art.py` を再実行する。\n"
+        " *   art/<imageKey>.png（建物=透過PNG8）または art/<imageKey>.jpg\n"
+        " *   （カード=不透明JPEG）を置いて `python tools/embed_art.py` を再実行する。\n"
         " *   artHTML は IndexedDB取り込み > この埋め込み > 絵文字 の順で解決。\n"
         " * ===================================================================*/\n"
         "const ART_DATA = {\n" + "\n".join(lines) + "\n};\n")
@@ -69,7 +86,6 @@ def main():
     open(HTML, "w", encoding="utf-8").write(new)
     print(f"{action} ART_DATA: {len(keys)} keys ({', '.join(keys)}), raw={total//1024}KB, "
           f"index.html={os.path.getsize(HTML)//1024}KB")
-    print("NOTE: sw.js の CACHE バージョンを上げること。")
 
 if __name__ == "__main__":
     main()
