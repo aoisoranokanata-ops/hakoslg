@@ -166,6 +166,13 @@ select{font:inherit;color:var(--fg);background:var(--bg3);border:1px solid var(-
 .unit-card.rar-SSR{border-color:var(--ssr);box-shadow:0 0 8px rgba(232,184,74,.35)} .unit-card.rar-SSR .rarity{color:var(--ssr)}
 .unit-card.rar-UR{border-color:var(--ur);box-shadow:0 0 12px rgba(255,120,180,.5)} .unit-card.rar-UR .rarity{color:var(--ur)}
 .card-stars{font-size:10px;letter-spacing:-1px;color:var(--accent)}
+/* 合体強化（[S22]）。素のカードと見分けがつくよう、ランクバッジと枠で差をつける */
+.rank-badge{position:absolute;left:4px;bottom:4px;background:rgba(224,160,208,.95);color:#1b1220;
+  font-size:10px;font-weight:700;padding:1px 5px;border-radius:6px}
+.unit-card.transcend{border-color:#e0a0d0;box-shadow:0 0 10px rgba(224,160,208,.45)}
+.unit-card.transcend .rarity{color:#e0a0d0}
+.fuse-btn{width:100%;margin-top:6px;padding:5px 6px;font-size:11px;font-weight:700;
+  background:linear-gradient(180deg,#7a4a72,#5d3557);color:#ffe9fb;border:1px solid #e0a0d0;border-radius:7px}
 
 /* 研究ツリー（[S21]）。系統ごとに縦1列で「上から順に開いていく」ことを形で示す */
 .research-branch{margin-top:10px}
@@ -320,7 +327,7 @@ const CONFIG = {
   DEV_MODE: false,                      // trueで開発用UI（ガチャタブの画像取り込み等）を表示
   SAVE_KEY: "hakoslg_save_v1",          // localStorageキー（名前空間 hakoslg_）
   ASSET_DB: "hakoslg_assets",           // IndexedDB名（画像アセット）
-  SAVE_VERSION: 12,                    // v12: 研究ツリー（player.research）
+  SAVE_VERSION: 13,                    // v13: カード合体（cards[].rank）
   LOG_MAX: 30,                         // 保持する出来事ログの最大件数
 
   // --- 初陣指南（[S15A]。最初の約1分でコアループを1周させる導線） ---
@@ -485,6 +492,13 @@ const CONFIG = {
   MAP_HIGHLIGHT_MARCHABLE: true,        // 出兵可能なタイルを枠で強調（隣接ルールの可視化）
   MAP_HOLY_COMPASS: true,               // 画面外の聖地の方向を画面端に表示（目標の提示）
   MAP_ANIM_FPS: 15,                     // マップの脈動アニメのfps（0で静止）
+
+  // --- カード合体（[S22]。ダブったカードの救済） ---
+  // 同じカードを同ランクで FUSION_COPIES 枚集めると1枚に合体し、ランクが1上がる。
+  // ランクは実効レア度を押し上げ、URを超えたぶんは「超人」段階になる。
+  FUSION_COPIES: 5,                     // 合体に必要な枚数（消費して1枚になる）
+  TRANSCEND_MAX: 3,                     // 超人の最大段階（URからさらに何段上げられるか）
+  TRANSCEND_POWER_BONUS: 0.25,          // 超人1段ごとの倍率上乗せ
 
   // --- ガチャ（甘め設計） ---
   GACHA_COST_SINGLE: 100,
@@ -867,6 +881,9 @@ function migrateSave(data) {
     const p = DEFAULT_BUILDING_LAYOUT.camp;
     data.player.buildings.push({ id: "b_camp", type: "camp", level: 1, upgradeEndsAt: null, x: p.x, y: p.y });
   }
+
+  // v12 → v13: カード合体。既存カードは全て rank 0（素のまま）から始まる
+  for (const c of (data.player.cards || [])) if (c.rank == null) c.rank = 0;
 
   // v11 → v12: 研究ツリー。未研究の状態から始まるだけなので既存の進行に影響しない
   if (!data.player.research) data.player.research = { done: [], active: null };
@@ -1307,7 +1324,7 @@ function generateAIUsers(world) {
  *     resources: {food,wood,stone,iron},   // 浮動小数。表示はfloor
  *     diamonds: number,         // プレミア通貨。容量キャップなし
  *     ownedTiles: [tileIndex],  // 制圧済みタイル（自城タイルは含まない）
- *     cards: [ {uid,defId,obtainedAt} ],   // ガチャ獲得カード（重複可）
+ *     cards: [ {uid,defId,obtainedAt,rank} ], // ガチャ獲得カード（重複可）。rank=合体強化段数([S22])
  *     squads: [ {id,name,cardUids[],troops} ], // 出撃部隊([S09])。兵舎Lvで解禁数が増える
  *                                          // cardUidsが空なら出撃時に自動編成で補う
  *                                          // troops=現在兵力（-1は未初期化＝満タンで開始）
@@ -1348,8 +1365,8 @@ function newGameState() {
       diamonds: CONFIG.START_DIAMONDS,
       ownedTiles: [],
       cards: [
-        { uid: uid("c"), defId: "n_taichi", obtainedAt: t },
-        { uid: uid("c"), defId: "n_kosuzu", obtainedAt: t },
+        { uid: uid("c"), defId: "n_taichi", obtainedAt: t, rank: 0 },
+        { uid: uid("c"), defId: "n_kosuzu", obtainedAt: t, rank: 0 },
       ],
       // 出撃部隊。兵舎レベルで解禁数が増える（[S09]）。空なら自動編成で補われる
       // troops は現在兵力。-1 は未初期化で、初回参照時に最大兵力で満たす
@@ -1608,6 +1625,82 @@ function cardPower(defId) {
   const d = CARD_BY_ID[defId];
   return Math.round((d.atk * 1.2 + d.lead * 1.0 + d.int * 0.6) * RARITY_MULT[d.rarity]);
 }
+/* --- カードのランク（[S22] 合体で上がる）---------------------------------
+ * 所持カード1枚ごとに rank を持つ（0=素のまま）。rank は**実効レア度**を押し上げ、
+ * URを超えたぶんは「超人」段階になる。CARD_POOL（静的定義）は書き換えない。 */
+const RARITY_CHAIN = ["N", "R", "SR", "SSR", "UR"];
+/** そのカードの実効レア度（rank でURまで上がり、以降はURのまま） */
+function getCardRarity(card) {
+  const base = RARITY_CHAIN.indexOf(CARD_BY_ID[card.defId].rarity);
+  return RARITY_CHAIN[Math.min(RARITY_CHAIN.length - 1, base + (card.rank || 0))];
+}
+/** URを超えた段数＝超人レベル（0なら通常） */
+function getCardTranscend(card) {
+  const base = RARITY_CHAIN.indexOf(CARD_BY_ID[card.defId].rarity);
+  return Math.max(0, base + (card.rank || 0) - (RARITY_CHAIN.length - 1));
+}
+/** そのカードがあと何段ランクを上げられるか（0なら上限） */
+function getCardRankRoom(card) {
+  const base = RARITY_CHAIN.indexOf(CARD_BY_ID[card.defId].rarity);
+  const max = (RARITY_CHAIN.length - 1) + CONFIG.TRANSCEND_MAX - base;
+  return Math.max(0, max - (card.rank || 0));
+}
+/**
+ * 素のカードに対する強化倍率。レア度の上昇ぶん＋超人ぶんを1つの倍率にまとめる。
+ * 戦力にも統率（＝最大兵力）にも同じ倍率を掛けるので、強化の実感が一貫する。
+ */
+function getCardRankMult(card) {
+  const d = CARD_BY_ID[card.defId];
+  const rar = RARITY_MULT[getCardRarity(card)] / RARITY_MULT[d.rarity];
+  return rar * (1 + CONFIG.TRANSCEND_POWER_BONUS * getCardTranscend(card));
+}
+/** 所持カード1枚の戦力（ランク込み）。defIdしか無い場面では cardPower を使う */
+function cardPowerOf(card) {
+  return Math.round(cardPower(card.defId) * getCardRankMult(card));
+}
+/** 所持カード1枚の実効統率（最大兵力の算出に使う） */
+function cardLeadOf(card) {
+  const d = CARD_BY_ID[card.defId];
+  return d ? d.lead * getCardRankMult(card) : 0;
+}
+/** 合体したらどうなるかのラベル（ボタンに出して結果を先に見せる） */
+function fuseResultLabel(card) {
+  const next = { defId: card.defId, rank: (card.rank || 0) + 1 };
+  return cardRankLabel(next);
+}
+/** ランク表示用のラベル（超人段階は星ではなく別表記にして「別格」を出す） */
+function cardRankLabel(card) {
+  const t = getCardTranscend(card);
+  return t > 0 ? `超人${"＋".repeat(t)}` : "★".repeat(RARITY_STARS[getCardRarity(card)]);
+}
+/**
+ * 同じカード・同じランクを FUSION_COPIES 枚合体して1枚にし、ランクを1上げる。
+ * 編成中のものも含めて消費するが、**残す1枚は編成に残っていたものを優先**するので
+ * 合体しても部隊から武将が消えない。失敗理由 or null。
+ */
+function fuseCards(defId, rank) {
+  const r = rank || 0;
+  const pool = S.player.cards.filter(c => c.defId === defId && (c.rank || 0) === r);
+  if (pool.length < CONFIG.FUSION_COPIES) {
+    return `${CONFIG.FUSION_COPIES}枚必要です（所持${pool.length}枚）`;
+  }
+  if (getCardRankRoom(pool[0]) <= 0) return "これ以上は強化できません";
+  // 編成中のカードを残す側に選ぶ（合体で部隊が崩れないようにする）
+  const inSquads = new Set();
+  for (const sq of S.player.squads) for (const u of sq.cardUids) inSquads.add(u);
+  pool.sort((a, b) => (inSquads.has(b.uid) ? 1 : 0) - (inSquads.has(a.uid) ? 1 : 0));
+  const keep = pool[0];
+  const burn = new Set(pool.slice(1, CONFIG.FUSION_COPIES).map(c => c.uid));
+  // 消費されるカードは編成から外す（uidが消えるため放置すると編成が壊れる）
+  for (const sq of S.player.squads) sq.cardUids = sq.cardUids.filter(u => !burn.has(u));
+  S.player.cards = S.player.cards.filter(c => !burn.has(c.uid));
+  // 統率が上がる＝最大兵力が変わるので充足率を維持する
+  withTroopRatioPreserved(S.player.squads.map(sq => sq.id), () => { keep.rank = r + 1; });
+  const d = CARD_BY_ID[defId];
+  toast(`✨ ${d.name} が ${cardRankLabel(keep)} に強化された！ 戦力${fmt(cardPowerOf(keep))}`, "fuse");
+  return null;
+}
+
 /* --- 部隊（squad）-----------------------------------------------------
  * 兵舎レベルで解禁数が増え、カードは部隊間で重複して編成できない。
  * 「1部隊に集中して硬い関所を抜く」か「複数部隊で並行して資源地を取る」かの
@@ -1657,7 +1750,7 @@ function getSquadCards(squadId) {
     for (const c of getSquadCards(other.id)) used.add(c.uid);
   }
   return S.player.cards.filter(c => !used.has(c.uid))
-    .sort((a, b) => cardPower(b.defId) - cardPower(a.defId))
+    .sort((a, b) => cardPowerOf(b) - cardPowerOf(a))   // 強化済みのカードを優先して選ぶ
     .slice(0, CONFIG.SQUAD_SIZE);
 }
 /* --- 兵力（負傷兵）------------------------------------------------------
@@ -1667,7 +1760,7 @@ function getSquadCards(squadId) {
 /** 部隊の最大兵力（編成と兵舎レベルから毎回算出。保存しない） */
 function getSquadMaxTroops(squadId) {
   const cards = getSquadCards(squadId);
-  const lead = cards.reduce((a, c) => a + (CARD_BY_ID[c.defId] ? CARD_BY_ID[c.defId].lead : 0), 0);
+  const lead = cards.reduce((a, c) => a + cardLeadOf(c), 0);   // ランク強化ぶんも効く
   return Math.max(1, Math.round((lead * CONFIG.TROOPS_PER_LEAD
     + getBuilding("barracks").level * CONFIG.TROOPS_PER_BARRACKS_LV) * researchMult("troops")));
 }
@@ -1764,7 +1857,7 @@ function getSquadTroop(squadId) {
  */
 function getSquadPower(squadId, defTroop, tileType) {
   const cards = getSquadCards(squadId);
-  const base = cards.reduce((a, c) => a + cardPower(c.defId), 0)
+  const base = cards.reduce((a, c) => a + cardPowerOf(c), 0)
     + getBuilding("barracks").level * CONFIG.POWER_PER_BARRACKS_LV
     + S.player.castleLevel * CONFIG.POWER_PER_CASTLE_LV;
   // 兵力が減っている部隊は、その割合ぶん弱くなる（負傷兵の反映）
@@ -2148,7 +2241,7 @@ function doGacha(count) {
     results[9] = pick(CARD_POOL.filter(c => c.rarity === CONFIG.GACHA_TEN_GUARANTEE));
   }
   const t = now();
-  for (const def of results) S.player.cards.push({ uid: uid("c"), defId: def.id, obtainedAt: t });
+  for (const def of results) S.player.cards.push({ uid: uid("c"), defId: def.id, obtainedAt: t, rank: 0 });
   // 初陣指南④は「10連を引いた」ことが条件（単発では達成しない）
   if (count === CONFIG.TUTORIAL_GACHA_COUNT && S.tutorial) S.tutorial.didTenPull = true;
   return results;
@@ -3318,6 +3411,7 @@ const LOG_KINDS = {
   raid:     { color: "#ff6b6b" },  // AIの侵攻予告・領地を奪われた（最も強く目立たせる）
   defend:   { color: "#7fd4c0" },  // AIの攻撃を撃退した
   research: { color: "#8fd0e8" },  // 研究完了
+  fuse:     { color: "#e0a0d0" },  // カード合体で強化
   win:      { color: "#e8b84a" },  // 聖地制圧＝勝利
   build:    { color: "#9ab6e0" },  // 建物の強化完了
   ally:     { color: "#d0a0e0" },  // 同盟（勧誘・事件の結末）
@@ -3434,34 +3528,44 @@ function renderCards() {
 
   /* 所持カードは defId でまとめて1枚のカードに集約する（同名が縦に羅列されるのを防ぐ）。
      編成自体は uid 単位のままで、＋/− が「未使用の1枚」を出し入れする。 */
+  /* 集約キーは defId ではなく **defId+rank**。合体で強化した1枚と素のままの束は
+     別物（戦力も編成価値も違う）なので、同じ山にまとめると選べなくなる。 */
   const groups = new Map();
   for (const c of S.player.cards) {
-    if (!groups.has(c.defId)) groups.set(c.defId, { def: CARD_BY_ID[c.defId], uids: [] });
-    groups.get(c.defId).uids.push(c.uid);
+    const key = c.defId + "|" + (c.rank || 0);
+    if (!groups.has(key)) groups.set(key, { def: CARD_BY_ID[c.defId], rank: c.rank || 0, sample: c, uids: [] });
+    groups.get(key).uids.push(c.uid);
   }
   const sorted = [...groups.values()].sort((a, b) =>
-    RARITY_ORDER[a.def.rarity] - RARITY_ORDER[b.def.rarity] || cardPower(b.def.id) - cardPower(a.def.id));
+    RARITY_ORDER[getCardRarity(a.sample)] - RARITY_ORDER[getCardRarity(b.sample)]
+    || cardPowerOf(b.sample) - cardPowerOf(a.sample));
   const cards = sorted.map(g => {
     const d = g.def, trd = TROOP_DEFS[d.troop];
     const own = g.uids.length;
+    const rarity = getCardRarity(g.sample);
+    const canFuse = own >= CONFIG.FUSION_COPIES && getCardRankRoom(g.sample) > 0;
     const inSquad = g.uids.filter(u => inThis.has(u)).length;
     const inOther = g.uids.filter(u => usedByOthers.has(u)).length;
     const autoIn = g.uids.filter(u => autoUids.has(u)).length;
     const free = own - inSquad - inOther;
     const shown = auto ? autoIn : inSquad;                 // 自動編成中は自動で選ばれた枚数を出す
     const canAdd = free > 0 && (sq.cardUids.length || getSquadCards(sq.id).length) < CONFIG.SQUAD_SIZE;
-    return `<div class="unit-card rar-${d.rarity} ${shown ? "picked" : ""} ${!free && !shown ? "locked" : ""}"
-        onclick="UIA.addCardToSquad('${sq.id}','${d.id}')">
-      <span class="rarity">${d.rarity}</span>
-      <div class="art">${artHTML(d.imageKey, d.emoji)}${own > 1 ? `<span class="stack-count">×${own}</span>` : ""}</div>
-      <b>${d.name}</b> <span class="card-stars">${"★".repeat(RARITY_STARS[d.rarity])}</span>
-      <div class="dim small">${trd ? `<span style="color:${trd.color}">${trd.emoji}${trd.name}</span> ｜ ` : ""}戦力${cardPower(d.id)}</div>
-      <div class="dim small">武${d.atk} 知${d.int} 統${d.lead}</div>
+    const mult = getCardRankMult(g.sample);
+    return `<div class="unit-card rar-${rarity} ${getCardTranscend(g.sample) ? "transcend" : ""} ${shown ? "picked" : ""} ${!free && !shown ? "locked" : ""}"
+        onclick="UIA.addCardToSquad('${sq.id}','${d.id}',${g.rank})">
+      <span class="rarity">${rarity}</span>
+      <div class="art">${artHTML(d.imageKey, d.emoji)}${own > 1 ? `<span class="stack-count">×${own}</span>` : ""}${
+        g.rank ? `<span class="rank-badge">+${g.rank}</span>` : ""}</div>
+      <b>${d.name}</b> <span class="card-stars">${cardRankLabel(g.sample)}</span>
+      <div class="dim small">${trd ? `<span style="color:${trd.color}">${trd.emoji}${trd.name}</span> ｜ ` : ""}戦力${fmt(cardPowerOf(g.sample))}</div>
+      <div class="dim small">武${Math.round(d.atk * mult)} 知${Math.round(d.int * mult)} 統${Math.round(d.lead * mult)}</div>
       <div class="stack-ctl" onclick="event.stopPropagation()">
-        <button class="stack-btn" ${shown <= 0 ? "disabled" : ""} onclick="UIA.removeCardFromSquad('${sq.id}','${d.id}')">−</button>
+        <button class="stack-btn" ${shown <= 0 ? "disabled" : ""} onclick="UIA.removeCardFromSquad('${sq.id}','${d.id}',${g.rank})">−</button>
         <span class="stack-state">編成 ${shown}/${own}${inOther ? `<span class="dim">（他隊${inOther}）</span>` : ""}${auto && autoIn ? "<span class='dim'>自動</span>" : ""}</span>
-        <button class="stack-btn" ${canAdd ? "" : "disabled"} onclick="UIA.addCardToSquad('${sq.id}','${d.id}')">＋</button>
+        <button class="stack-btn" ${canAdd ? "" : "disabled"} onclick="UIA.addCardToSquad('${sq.id}','${d.id}',${g.rank})">＋</button>
       </div>
+      ${canFuse ? `<button class="fuse-btn" onclick="event.stopPropagation();UIA.fuse('${d.id}',${g.rank})">
+        ✨ ${CONFIG.FUSION_COPIES}枚合体 → ${fuseResultLabel(g.sample)}</button>` : ""}
     </div>`;
   }).join("");
 
@@ -4083,6 +4187,12 @@ const UIA = {
     renderCity(); renderHeader();
     if ($("sheet").classList.contains("open")) closeSheet();
   },
+  /* --- カード合体([S22]) --- */
+  fuse(defId, rank) {
+    const err = fuseCards(defId, rank);
+    if (err) { toast("⚠️ " + err); return; }
+    renderCards();
+  },
   /* --- 研究ツリー([S21]) --- */
   openResearch() { openResearchSheet(); },
   research(id) {
@@ -4105,25 +4215,28 @@ const UIA = {
   /* カードは同名をまとめて表示しているので、＋/− は「未使用の1枚」を出し入れする。
      編成の実体は従来どおり uid 単位で持つ。 */
   /** 同名カードから未使用の1枚を編成に加える */
-  addCardToSquad(squadId, defId) {
+  addCardToSquad(squadId, defId, rank) {
     const sq = getSquad(squadId); if (!sq) return;
     materializeAutoSquad(squadId);   // 自動編成のままだと1枚追加で他が消えるので先に固定する
     if (sq.cardUids.length >= CONFIG.SQUAD_SIZE) { toast(`⚠️ 1部隊は${CONFIG.SQUAD_SIZE}枚までです`); return; }
     const used = cardsUsedByOtherSquads(squadId);
     const inThis = new Set(sq.cardUids);
-    const free = S.player.cards.find(c => c.defId === defId && !used.has(c.uid) && !inThis.has(c.uid));
+    const r = rank || 0;   // 強化済みと素のカードは別の山なので rank も一致させる
+    const free = S.player.cards.find(c => c.defId === defId && (c.rank || 0) === r
+      && !used.has(c.uid) && !inThis.has(c.uid));
     if (!free) { toast("⚠️ 編成できる同名の武将がいません"); return; }
     // 最大兵力が変わるので充足率を維持する（強化したのに弱くなるのを防ぐ）
     withTroopRatioPreserved(squadId, () => { sq.cardUids.push(free.uid); });
     renderCards();
   },
   /** 同名カードのうち編成中の1枚を外す */
-  removeCardFromSquad(squadId, defId) {
+  removeCardFromSquad(squadId, defId, rank) {
     const sq = getSquad(squadId); if (!sq) return;
     materializeAutoSquad(squadId);
+    const r = rank || 0;
     const i = sq.cardUids.findIndex(u => {
       const c = S.player.cards.find(x => x.uid === u);
-      return c && c.defId === defId;
+      return c && c.defId === defId && (c.rank || 0) === r;
     });
     if (i < 0) return;
     withTroopRatioPreserved(squadId, () => { sq.cardUids.splice(i, 1); });
