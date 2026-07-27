@@ -367,15 +367,17 @@ const CONFIG = {
   OFFLINE_CAP_HOURS: 12,                // OFFLINE_PROGRESS=true の時のオフライン収益上限
 
   // --- 内政の抑制（同時アップグレードと即完了はダイヤを要求する） ---
+  // 「基本は一施設に一つ」の方針は維持し、緩めたい時のダイヤ側を安くしている
+  // （実プレイで「やや重い」との判断を受け、2026-07-26に調整）
   UPGRADE_FREE_SLOTS: 1,                // 無料で同時進行できるアップグレード数
-  UPGRADE_EXTRA_SLOT_DIAMONDS: 150,     // 枠を超えて着工する時のダイヤ
-  UPGRADE_RUSH_DIAMONDS_PER_MIN: 25,    // 即完了: 残り時間1分あたりのダイヤ（最低1）
+  UPGRADE_EXTRA_SLOT_DIAMONDS: 80,      // 枠を超えて着工する時のダイヤ
+  UPGRADE_RUSH_DIAMONDS_PER_MIN: 12,    // 即完了: 残り時間1分あたりのダイヤ（最低1）
   // 本城はLv2以降、木材と石材を大量に要求する（倉庫を育てないと貯めきれない量）。
   // 倉庫容量そのものには連動させない — 連動させると「倉庫を上げるほど本城が遠のく」
   // という逆インセンティブになってしまうため。
-  CASTLE_WOOD_BASE: 1500,               // 本城Lv2→3で必要な木材
-  CASTLE_STONE_BASE: 1200,              // 同・石材
-  CASTLE_COST_GROWTH: 1.7,              // 本城レベルごとの増加率（倉庫の拡張が追いつく速さ）
+  CASTLE_WOOD_BASE: 1100,               // 本城Lv2→3で必要な木材
+  CASTLE_STONE_BASE: 900,               // 同・石材
+  CASTLE_COST_GROWTH: 1.6,              // 本城レベルごとの増加率（倉庫の拡張が追いつく速さ）
 
   // --- 資源・生産 ---
   START_RESOURCES: { food: 1000, wood: 1000, stone: 600, iron: 300 },
@@ -420,8 +422,9 @@ const CONFIG = {
   TROOPS_MIN_RATIO_TO_MARCH: 0.2,       // 充足率がこれ未満の部隊は出撃できない
   TROOPS_HEAL_RATIO_PER_MIN: 0.008,     // 自然回復（最大兵力×0.8%/分＝満タンまで約2時間）
   // 損耗は「敵防御力 ÷ 自軍戦力(相性込み)」の比に連動する
-  CASUALTY_WIN_FACTOR: 0.25, CASUALTY_WIN_MIN: 0.03, CASUALTY_WIN_MAX: 0.35,
-  CASUALTY_LOSE_FACTOR: 0.35, CASUALTY_LOSE_MIN: 0.20, CASUALTY_LOSE_MAX: 0.60,
+  // （実プレイで「やや重い」との判断を受け、2026-07-26に約3割軽くした）
+  CASUALTY_WIN_FACTOR: 0.18, CASUALTY_WIN_MIN: 0.02, CASUALTY_WIN_MAX: 0.25,
+  CASUALTY_LOSE_FACTOR: 0.26, CASUALTY_LOSE_MIN: 0.15, CASUALTY_LOSE_MAX: 0.45,
   // --- 徴兵所 ---
   RESERVE_PER_CAMP_LV: 500,             // 予備兵の上限 = 徴兵所Lv×この値
   RESERVE_GAIN_PER_CAMP_LV_MIN: 20,     // 予備兵の自然増加 = 徴兵所Lv×この値／分
