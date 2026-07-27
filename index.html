@@ -117,6 +117,16 @@ select{font:inherit;color:var(--fg);background:var(--bg3);border:1px solid var(-
   border-radius:6px;background:var(--accent);color:#1a1408}
 .pick-badge.auto{background:#5a6a80;color:#e8ecf4}
 .pick-badge.lock{background:#3a3f4a;color:#9aa5bb}
+/* 同名カードのスタック表示（所持枚数と ＋/− の増減） */
+.unit-card .art{position:relative}
+.stack-count{position:absolute;right:4px;bottom:3px;font-size:11px;font-weight:700;padding:1px 6px;
+  border-radius:8px;background:rgba(20,24,33,.85);color:#e8ecf4}
+.stack-ctl{display:flex;align-items:center;gap:6px;margin-top:6px}
+.stack-btn{flex-shrink:0;width:30px;height:26px;padding:0;font-size:15px;line-height:1;border-radius:6px}
+.stack-state{flex:1;text-align:center;font-size:11px;color:var(--fg-dim)}
+.stack-state .dim{font-size:10px}
+/* 未解禁の部隊タブ（もうすぐ増えることを示す） */
+.squad-tab.locked{opacity:.45;pointer-events:none;font-size:11px}
 /* タイル詳細の部隊選択 */
 .squad-pick{display:flex;flex-direction:column;gap:6px;margin-top:8px}
 .squad-btn{display:flex;align-items:center;gap:8px;text-align:left;font-size:12px;padding:9px 10px}
@@ -1583,6 +1593,15 @@ function getSquadSpeedMult(squadId) {
   }
   return isFinite(slowest) ? slowest : 1;
 }
+/**
+ * 自動編成の部隊を「今その中身で手動編成した状態」に固定する。
+ * これを挟まずに1枚追加すると、cardUids が空→1枚になった瞬間に
+ * 自動編成が打ち切られ、他の4枚が消えてしまう。
+ */
+function materializeAutoSquad(squadId) {
+  const sq = getSquad(squadId); if (!sq) return;
+  if (sq.cardUids.length === 0) sq.cardUids = getSquadCards(squadId).map(c => c.uid);
+}
 /** 部隊の主兵種（最も多い兵種。同数なら戦力が高い方）。カード無しなら null */
 function getSquadTroop(squadId) {
   const cards = getSquadCards(squadId);
@@ -2804,28 +2823,42 @@ function renderCards() {
       <span class="dim small">${fmt(getSquadPower(s.id, null))}</span>
       <span class="dim small">兵${rt}%</span>
       ${busy.has(s.id) ? '<span class="squad-busy">行軍中</span>' : ""}</button>`;
-  }).join("");
+  }).join("")
+  // 未解禁の部隊も薄く並べて「もうすぐ増える」ことを見せる
+  + CONFIG.SQUAD_UNLOCK_BARRACKS_LV.slice(slots).map(lv =>
+      `<button class="squad-tab locked" disabled>🔒 兵舎Lv${lv}</button>`).join("");
   const nextUnlock = CONFIG.SQUAD_UNLOCK_BARRACKS_LV[slots];
 
-  // 所持カード（1枚ずつ。部隊への出し入れができるよう uid 単位で並べる）
-  const list = S.player.cards.slice().sort((a, b) => {
-    const da = CARD_BY_ID[a.defId], db = CARD_BY_ID[b.defId];
-    return RARITY_ORDER[da.rarity] - RARITY_ORDER[db.rarity] || cardPower(b.defId) - cardPower(a.defId);
-  });
-  const cards = list.map(c => {
-    const d = CARD_BY_ID[c.defId];
-    const trd = TROOP_DEFS[d.troop];
-    const picked = inThis.has(c.uid), autoPicked = autoUids.has(c.uid);
-    const locked = usedByOthers.has(c.uid);
-    return `<div class="unit-card rar-${d.rarity} ${picked ? "picked" : ""} ${locked ? "locked" : ""}"
-        onclick="UIA.toggleSquadCard('${sq.id}','${c.uid}')">
+  /* 所持カードは defId でまとめて1枚のカードに集約する（同名が縦に羅列されるのを防ぐ）。
+     編成自体は uid 単位のままで、＋/− が「未使用の1枚」を出し入れする。 */
+  const groups = new Map();
+  for (const c of S.player.cards) {
+    if (!groups.has(c.defId)) groups.set(c.defId, { def: CARD_BY_ID[c.defId], uids: [] });
+    groups.get(c.defId).uids.push(c.uid);
+  }
+  const sorted = [...groups.values()].sort((a, b) =>
+    RARITY_ORDER[a.def.rarity] - RARITY_ORDER[b.def.rarity] || cardPower(b.def.id) - cardPower(a.def.id));
+  const cards = sorted.map(g => {
+    const d = g.def, trd = TROOP_DEFS[d.troop];
+    const own = g.uids.length;
+    const inSquad = g.uids.filter(u => inThis.has(u)).length;
+    const inOther = g.uids.filter(u => usedByOthers.has(u)).length;
+    const autoIn = g.uids.filter(u => autoUids.has(u)).length;
+    const free = own - inSquad - inOther;
+    const shown = auto ? autoIn : inSquad;                 // 自動編成中は自動で選ばれた枚数を出す
+    const canAdd = free > 0 && (sq.cardUids.length || getSquadCards(sq.id).length) < CONFIG.SQUAD_SIZE;
+    return `<div class="unit-card rar-${d.rarity} ${shown ? "picked" : ""} ${!free && !shown ? "locked" : ""}"
+        onclick="UIA.addCardToSquad('${sq.id}','${d.id}')">
       <span class="rarity">${d.rarity}</span>
-      <div class="art">${artHTML(d.imageKey, d.emoji)}</div>
+      <div class="art">${artHTML(d.imageKey, d.emoji)}${own > 1 ? `<span class="stack-count">×${own}</span>` : ""}</div>
       <b>${d.name}</b> <span class="card-stars">${"★".repeat(RARITY_STARS[d.rarity])}</span>
-      <div class="dim small">${trd ? `<span style="color:${trd.color}">${trd.emoji}${trd.name}</span> ｜ ` : ""}戦力${cardPower(c.defId)}</div>
+      <div class="dim small">${trd ? `<span style="color:${trd.color}">${trd.emoji}${trd.name}</span> ｜ ` : ""}戦力${cardPower(d.id)}</div>
       <div class="dim small">武${d.atk} 知${d.int} 統${d.lead}</div>
-      ${picked ? '<span class="pick-badge">編成中</span>' : autoPicked ? '<span class="pick-badge auto">自動</span>' : ""}
-      ${locked ? '<span class="pick-badge lock">他隊</span>' : ""}
+      <div class="stack-ctl" onclick="event.stopPropagation()">
+        <button class="stack-btn" ${shown <= 0 ? "disabled" : ""} onclick="UIA.removeCardFromSquad('${sq.id}','${d.id}')">−</button>
+        <span class="stack-state">編成 ${shown}/${own}${inOther ? `<span class="dim">（他隊${inOther}）</span>` : ""}${auto && autoIn ? "<span class='dim'>自動</span>" : ""}</span>
+        <button class="stack-btn" ${canAdd ? "" : "disabled"} onclick="UIA.addCardToSquad('${sq.id}','${d.id}')">＋</button>
+      </div>
     </div>`;
   }).join("");
 
@@ -3411,18 +3444,31 @@ const UIA = {
     else toast(`⚔️ ${squadId ? getSquad(squadId).name : "部隊"} が出撃しました`);
     closeSheet(); MapView.draw(); renderHeader();
   },
-  /** 部隊にカードを入れる/外す（同じカードは1部隊にしか入らない） */
-  toggleSquadCard(squadId, uid) {
+  /* カードは同名をまとめて表示しているので、＋/− は「未使用の1枚」を出し入れする。
+     編成の実体は従来どおり uid 単位で持つ。 */
+  /** 同名カードから未使用の1枚を編成に加える */
+  addCardToSquad(squadId, defId) {
     const sq = getSquad(squadId); if (!sq) return;
-    const i = sq.cardUids.indexOf(uid);
-    if (i < 0) {
-      if (sq.cardUids.length >= CONFIG.SQUAD_SIZE) { toast(`⚠️ 1部隊は${CONFIG.SQUAD_SIZE}枚までです`); return; }
-      if (cardsUsedByOtherSquads(squadId).has(uid)) { toast("⚠️ 他の部隊に編成済みです"); return; }
-    }
+    materializeAutoSquad(squadId);   // 自動編成のままだと1枚追加で他が消えるので先に固定する
+    if (sq.cardUids.length >= CONFIG.SQUAD_SIZE) { toast(`⚠️ 1部隊は${CONFIG.SQUAD_SIZE}枚までです`); return; }
+    const used = cardsUsedByOtherSquads(squadId);
+    const inThis = new Set(sq.cardUids);
+    const free = S.player.cards.find(c => c.defId === defId && !used.has(c.uid) && !inThis.has(c.uid));
+    if (!free) { toast("⚠️ 編成できる同名の武将がいません"); return; }
     // 最大兵力が変わるので充足率を維持する（強化したのに弱くなるのを防ぐ）
-    withTroopRatioPreserved(squadId, () => {
-      if (i >= 0) sq.cardUids.splice(i, 1); else sq.cardUids.push(uid);
+    withTroopRatioPreserved(squadId, () => { sq.cardUids.push(free.uid); });
+    renderCards();
+  },
+  /** 同名カードのうち編成中の1枚を外す */
+  removeCardFromSquad(squadId, defId) {
+    const sq = getSquad(squadId); if (!sq) return;
+    materializeAutoSquad(squadId);
+    const i = sq.cardUids.findIndex(u => {
+      const c = S.player.cards.find(x => x.uid === u);
+      return c && c.defId === defId;
     });
+    if (i < 0) return;
+    withTroopRatioPreserved(squadId, () => { sq.cardUids.splice(i, 1); });
     renderCards();
   },
   /** 編成中の部隊を切り替える（表示のみ。保存不要なのでUI状態として持つ） */
