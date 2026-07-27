@@ -345,8 +345,21 @@ const CONFIG = {
   LOYALTY_MAX: 100,
   INCIDENT_CHECK_MIN_SEC: 100,         // 忠誠チェック間隔の下限（秒）
   INCIDENT_CHECK_MAX_SEC: 220,         // 同上限
-  LOYALTY_DECAY_NO_ROLE: 8,            // チェックごとの忠誠低下（役職なし＝不満が溜まりやすい）
-  LOYALTY_DECAY_WITH_ROLE: 3,          // 同（役職あり）
+  // 忠誠は「均衡値」へ向かって動く。均衡より高ければ下がり、低ければ戻る。
+  // 旧実装は下がる一方で上げる手段が「事件が起きた時になだめる」しかなく、
+  // 役職を与えても最終的に全員が脱退していた（実プレイでの指摘）。
+  // 均衡値を役職と実績で決めることで、放置＝事件は起きるが勝手には抜けない、
+  // 見捨て続けた時だけ抜ける、という形にする。
+  LOYALTY_EQ_NO_ROLE: 40,              // 役職なしの均衡値（事件は起きるが脱退はしない水準）
+  LOYALTY_EQ_WITH_ROLE: 68,            // 役職ありの均衡値（不満を訴えない水準）
+  LOYALTY_EQ_PER_OWNED_TILE: 0.4,      // 盟主の実績で均衡値が上がる（領地1枚あたり）
+  LOYALTY_EQ_TILE_BONUS_MAX: 15,       // 同・上限
+  LOYALTY_EQ_NO_ROLE_MARGIN: 3,        // 役職なしの均衡値は INCIDENT_THRESHOLD からこれだけ下に抑える
+                                       // （実績で事件ラインを超えると役職を配る動機が消えるため）
+  LOYALTY_DECAY_NO_ROLE: 5,            // 均衡値より上にいる時の低下（役職なし）
+  LOYALTY_DECAY_WITH_ROLE: 2,          // 同（役職あり）
+  LOYALTY_RECOVER: 4,                  // 均衡値より下にいる時の回復
+  LOYALTY_GAIN_ON_WIN: 3,              // 制圧・本城強化・敵城陥落で同盟員全員の忠誠が上がる
   INCIDENT_THRESHOLD: 45,              // この忠誠を下回ると事件が発生しうる
   INCIDENT_EXPIRE_SEC: 240,            // 未対応のままこの時間が過ぎると自動的に「放置」扱い
   SOOTHE_FOOD_COST: 800,               // なだめるコスト（食料）
@@ -1569,7 +1582,7 @@ function finishUpgrades(t) {
         withTroopRatioPreserved(S.player.squads.map(s => s.id), () => { b.level++; });
       } else b.level++;
       b.upgradeEndsAt = null;
-      if (b.type === "castle") { S.player.castleLevel = b.level; chatEvent("onPlayerCastleUp"); }
+      if (b.type === "castle") { S.player.castleLevel = b.level; chatEvent("onPlayerCastleUp"); gainAllianceLoyalty(); }
       toast(`${BUILDING_DEFS[b.type].emoji} ${BUILDING_DEFS[b.type].name} が Lv${b.level} になりました`, "build");
     }
   }
@@ -2059,6 +2072,7 @@ function resolveMarches(t) {
       // 城を落とした時は onCastleFall（一国の滅亡という重い場面）が既に喋っている。
       // ここで資源タイル向けの祝辞まで続けると「良い土地を押さえました」等が重なって台無しになる
       if (!m.targetAiId) chatEvent("onPlayerCapture", { ctx: { tile: TILE_DEFS[tile.type].name } });
+      gainAllianceLoyalty();   // 戦果は同盟員の忠誠にも効く
       // 勝利条件はワールドのルールセットで分岐する。
       // 旧ワールド(legacy_v1)=聖地の領有 / 地形ワールド(three_realms_v2)=皇都の制圧
       if (isLegacyRuleset()) {
@@ -2410,6 +2424,7 @@ function resolveAIMarches(t) {
     } else {
       toast(`🛡️ ${ai.name} の攻撃を撃退！ ${name} を守り抜いた（守り${fmt(def)} > 敵${fmt(m.power)}）`, "defend");
       warChat("onDefend", { enemy: ai.name, tile: TILE_DEFS[tile.type].name });
+      gainAllianceLoyalty();
     }
   }
 }
@@ -3178,6 +3193,42 @@ function raiseIncident(ai) {
   toast(`⚠️ ${ai.name} が不満を訴えています（同盟タブ）`, "incident");
 }
 /** tickから呼ぶ: 忠誠の自然低下と事件発生／期限切れ処理 */
+/**
+ * そのAIの忠誠の均衡値。役職の有無が主で、盟主の実績（領地数）が上乗せされる。
+ * 役職なしは INCIDENT_THRESHOLD(45) を下回る水準に落ち着くので事件は起き続けるが、
+ * 脱退ライン(12)までは自然には落ちない＝「放置しても勝手には抜けないが、不満は言う」。
+ */
+function getLoyaltyEquilibrium(ai) {
+  const hasRole = memberRoleOf(ai.id) !== "一般";
+  const base = hasRole ? CONFIG.LOYALTY_EQ_WITH_ROLE : CONFIG.LOYALTY_EQ_NO_ROLE;
+  const bonus = Math.min(CONFIG.LOYALTY_EQ_TILE_BONUS_MAX,
+    S.player.ownedTiles.length * CONFIG.LOYALTY_EQ_PER_OWNED_TILE);
+  // 役職なしは実績が積まれても必ず事件ラインを下回るようにする。
+  // ここを開放すると領地が増えた時点で役職なしでも不満を訴えなくなり、
+  // 同盟内事件([S19])が中盤以降まったく起きなくなる＝役職を配る動機も消える。
+  if (!hasRole) {
+    return clamp(base + bonus, 0, CONFIG.INCIDENT_THRESHOLD - CONFIG.LOYALTY_EQ_NO_ROLE_MARGIN);
+  }
+  return clamp(base + bonus, 0, CONFIG.LOYALTY_MAX);
+}
+/** 忠誠を均衡値へ1段階近づける。上なら下がり、下なら戻る（行き過ぎない） */
+function applyLoyaltyDrift(ai) {
+  const eq = getLoyaltyEquilibrium(ai);
+  if (ai.loyalty > eq) {
+    const hasRole = memberRoleOf(ai.id) !== "一般";
+    const d = hasRole ? CONFIG.LOYALTY_DECAY_WITH_ROLE : CONFIG.LOYALTY_DECAY_NO_ROLE;
+    ai.loyalty = Math.max(eq, ai.loyalty - d);
+  } else if (ai.loyalty < eq) {
+    ai.loyalty = Math.min(eq, ai.loyalty + CONFIG.LOYALTY_RECOVER);
+  }
+}
+/** 盟主の戦果で同盟員全員の忠誠が少し上がる（同盟に居る意味を忠誠でも表す） */
+function gainAllianceLoyalty(amount) {
+  if (!S.alliance) return;
+  for (const ai of allianceAIs()) {
+    ai.loyalty = clamp(ai.loyalty + (amount == null ? CONFIG.LOYALTY_GAIN_ON_WIN : amount), 0, CONFIG.LOYALTY_MAX);
+  }
+}
 function incidentTick(t) {
   if (!S.alliance) return;
   // 期限切れ＝放置扱い
@@ -3186,11 +3237,7 @@ function incidentTick(t) {
   S.nextIncidentCheckAt = t + randInt(CONFIG.INCIDENT_CHECK_MIN_SEC, CONFIG.INCIDENT_CHECK_MAX_SEC) * 1000;
   const ais = allianceAIs();
   if (!ais.length) return;
-  for (const ai of ais) {
-    const hasRole = memberRoleOf(ai.id) !== "一般";
-    ai.loyalty = clamp(ai.loyalty - (hasRole ? CONFIG.LOYALTY_DECAY_WITH_ROLE : CONFIG.LOYALTY_DECAY_NO_ROLE),
-      0, CONFIG.LOYALTY_MAX);
-  }
+  for (const ai of ais) applyLoyaltyDrift(ai);
   if (S.incident) return; // 同時に複数は起こさない
   const unhappy = ais.filter(a => a.loyalty < CONFIG.INCIDENT_THRESHOLD);
   if (unhappy.length) raiseIncident(pick(unhappy));
