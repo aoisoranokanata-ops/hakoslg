@@ -122,6 +122,9 @@ select{font:inherit;color:var(--fg);background:var(--bg3);border:1px solid var(-
 .stack-count{position:absolute;right:4px;bottom:3px;font-size:11px;font-weight:700;padding:1px 6px;
   border-radius:8px;background:rgba(20,24,33,.85);color:#e8ecf4}
 .stack-ctl{display:flex;align-items:center;gap:6px;margin-top:6px}
+/* 駐留（[S23]） */
+.garrison-list{margin-top:6px}
+.garrison-row{display:flex;align-items:center;gap:8px;padding:3px 0;border-top:1px solid var(--line)}
 .stack-btn{flex-shrink:0;width:30px;height:26px;padding:0;font-size:15px;line-height:1;border-radius:6px}
 .stack-state{flex:1;text-align:center;font-size:11px;color:var(--fg-dim)}
 .stack-state .dim{font-size:10px}
@@ -327,7 +330,7 @@ const CONFIG = {
   DEV_MODE: false,                      // trueで開発用UI（ガチャタブの画像取り込み等）を表示
   SAVE_KEY: "hakoslg_save_v1",          // localStorageキー（名前空間 hakoslg_）
   ASSET_DB: "hakoslg_assets",           // IndexedDB名（画像アセット）
-  SAVE_VERSION: 13,                    // v13: カード合体（cards[].rank）
+  SAVE_VERSION: 14,                    // v14: 幕舎・駐留（outposts / squads[].stationedAt）
   LOG_MAX: 30,                         // 保持する出来事ログの最大件数
 
   // --- 初陣指南（[S15A]。最初の約1分でコアループを1周させる導線） ---
@@ -492,6 +495,23 @@ const CONFIG = {
   MAP_HIGHLIGHT_MARCHABLE: true,        // 出兵可能なタイルを枠で強調（隣接ルールの可視化）
   MAP_HOLY_COMPASS: true,               // 画面外の聖地の方向を画面端に表示（目標の提示）
   MAP_ANIM_FPS: 15,                     // マップの脈動アニメのfps（0で静止）
+
+  // --- 幕舎・駐留（[S23]。前線を維持する仕組み） ---
+  // 自領の空地に幕舎を建て、部隊を駐留させる。駐留地は「もう一つの本城」として働き、
+  // 出撃起点になり、防御に戦力が乗り、兵力の回復も速い。
+  OUTPOST_COST: { wood: 6000, stone: 4000 },
+  OUTPOST_BASE_MAX: 2,                  // 建てられる幕舎の基本数
+  OUTPOST_PER_CASTLE_LV: 0.2,           // 本城Lvごとに増える幕舎枠（切り捨て）
+  OUTPOST_DEF_BONUS: 400,               // 幕舎自体が持つ防御（駐留していなくても効く）
+  GARRISON_DEF_RATIO: 0.5,              // 駐留部隊の戦力が防御に乗る割合
+  GARRISON_HEAL_MULT: 3,                // 駐留中の兵力自然回復の倍率
+  GARRISON_REFILL_FOOD_MULT: 0.7,       // 駐留中は補充の食料が安い（前線で立て直せる）
+  // 占領した要衝（城・関所・埠頭・皇都）に駐屯すると、射程内へ来た敵の侵攻を削る＝迎撃。
+  // 弓兵を含む部隊は射程と威力が伸びる（弓の遠隔攻撃）。
+  INTERCEPT_RANGE: 2,                   // 迎撃の基本射程（タイル）
+  INTERCEPT_RANGE_ARCHER: 4,            // 弓兵を含む部隊の射程
+  INTERCEPT_RATIO: 0.25,                // 迎撃で削る敵戦力の割合（駐留戦力比に応じる）
+  INTERCEPT_RATIO_ARCHER: 0.4,          // 同（弓兵を含む場合）
 
   // --- カード合体（[S22]。ダブったカードの救済） ---
   // 同じカードを同ランクで FUSION_COPIES 枚集めると1枚に合体し、ランクが1上がる。
@@ -881,6 +901,10 @@ function migrateSave(data) {
     const p = DEFAULT_BUILDING_LAYOUT.camp;
     data.player.buildings.push({ id: "b_camp", type: "camp", level: 1, upgradeEndsAt: null, x: p.x, y: p.y });
   }
+
+  // v13 → v14: 幕舎・駐留。既存の部隊は全て本城詰め（stationedAt=null）から始まる
+  if (!data.player.outposts) data.player.outposts = [];
+  for (const sq of (data.player.squads || [])) if (sq.stationedAt === undefined) sq.stationedAt = null;
 
   // v12 → v13: カード合体。既存カードは全て rank 0（素のまま）から始まる
   for (const c of (data.player.cards || [])) if (c.rank == null) c.rank = 0;
@@ -1325,10 +1349,12 @@ function generateAIUsers(world) {
  *     diamonds: number,         // プレミア通貨。容量キャップなし
  *     ownedTiles: [tileIndex],  // 制圧済みタイル（自城タイルは含まない）
  *     cards: [ {uid,defId,obtainedAt,rank} ], // ガチャ獲得カード（重複可）。rank=合体強化段数([S22])
- *     squads: [ {id,name,cardUids[],troops} ], // 出撃部隊([S09])。兵舎Lvで解禁数が増える
+ *     squads: [ {id,name,cardUids[],troops,stationedAt} ], // 出撃部隊([S09])。兵舎Lvで解禁数が増える
+ *                                          // stationedAt=駐留地のtileIndex([S23])。nullなら本城詰め
  *                                          // cardUidsが空なら出撃時に自動編成で補う
  *                                          // troops=現在兵力（-1は未初期化＝満タンで開始）
  *     reserves: number,                    // 徴兵所の予備兵プール（負傷兵の補充に使う）
+ *     outposts: [ {id,tileIdx} ],          // 幕舎([S23])。自領の空地に建てる前線基地
  *     allianceId: string,
  *     marches: [ {id,squadId,targetIdx,targetAiId,power,troop,departAt,arriveAt} ],
  *     gacha: { sinceSSR, total },          // 天井カウンタ・総回数
@@ -1370,8 +1396,9 @@ function newGameState() {
       ],
       // 出撃部隊。兵舎レベルで解禁数が増える（[S09]）。空なら自動編成で補われる
       // troops は現在兵力。-1 は未初期化で、初回参照時に最大兵力で満たす
-      squads: [{ id: "sq_1", name: "第一隊", cardUids: [], troops: -1 }],
+      squads: [{ id: "sq_1", name: "第一隊", cardUids: [], troops: -1, stationedAt: null }],
       reserves: 0,               // 徴兵所にプールされた予備兵（負傷兵の補充に使う）
+      outposts: [],              // 幕舎（[S23]）。自領の空地に建てる前線基地
       allianceId: "ally_player",
       marches: [],
       gacha: { sinceSSR: 0, total: 0 },
@@ -1444,7 +1471,10 @@ function applyTroopRecovery(dtSec) {
   for (const sq of S.player.squads) {
     const max = getSquadMaxTroops(sq.id);
     const cur = getSquadTroops(sq.id);
-    if (cur < max) sq.troops = Math.min(max, cur + max * CONFIG.TROOPS_HEAL_RATIO_PER_MIN * perMin);
+    // 駐留地（幕舎・占領した要衝）では前線のまま立て直せる
+    const heal = CONFIG.TROOPS_HEAL_RATIO_PER_MIN
+      * (sq.stationedAt != null && isGarrisonSite(sq.stationedAt) ? CONFIG.GARRISON_HEAL_MULT : 1);
+    if (cur < max) sq.troops = Math.min(max, cur + max * heal * perMin);
   }
   // 予備兵の蓄積（徴兵所レベルに応じて増え、上限で止まる）
   const cap = getReserveCap();
@@ -1463,18 +1493,21 @@ function reinforceSquad(squadId) {
   const max = getSquadMaxTroops(squadId), cur = getSquadTroops(squadId);
   const need = Math.floor(max - cur);
   if (need <= 0) return "この部隊は満員です";
+  // 駐留中は現地で徴兵できる＝本城へ戻さずに立て直せる（食料が安い）
+  const stationed = sq.stationedAt != null && isGarrisonSite(sq.stationedAt);
+  const perSoldier = CONFIG.FOOD_PER_SOLDIER * (stationed ? CONFIG.GARRISON_REFILL_FOOD_MULT : 1);
   const byReserve = Math.floor(S.player.reserves);
-  const byFood = Math.floor(S.player.resources.food / CONFIG.FOOD_PER_SOLDIER);
+  const byFood = Math.floor(S.player.resources.food / perSoldier);
   const add = Math.min(need, byReserve, byFood);
   if (add <= 0) {
     return byReserve <= 0 ? "予備兵がいません（徴兵所で蓄えられます）"
-      : `食料が足りません（1兵あたり${CONFIG.FOOD_PER_SOLDIER}）`;
+      : `食料が足りません（1兵あたり${perSoldier.toFixed(1)}）`;
   }
   S.player.reserves -= add;
-  S.player.resources.food -= add * CONFIG.FOOD_PER_SOLDIER;
+  S.player.resources.food -= add * perSoldier;
   sq.troops = cur + add;
   const full = add >= need;
-  toast(`⛺ ${sq.name}に ${fmt(add)}兵 を補充（🌾-${fmt(add * CONFIG.FOOD_PER_SOLDIER)}）`
+  toast(`⛺ ${sq.name}に ${fmt(add)}兵 を補充（🌾-${fmt(Math.round(add * perSoldier))}${stationed ? "・駐留割引" : ""}）`
     + (full ? "" : " ※不足分あり"), "build");
   return null;
 }
@@ -1716,7 +1749,7 @@ function ensureSquads() {
   const names = ["第一隊", "第二隊", "第三隊", "第四隊"];
   while (S.player.squads.length < slots) {
     const i = S.player.squads.length;
-    S.player.squads.push({ id: "sq_" + (i + 1), name: names[i] || `第${i + 1}隊`, cardUids: [] });
+    S.player.squads.push({ id: "sq_" + (i + 1), name: names[i] || `第${i + 1}隊`, cardUids: [], troops: -1, stationedAt: null });
   }
   return S.player.squads;
 }
@@ -1899,9 +1932,13 @@ function getTileDefense(ti) {
  * 守備部隊という新概念を足さずに「本城と兵舎を育てれば領地を守れる」を成立させるのが狙い。
  */
 function getPlayerTileDefense(ti) {
+  // 幕舎そのものの防御と、駐留部隊の戦力が上乗せされる＝守りたい場所に兵を置く意味が出る
+  const outpost = getOutpostAt(ti) ? CONFIG.OUTPOST_DEF_BONUS : 0;
+  const garrison = getGarrisonPower(ti) * CONFIG.GARRISON_DEF_RATIO;
   return Math.round((getTileDefense(ti)
     + S.player.castleLevel * CONFIG.TILE_DEF_PLAYER_PER_CASTLE_LV
-    + getBuilding("barracks").level * CONFIG.TILE_DEF_PLAYER_PER_BARRACKS_LV) * researchMult("tileDef"));
+    + getBuilding("barracks").level * CONFIG.TILE_DEF_PLAYER_PER_BARRACKS_LV
+    + outpost + garrison) * researchMult("tileDef"));
 }
 
 /* --- 地形の通行判定 --------------------------------------------------
@@ -1957,8 +1994,32 @@ function isAdjacentToOwned(ti) {
  * 自領の8近傍を種に作る。毎フレーム再計算しないよう明示的に無効化する方式で、
  * 自領が変化する箇所（制圧・放棄）から invalidateMarchable() を呼ぶ。
  * ※AIが未所有タイルを取っても「攻撃可能」であることは変わらないため無効化不要。 */
-let _marchableCache = { range: -1, set: null };
-function invalidateMarchable() { _marchableCache.set = null; }
+let _marchableCache = { range: -1, origin: -1, set: null };
+function invalidateMarchable() { _marchableCache.set = null; _marchableUnion.set = null; }
+/**
+ * マップ強調用: 待機中の全部隊が届くタイルの和集合。
+ * 部隊ごとに出撃起点（本城 or 駐留地）が違うので、起点ごとの結果を合成する。
+ * 単一キャッシュの getMarchableTiles を起点違いで連続呼び出しすると
+ * キャッシュが毎回捨てられるため、合成結果は別に持つ。
+ */
+let _marchableUnion = { sig: "", set: null };
+function getMarchableUnion() {
+  const idle = getIdleSquads();
+  const pairs = idle.map(sq => [getSquadOrigin(sq.id), getSquadRange(sq.id)]);
+  if (!pairs.length) pairs.push([playerStartIdx(), CONFIG.TROOP_RANGE_DEFAULT]);
+  const sig = pairs.map(p => p.join(":")).sort().join("|") + "#" + S.player.ownedTiles.length;
+  if (_marchableUnion.set && _marchableUnion.sig === sig) return _marchableUnion.set;
+  const set = new Set();
+  const seen = new Set();
+  for (const [origin, range] of pairs) {
+    const key = origin + ":" + range;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    for (const ti of getMarchableTiles(range, origin)) set.add(ti);
+  }
+  _marchableUnion = { sig, set };
+  return set;
+}
 /** 待機中の部隊のうち最大の射程（マップのハイライト範囲に使う） */
 function getMaxSquadRange() {
   const idle = getIdleSquads();
@@ -1971,12 +2032,14 @@ function getMaxSquadRange() {
  * ただし**未所有の要衝（関所・埠頭・皇都）は通過できない** — ここを飛び越えられると
  * 「関を破らねば先へ進めない」という地形の意味が失われるため。
  */
-function getMarchableTiles(range) {
+function getMarchableTiles(range, originIdx) {
   const r = range != null ? range : getMaxSquadRange();
-  if (_marchableCache.set && _marchableCache.range === r) return _marchableCache.set;
+  // 起点（本城 or 駐留地）が変われば到達範囲も変わるのでキャッシュキーに含める
+  const origin = originIdx != null ? originIdx : playerStartIdx();
+  if (_marchableCache.set && _marchableCache.range === r && _marchableCache.origin === origin) return _marchableCache.set;
   const set = new Set();
   // 自領から r 歩の幅優先探索。自領以外は「そこで止まる」＝経路として使えない
-  let frontier = [playerStartIdx(), ...S.player.ownedTiles];
+  let frontier = [origin, ...S.player.ownedTiles];
   const seen = new Set(frontier);
   for (let step = 0; step < r; step++) {
     const next = [];
@@ -2001,7 +2064,7 @@ function getMarchableTiles(range) {
     frontier = next;
     if (!frontier.length) break;
   }
-  _marchableCache = { range: r, set };
+  _marchableCache = { range: r, origin, set };
   return set;
 }
 
@@ -2030,11 +2093,21 @@ function buildTerrainDistanceMap() {
   RUNTIME.terrainDistance = dist;
   return dist;
 }
-/** 本城から目標までの距離。地形距離が使えればそれを、無ければ直線距離を使う */
-function getMarchDistance(ti) {
+/**
+ * 起点から目標までの距離。起点省略時は本城。
+ * 本城起点は事前計算した地形距離（山河の迂回込み）を使い、
+ * 駐留地起点はBFSを都度回さずチェビシェフ距離で近似する
+ * （毎フレーム描画から呼ばれうるため。順位付けの用途では十分）。
+ */
+function getMarchDistance(ti, originIdx) {
+  const t = S.world.tiles[ti];
+  if (originIdx != null && originIdx !== playerStartIdx()) {
+    const o = S.world.tiles[originIdx];
+    if (o) return chebyshev(t.x, t.y, o.x, o.y);
+  }
   const d = RUNTIME.terrainDistance ? RUNTIME.terrainDistance[ti] : Infinity;
   if (d != null && isFinite(d)) return d;
-  const t = S.world.tiles[ti], p = getPlayerStart();
+  const p = getPlayerStart();
   return chebyshev(t.x, t.y, p.x, p.y);
 }
 /** 出兵開始。squadId 省略時は空いている部隊を自動で選ぶ。失敗理由 or null */
@@ -2058,7 +2131,8 @@ function startMarch(ti, squadId) {
     return `${squad.name}の兵が足りません（兵力${Math.round(ratio * 100)}% — 徴兵所で補充を）`;
   }
   // 射程は部隊ごと。兵器を含む隊は2歩先まで届く
-  if (CONFIG.REQUIRE_ADJACENCY && !getMarchableTiles(getSquadRange(squad.id)).has(ti)) {
+  const origin = getSquadOrigin(squad.id);
+  if (CONFIG.REQUIRE_ADJACENCY && !getMarchableTiles(getSquadRange(squad.id), origin).has(ti)) {
     return getSquadRange(squad.id) > 1
       ? "そこまでは兵を進められません（要衝を越えた先へは出撃できません）"
       : "自領に隣接するタイルにのみ出兵できます";
@@ -2066,7 +2140,7 @@ function startMarch(ti, squadId) {
   if (S.player.resources.food < CONFIG.MARCH_FOOD_COST) return "食料が足りません（" + CONFIG.MARCH_FOOD_COST + "必要）";
   S.player.resources.food -= CONFIG.MARCH_FOOD_COST;
   // 山河を迂回した実距離。川向こうは近く見えても埠頭まで回るぶん時間がかかる
-  const dist = getMarchDistance(ti);
+  const dist = getMarchDistance(ti, origin);
   // 兵種で速度が変わる（騎兵は速く、兵器は鈍い）。部隊は最も遅い兵種に合わせる
   const speed = CONFIG.MARCH_TILES_PER_SEC * getSquadSpeedMult(squad.id) * (getAllianceBuffs().speed || 1) * researchMult("speed");
   const sec = Math.max(CONFIG.MARCH_MIN_SEC, dist / speed);
@@ -2201,6 +2275,7 @@ function abandonTile(ti) {
   if (t.ownerId !== "player" || t.type === "castle") return "放棄できません";
   t.ownerId = null;
   S.player.ownedTiles = S.player.ownedTiles.filter(i => i !== ti);
+  releaseLostGarrisons();   // 幕舎ごと手放す。駐留していた部隊は本城詰めに戻る
   invalidateMarchable();
   return null;
 }
@@ -2305,6 +2380,124 @@ function setMemberRole(memberId, role) {
     const ai = S.aiUsers.find(a => a.id === memberId);
     if (ai) chatEvent("onRole", { ai, sub: role }); // 任命された本人が応じる
   }
+}
+
+/* =====================================================================
+ * [S23] OUTPOST & GARRISON — 幕舎と駐留
+ *
+ * 本城から遠い前線を維持できるようにする仕組み。
+ *   幕舎  = 自領の空地に建てる前線基地。駐留地になる
+ *   駐留地 = 幕舎 ＋ 占領した要衝（城・関所・埠頭・皇都）
+ * 駐留した部隊は「そこから出撃し」「そこを守り」「そこで回復する」。
+ * 部隊の駐留先は squad.stationedAt（タイルindex）。null なら本城詰め。
+ * ===================================================================*/
+/** 建てられる幕舎の上限（本城レベルで増える） */
+function getOutpostMax() {
+  return CONFIG.OUTPOST_BASE_MAX + Math.floor(S.player.castleLevel * CONFIG.OUTPOST_PER_CASTLE_LV);
+}
+function getOutpostAt(ti) {
+  return (S.player.outposts || []).find(o => o.tileIdx === ti) || null;
+}
+/** 占領済みの要衝（駐屯して迎撃できる場所） */
+function isFortressSite(ti) {
+  const t = S.world.tiles[ti];
+  return t.ownerId === "player" && FORTRESS_TYPES.includes(t.type);
+}
+/** 部隊を置ける場所か（幕舎 or 占領した要衝 or 本城） */
+function isGarrisonSite(ti) {
+  if (ti === playerStartIdx()) return true;
+  const t = S.world.tiles[ti];
+  if (!t || t.ownerId !== "player") return false;
+  return !!getOutpostAt(ti) || isFortressSite(ti);
+}
+/** そのタイルに駐留している部隊の一覧 */
+function getGarrisonSquads(ti) {
+  return S.player.squads.filter(sq => sq.stationedAt === ti);
+}
+/** 駐留部隊の合計戦力（防御加算と迎撃の強さに使う） */
+function getGarrisonPower(ti) {
+  return getGarrisonSquads(ti).reduce((a, sq) => a + getSquadPower(sq.id, null), 0);
+}
+/** 部隊の出撃起点。駐留していればその駐留地、していなければ本城 */
+function getSquadOrigin(squadId) {
+  const sq = getSquad(squadId);
+  if (sq && sq.stationedAt != null && isGarrisonSite(sq.stationedAt)) return sq.stationedAt;
+  return playerStartIdx();
+}
+/** 幕舎を建てる。失敗理由 or null */
+function buildOutpost(ti) {
+  const t = S.world.tiles[ti];
+  if (!t || t.ownerId !== "player") return "自分の領地にのみ建てられます";
+  if (t.type === "castle" || FORTRESS_TYPES.includes(t.type)) return "要衝にはそのまま駐留できます（幕舎は不要）";
+  if (getOutpostAt(ti)) return "すでに幕舎があります";
+  if ((S.player.outposts || []).length >= getOutpostMax()) {
+    return `幕舎はあと建てられません（上限${getOutpostMax()}・本城を上げると増えます）`;
+  }
+  if (!canAfford(CONFIG.OUTPOST_COST)) return `資源が足りません（${fmtCost(CONFIG.OUTPOST_COST)}）`;
+  payCost(CONFIG.OUTPOST_COST);
+  S.player.outposts.push({ id: uid("op"), tileIdx: ti });
+  toast(`⛺ (${t.x}, ${t.y}) に幕舎を築いた — 部隊を駐留させれば前線の拠点になります`, "build");
+  return null;
+}
+/** 幕舎の撤去。駐留していた部隊は本城詰めに戻す */
+function removeOutpost(ti) {
+  if (!getOutpostAt(ti)) return "幕舎がありません";
+  S.player.outposts = S.player.outposts.filter(o => o.tileIdx !== ti);
+  for (const sq of S.player.squads) if (sq.stationedAt === ti) sq.stationedAt = null;
+  invalidateMarchable();
+  return null;
+}
+/** 部隊の駐留先を変更する（null で本城へ戻す）。失敗理由 or null */
+function stationSquad(squadId, ti) {
+  const sq = getSquad(squadId); if (!sq) return "部隊が見つかりません";
+  if (S.player.marches.some(m => m.squadId === sq.id)) return "行軍中の部隊は動かせません";
+  if (ti == null) { sq.stationedAt = null; invalidateMarchable(); return null; }
+  if (!isGarrisonSite(ti)) return "そこには駐留できません（幕舎か占領した要衝のみ）";
+  sq.stationedAt = ti;
+  invalidateMarchable();   // 出撃起点が変わる＝出兵可能範囲も変わる
+  return null;
+}
+/**
+ * 駐留地を失った部隊を本城詰めに戻す。タイルを奪われた／放棄した時に呼ぶ。
+ * これを怠ると敵地に駐留したままになり、出撃起点が敵地になってしまう。
+ */
+function releaseLostGarrisons() {
+  let changed = false;
+  for (const sq of S.player.squads) {
+    if (sq.stationedAt != null && !isGarrisonSite(sq.stationedAt)) { sq.stationedAt = null; changed = true; }
+  }
+  S.player.outposts = (S.player.outposts || []).filter(o => {
+    const t = S.world.tiles[o.tileIdx];
+    if (t && t.ownerId === "player") return true;
+    changed = true; return false;      // 奪われた土地の幕舎は失われる
+  });
+  if (changed) invalidateMarchable();
+  return changed;
+}
+/**
+ * 駐屯による迎撃。AIの侵攻が着弾する前に、射程内の駐屯部隊が敵戦力を削る。
+ * 弓兵を含む部隊は射程・威力ともに伸びる＝「弓の遠隔攻撃」。
+ * 戻り値: 削った量（0なら迎撃なし）
+ */
+function applyIntercept(march) {
+  const target = S.world.tiles[march.targetIdx];
+  if (!target) return 0;
+  let cut = 0;
+  for (const sq of S.player.squads) {
+    if (sq.stationedAt == null) continue;
+    if (!isFortressSite(sq.stationedAt)) continue;      // 迎撃できるのは占領した要衝のみ
+    const st = S.world.tiles[sq.stationedAt];
+    const hasArcher = getSquadCards(sq.id).some(c => (CARD_BY_ID[c.defId] || {}).troop === "archer");
+    const range = hasArcher ? CONFIG.INTERCEPT_RANGE_ARCHER : CONFIG.INTERCEPT_RANGE;
+    if (chebyshev(st.x, st.y, target.x, target.y) > range) continue;
+    const ratio = hasArcher ? CONFIG.INTERCEPT_RATIO_ARCHER : CONFIG.INTERCEPT_RATIO;
+    // 駐屯戦力が敵より大きいほどよく削れる（頭打ちは ratio）
+    const power = getSquadPower(sq.id, null);
+    cut += march.power * ratio * clamp(power / Math.max(1, march.power), 0, 1);
+  }
+  cut = Math.min(march.power, Math.round(cut));
+  if (cut > 0) march.power -= cut;
+  return cut;
 }
 
 /* =====================================================================
@@ -2505,12 +2698,16 @@ function resolveAIMarches(t) {
     const tile = S.world.tiles[m.targetIdx];
     // 到着までに自分で放棄した／すでに奪われた等で自領でなくなっていたら何も起きない
     if (!ai || ai.defeated || !tile || tile.ownerId !== "player") continue;
+    // 占領した要衝に駐屯していれば、着弾前に敵戦力を削る（弓兵が居ると射程・威力が伸びる）
+    const cut = applyIntercept(m);
+    if (cut > 0) toast(`🏹 駐屯部隊が迎撃！ ${ai.name} の戦力を ${fmt(cut)} 削った`, "defend");
     const def = getPlayerTileDefense(m.targetIdx);
     const name = `${TILE_DEFS[tile.type].name}Lv${tile.level}(${tile.x}, ${tile.y})`;
     if (m.power >= def) {
       tile.ownerId = ai.id;
       ai.ownedTiles.push(m.targetIdx);
       S.player.ownedTiles = S.player.ownedTiles.filter(i => i !== m.targetIdx);
+      releaseLostGarrisons();   // 奪われた土地に駐留したままにしない
       invalidateMarchable();
       toast(`🔥 ${ai.name} に ${name} を奪われた… 敵戦力${fmt(m.power)} > 守り${fmt(def)}`, "raid");
       warChat("onTileLost", { enemy: ai.name, tile: TILE_DEFS[tile.type].name });
@@ -3936,7 +4133,7 @@ const MapView = {
     // 脈動用の位相（0〜1）。tickだけでなくアニメループからも描画されるので滑らかに動く
     const pulse = (Math.sin(now() / 420) + 1) / 2;
     const marchable = CONFIG.MAP_HIGHLIGHT_MARCHABLE && !S.player.marches.length
-      ? getMarchableTiles() : null;
+      ? getMarchableUnion() : null;
     // 初陣指南のあいだは目標コンパスと外交バッジを出さず、視線を手順に集中させる
     // （機能自体は生きており、指南完了と同時に現れる）
     const guiding = CONFIG.TUTORIAL_HIDE_ADVANCED_UI && !!getTutorialStep();
@@ -3991,6 +4188,24 @@ const MapView = {
             ctx.fillStyle = "#1a1408";
             ctx.fillText("自城", px + ts / 2, py - ts * 0.19);
             ctx.font = `${Math.floor(ts * 0.62)}px sans-serif`; // 元に戻す
+          }
+        }
+        // 幕舎と駐留のマーク。前線がどこかを地図だけで把握できるようにする
+        if (t.ownerId === "player" && ts >= 13) {
+          const op = getOutpostAt(ti);
+          const gar = getGarrisonSquads(ti).length;
+          if (op || (gar && isGarrisonSite(ti))) {
+            ctx.font = `${Math.floor(ts * 0.42)}px sans-serif`;
+            if (op) ctx.fillText("⛺", px + ts * 0.26, py + ts * 0.28);
+            if (gar) {
+              const bx = px + ts - 7, by = py + ts - 7;
+              ctx.beginPath(); ctx.arc(bx, by, 7, 0, Math.PI * 2);
+              ctx.fillStyle = `rgba(120,215,255,${0.75 + 0.25 * pulse})`; ctx.fill();
+              ctx.strokeStyle = "rgba(0,0,0,.45)"; ctx.lineWidth = 1; ctx.stroke();
+              ctx.font = "bold 9px sans-serif"; ctx.fillStyle = "#0d1520";
+              ctx.fillText(String(gar), bx, by + 1);
+            }
+            ctx.font = `${Math.floor(ts * 0.62)}px sans-serif`;
           }
         }
         // AI城の外交状態バッジ。同盟員＝金の「盟」、勧誘できる相手＝緑の「勧」。
@@ -4078,8 +4293,10 @@ function squadPickHTML(ti, t) {
     const tr = getSquadTroop(sq.id);
     const rel = troopMultiplier(tr, t.defTroop, t.type);
     const tRatio = getSquadTroopRatio(sq.id);
+    // 出撃起点は部隊ごとに違う（駐留していればその駐留地）
+    const origin = getSquadOrigin(sq.id);
     const canMarch = tRatio >= CONFIG.TROOPS_MIN_RATIO_TO_MARCH
-      && getMarchableTiles(getSquadRange(sq.id)).has(ti);
+      && getMarchableTiles(getSquadRange(sq.id), origin).has(ti);
     const relTag = rel > 1 ? `<span class="rel-good">有利×${rel}</span>`
       : rel < 1 ? `<span class="rel-bad">不利×${rel}</span>` : "";
     const trd = tr ? TROOP_DEFS[tr] : null;
@@ -4087,16 +4304,48 @@ function squadPickHTML(ti, t) {
     const cls = (canMarch && p >= def ? "can" : "cannot") + (rel > 1 && p >= def && canMarch ? " best" : "");
     // 兵種で行軍時間が変わるので、出撃前に所要時間も見せる
     const spd = CONFIG.MARCH_TILES_PER_SEC * getSquadSpeedMult(sq.id) * (getAllianceBuffs().speed || 1) * researchMult("speed");
-    const eta = fmtSec(Math.max(CONFIG.MARCH_MIN_SEC, getMarchDistance(ti) / spd));
+    const eta = fmtSec(Math.max(CONFIG.MARCH_MIN_SEC, getMarchDistance(ti, origin) / spd));
     const note = tRatio < CONFIG.TROOPS_MIN_RATIO_TO_MARCH ? `<span class="rel-bad">兵力不足</span>`
       : !canMarch ? `<span class="rel-bad">射程外</span>` : "";
+    const stTag = origin !== playerStartIdx()
+      ? `<span class="dim small">⛺(${S.world.tiles[origin].x},${S.world.tiles[origin].y})発</span>` : "";
     return `<button class="squad-btn ${cls}" ${canMarch ? "" : "disabled"} onclick="UIA.march(${ti},'${sq.id}')">
-      <b>${sq.name}</b>${trd ? ` <span style="color:${trd.color}">${trd.emoji}</span>` : ""}
+      <b>${sq.name}</b>${trd ? ` <span style="color:${trd.color}">${trd.emoji}</span>` : ""}${stTag}
       <span class="dim small">兵${Math.round(tRatio * 100)}%</span>
       <span class="squad-eta">🕐${eta}</span>
       <span class="squad-pow">${fmt(p)} ${p >= def ? "✅" : "⚠️"}</span>${relTag}${note}</button>`;
   }).join("") + `</div>
   <div class="dim small" style="margin-top:4px">出兵コスト 🌾${CONFIG.MARCH_FOOD_COST}／部隊。編成は「カード」タブで変更できます</div>`;
+}
+/**
+ * 駐留の状況と操作。駐留できる場所（幕舎・占領した要衝・本城）でのみ中身が出る。
+ * 部隊を置くと「守りに戦力が乗る／ここから出撃できる／ここで回復する」の3つが効く。
+ */
+function garrisonHTML(ti) {
+  if (!isGarrisonSite(ti)) return "";
+  const t = S.world.tiles[ti];
+  const here = getGarrisonSquads(ti);
+  const isHome = ti === playerStartIdx();
+  const fortress = isFortressSite(ti);
+  let html = `<div class="panel" style="margin-top:8px">
+    <div class="small"><b>${isHome ? "🏯 本城" : getOutpostAt(ti) ? "⛺ 幕舎" : "🛡 " + TILE_DEFS[t.type].name}</b>
+    ${here.length ? ` ｜ 駐留 ${here.length}隊（戦力 ${fmt(getGarrisonPower(ti))}）` : " ｜ 駐留なし"}</div>`;
+  if (fortress) {
+    const archer = here.some(sq => getSquadCards(sq.id).some(c => (CARD_BY_ID[c.defId] || {}).troop === "archer"));
+    html += `<div class="dim small">🏹 要衝に駐屯中は射程${archer ? CONFIG.INTERCEPT_RANGE_ARCHER : CONFIG.INTERCEPT_RANGE}内へ来る侵攻を迎撃します${
+      archer ? "（弓兵を含むため射程・威力が伸びています）" : "（弓兵を入れると射程・威力が伸びます）"}</div>`;
+  }
+  const busy = new Set(S.player.marches.map(m => m.squadId));
+  html += `<div class="garrison-list">` + ensureSquads().slice(0, getSquadSlots()).map(sq => {
+    const at = sq.stationedAt;
+    const isHere = at === ti;
+    const label = at == null ? "本城" : (S.world.tiles[at] ? `(${S.world.tiles[at].x},${S.world.tiles[at].y})` : "?");
+    if (busy.has(sq.id)) return `<div class="garrison-row dim small">${sq.name} — 行軍中</div>`;
+    return `<div class="garrison-row"><span class="grow small">${sq.name}
+      <span class="dim">${isHere ? "ここに駐留中" : "現在: " + label}</span></span>
+      <button class="stack-btn" onclick="UIA.station('${sq.id}',${isHere ? "null" : ti})">${isHere ? "引き揚げ" : "駐留"}</button></div>`;
+  }).join("") + `</div></div>`;
+  return html;
 }
 /** タイル詳細ボトムシートを開く */
 function openTileSheet(ti) {
@@ -4132,9 +4381,10 @@ function openTileSheet(ti) {
         💎ボーナス +${CONFIG.CASTLE_CAPTURE_DIAMONDS}</div>`;
       body += squadPickHTML(ti, t);
     }
-  } else if (t.ownerId === "player" && t.type !== "castle") {
-    // 自領は「どれくらい守れているか」を見せる（AIの侵攻に備える判断材料）
+  } else if (t.ownerId === "player") {
+    // 自領は「どれくらい守れているか」と「駐留の状況」を見せる
     const threat = (S.aiMarches || []).find(m => m.targetIdx === ti);
+    const isHome = ti === playerStartIdx();
     body += `<div class="small" style="margin-top:6px">🛡️ 守り ${fmt(getPlayerTileDefense(ti))}
       <span class="dim">（本城Lv${S.player.castleLevel}・兵舎Lv${getBuilding("barracks").level}で上昇）</span></div>`;
     if (threat) {
@@ -4143,7 +4393,17 @@ function openTileSheet(ti) {
         敵戦力 ${fmt(threat.power)} ／ 着弾まで ${fmtSec((threat.arriveAt - now()) / 1000)}
         — ${threat.power >= getPlayerTileDefense(ti) ? "このままでは奪われます" : "守り切れます"}</div>`;
     }
-    actions.push(`<button class="danger" onclick="UIA.abandon(${ti})">🏳️ 放棄する</button>`);
+    body += garrisonHTML(ti);
+    if (!isHome && !getOutpostAt(ti) && !FORTRESS_TYPES.includes(t.type) && t.type !== "castle") {
+      const room = getOutpostMax() - (S.player.outposts || []).length;
+      body += `<div class="small" style="margin-top:8px">⛺ 幕舎を築けば前線の拠点になります
+        <span class="dim">（出撃起点・守り+${CONFIG.OUTPOST_DEF_BONUS}・回復${CONFIG.GARRISON_HEAL_MULT}倍）</span><br>
+        ${fmtCost(CONFIG.OUTPOST_COST)} ｜ 残り枠 ${room}/${getOutpostMax()}</div>`;
+      actions.push(`<button class="primary" ${(room <= 0 || !canAfford(CONFIG.OUTPOST_COST)) ? "disabled" : ""}
+        onclick="UIA.buildOutpost(${ti})">⛺ 幕舎を築く</button>`);
+    }
+    if (getOutpostAt(ti)) actions.push(`<button onclick="UIA.removeOutpost(${ti})">⛺ 幕舎を畳む</button>`);
+    if (!isHome && t.type !== "castle") actions.push(`<button class="danger" onclick="UIA.abandon(${ti})">🏳️ 放棄する</button>`);
   } else if (t.ownerId !== "player" && t.type !== "castle") {
     const def = getTileDefense(ti);
     const resInfo = RES_KEYS.includes(t.type)
@@ -4186,6 +4446,25 @@ const UIA = {
     if (err) toast("⚠️ " + err); else toast("⚡ 普請を完了させました");
     renderCity(); renderHeader();
     if ($("sheet").classList.contains("open")) closeSheet();
+  },
+  /* --- 幕舎・駐留([S23]) --- */
+  buildOutpost(ti) {
+    const err = buildOutpost(ti);
+    if (err) { toast("⚠️ " + err); return; }
+    invalidateMarchable(); openTileSheet(ti); renderHeader(); MapView.draw();
+  },
+  removeOutpost(ti) {
+    const err = removeOutpost(ti);
+    if (err) { toast("⚠️ " + err); return; }
+    toast("⛺ 幕舎を畳みました");
+    openTileSheet(ti); MapView.draw();
+  },
+  station(squadId, ti) {
+    const err = stationSquad(squadId, ti);
+    if (err) { toast("⚠️ " + err); return; }
+    const sq = getSquad(squadId);
+    toast(ti == null ? `${sq.name} を本城へ引き揚げました` : `${sq.name} を駐留させました`);
+    openTileSheet(ti == null ? playerStartIdx() : ti); MapView.draw();
   },
   /* --- カード合体([S22]) --- */
   fuse(defId, rank) {
