@@ -335,7 +335,7 @@ const CONFIG = {
   DEV_MODE: false,                      // trueで開発用UI（ガチャタブの画像取り込み等）を表示
   SAVE_KEY: "hakoslg_save_v1",          // localStorageキー（名前空間 hakoslg_）
   ASSET_DB: "hakoslg_assets",           // IndexedDB名（画像アセット）
-  SAVE_VERSION: 15,                    // v15: 同盟倉庫（alliance.vault）
+  SAVE_VERSION: 16,                    // v16: 盟主の目標指示（alliance.order）
   LOG_MAX: 30,                         // 保持する出来事ログの最大件数
 
   // --- 初陣指南（[S15A]。最初の約1分でコアループを1周させる導線） ---
@@ -517,6 +517,13 @@ const CONFIG = {
   INTERCEPT_RANGE_ARCHER: 4,            // 弓兵を含む部隊の射程
   INTERCEPT_RATIO: 0.25,                // 迎撃で削る敵戦力の割合（駐留戦力比に応じる）
   INTERCEPT_RATIO_ARCHER: 0.4,          // 同（弓兵を含む場合）
+
+  // --- 盟主の目標指示（[S24]。同盟AIに攻撃目標を示して包囲させる） ---
+  // 関所1,500／皇都4,000／AI城9,103 と硬い目標を、同盟の力で削ってから落とす。
+  // 「同盟に人を集める → 硬い壁を抜ける」という因果を作るのが狙い。
+  ORDER_TARGET_TYPES: ["castle", "gate", "port", "capital"],  // 指示できる目標の種別
+  ORDER_SIEGE_PER_AI_PER_MIN: 1.4,      // 包囲の進行 = 加入AI数 × この値 × (忠誠/100) ／分（%）
+  ORDER_SIEGE_MAX: 45,                  // 包囲で下げられる防御の上限（%）
 
   // --- 同盟倉庫（[S24]。加入AIから微量ずつ集まる共通の備蓄） ---
   // 同盟に人を入れておく理由を、バフだけでなく「資源が貯まる」形でも作る。
@@ -926,6 +933,9 @@ function migrateSave(data) {
     const p = DEFAULT_BUILDING_LAYOUT.camp;
     data.player.buildings.push({ id: "b_camp", type: "camp", level: 1, upgradeEndsAt: null, x: p.x, y: p.y });
   }
+
+  // v15 → v16: 盟主の目標指示。指示なしの状態から始まるだけ
+  if (data.alliance && data.alliance.order === undefined) data.alliance.order = null;
 
   // v14 → v15: 同盟倉庫。空の倉庫が増えるだけで既存の進行に影響しない
   if (data.alliance && !data.alliance.vault) data.alliance.vault = { food: 0, wood: 0, stone: 0, iron: 0 };
@@ -1388,7 +1398,8 @@ function generateAIUsers(world) {
  *     gacha: { sinceSSR, total },          // 天井カウンタ・総回数
  *     research: { done:[id], active:{id,endsAt}|null },  // 研究ツリー([S21])。同時1件
  *   },
- *   alliance: { id, name, members:[{id,role}], vault:{food,wood,stone,iron} }, // vault=同盟倉庫([S24])
+ *   alliance: { id, name, members:[{id,role}], vault:{...}, order:{targetIdx,issuedAt,siege}|null },
+ *                               // vault=同盟倉庫 / order=盟主の攻撃指示と包囲の進み具合([S24])
  *   aiUsers: [ AIUser ],        // スキーマは generateAIUsers 参照。defeated=true は滅亡済み
  *   aiMarches: [ {id,aiId,targetIdx,power,departAt,arriveAt} ],  // AIからの攻撃([S12])
  *   flags: { holyWon: bool },   // 一度きりイベントの発火記録
@@ -1434,7 +1445,8 @@ function newGameState() {
       research: { done: [], active: null },
     },
     alliance: { id: "ally_player", name: "無名同盟", members: [{ id: "player", role: "盟主" }],
-      vault: { food: 0, wood: 0, stone: 0, iron: 0 } },   // 同盟倉庫（[S24]）
+      vault: { food: 0, wood: 0, stone: 0, iron: 0 },     // 同盟倉庫（[S24]）
+      order: null },                                      // 盟主の攻撃指示（[S24]）
     aiUsers,
     aiMarches: [],             // AIからプレイヤー領への攻撃部隊（[S12]）。到着で解決される
     flags: { holyWon: false, capitalWon: false },
@@ -1942,19 +1954,19 @@ function getArmyPower() {
 /** タイルの防御力 */
 function getTileDefense(ti) {
   const t = S.world.tiles[ti];
-  if (t.type === "holy") return CONFIG.HOLY_DEF;
-  if (t.type === "capital") return CONFIG.CAPITAL_DEF;
-  if (t.type === "gate") return CONFIG.GATE_DEF;
-  if (t.type === "port") return CONFIG.PORT_DEF;
+  if (t.type === "holy") return Math.round(CONFIG.HOLY_DEF * (1 - getSiegeReduction(ti)));
+  if (t.type === "capital") return Math.round(CONFIG.CAPITAL_DEF * (1 - getSiegeReduction(ti)));
+  if (t.type === "gate") return Math.round(CONFIG.GATE_DEF * (1 - getSiegeReduction(ti)));
+  if (t.type === "port") return Math.round(CONFIG.PORT_DEF * (1 - getSiegeReduction(ti)));
   // AI城は資源タイルとは桁が違う。城Lvの累乗で伸びるので「まず地方の小城から」の順序ができる
-  if (t.type === "castle") return Math.round(CONFIG.CASTLE_DEF_BASE * Math.pow(Math.max(1, t.level), CONFIG.CASTLE_DEF_EXP));
+  if (t.type === "castle") return Math.round(CONFIG.CASTLE_DEF_BASE * Math.pow(Math.max(1, t.level), CONFIG.CASTLE_DEF_EXP) * (1 - getSiegeReduction(ti)));
   let def = CONFIG.TILE_DEF_BASE * Math.pow(t.level, 1.5);
   if (t.type === "empty") def *= CONFIG.TILE_DEF_EMPTY_MULT;
   if (t.ownerId && t.ownerId !== "player") {
     const ai = S.aiUsers.find(a => a.id === t.ownerId);
     if (ai) def += ai.castleLevel * CONFIG.TILE_DEF_AI_PER_CASTLE_LV;
   }
-  return Math.round(def);
+  return Math.round(def * (1 - getSiegeReduction(ti)));
 }
 /**
  * 自領がAIの攻撃を受けた時の防御力。素の地形防御に**内政の成果**を上乗せする。
@@ -2419,6 +2431,57 @@ function setMemberRole(memberId, role) {
  * 納入量は忠誠に比例するので、忠誠を保つ意味がバフ以外にも生まれる。
  * 引き出すと自分の資源になる（自分の倉庫容量を超えるぶんは受け取れない）。
  * ===================================================================*/
+/* --- 盟主の目標指示 -----------------------------------------------------
+ * 硬い目標（敵城・関所・埠頭・皇都）を同盟AIに包囲させ、防御を削ってから落とす。
+ * 包囲の進みは加入AIの数と忠誠に比例する＝同盟を育てる意味が攻略に直結する。 */
+/** 指示できる目標か。失敗理由 or null */
+function getOrderBlocker(ti) {
+  const t = S.world.tiles[ti];
+  if (!t) return "対象がありません";
+  if (t.ownerId === "player") return "自分の領地は指示できません";
+  if (!CONFIG.ORDER_TARGET_TYPES.includes(t.type)) return "城・関所・埠頭・皇都にのみ指示できます";
+  if (t.type === "castle" && !isAttackableCastle(ti)) return "この城は攻撃できません";
+  if (!allianceAIs().length) return "同盟員がいません（AIを勧誘してください）";
+  return null;
+}
+/** 攻撃目標を指示する。失敗理由 or null */
+function issueOrder(ti) {
+  const blocked = getOrderBlocker(ti);
+  if (blocked) return blocked;
+  const t = S.world.tiles[ti];
+  S.alliance.order = { targetIdx: ti, issuedAt: now(), siege: 0 };
+  toast(`📣 同盟に下知: ${TILE_DEFS[t.type].name}(${t.x}, ${t.y}) を攻めよ！`, "ally");
+  warChat("onOrder", { tile: TILE_DEFS[t.type].name });   // セリフは未執筆なら黙る
+  return null;
+}
+function cancelOrder() {
+  if (!S.alliance.order) return "指示は出ていません";
+  S.alliance.order = null;
+  toast("📣 攻撃指示を取り下げました");
+  return null;
+}
+/** 1分あたりの包囲の進み（%）。加入AIの数と忠誠に比例 */
+function getSiegeRatePerMin() {
+  return allianceAIs().reduce((a, ai) =>
+    a + CONFIG.ORDER_SIEGE_PER_AI_PER_MIN * clamp(ai.loyalty / 100, 0, 1), 0);
+}
+/** tickから呼ばれる。包囲を進める。目標が自領になった／消えたら指示を解除する */
+function applySiegeProgress(dtSec) {
+  const o = S.alliance && S.alliance.order;
+  if (!o) return;
+  const t = S.world.tiles[o.targetIdx];
+  if (!t || t.ownerId === "player") {   // 落とした＝指示は役目を終える
+    S.alliance.order = null;
+    return;
+  }
+  o.siege = Math.min(CONFIG.ORDER_SIEGE_MAX, (o.siege || 0) + getSiegeRatePerMin() * (dtSec / 60));
+}
+/** そのタイルに掛かっている包囲による防御減少率（0〜1） */
+function getSiegeReduction(ti) {
+  const o = S.alliance && S.alliance.order;
+  if (!o || o.targetIdx !== ti) return 0;
+  return clamp((o.siege || 0) / 100, 0, CONFIG.ORDER_SIEGE_MAX / 100);
+}
 /** 同盟倉庫の容量（加入AIの数に比例） */
 function getVaultCap() {
   return allianceAIs().length * CONFIG.VAULT_CAP_PER_MEMBER;
@@ -3263,6 +3326,7 @@ const CHAT_LINES = {
       "勝ちに慢心するな。次の備えを急げ。",
     ],
   },
+  onOrder: [],                                            // 盟主が攻撃目標を下知した（[S24]・未執筆）
   onCastleFail: [
     "{enemy}の城は堅かった。……一旦引きましょう。",
     "攻め切れなかった。損害を認めて、次を備えよ。",
@@ -4005,7 +4069,8 @@ function allianceSignature() {
   // 同盟倉庫は「引き出せるか」が変わった時だけ再描画する（数値は1万刻みで判定）
   const v = S.alliance.vault || {};
   const vault = RES_KEYS.map(k => Math.floor((v[k] || 0) / 10000)).join(".");
-  return inc + "|" + mem + "|" + rec + "|" + poor + "|" + vault;
+  const ord = S.alliance.order ? S.alliance.order.targetIdx + "@" + Math.floor(S.alliance.order.siege || 0) : "-";
+  return inc + "|" + mem + "|" + rec + "|" + poor + "|" + vault + "|" + ord;
 }
 /** 軽量更新: 事件パネルと勧誘クールダウンの残り時間だけ書き換える（全再描画を避ける） */
 function updateIncidentCountdown() {
@@ -4063,6 +4128,23 @@ function incidentPanelHTML() {
     </div>
     <div class="dim small" style="margin-top:6px">※追放した相手は二度と勧誘できません</div>
   </div>`;
+}
+/** 同盟タブ用: 現在の攻撃指示。マップを見なくても進み具合が分かるようにする */
+function orderPanelHTML() {
+  const o = S.alliance && S.alliance.order;
+  if (!o) {
+    return `<div class="panel"><h3>📣 攻撃指示</h3>
+      <div class="dim small">マップで敵の城・関所・埠頭・皇都をタップし「下知する」と、同盟員が包囲して防御を下げます</div></div>`;
+  }
+  const t = S.world.tiles[o.targetIdx];
+  const pct = Math.floor(o.siege || 0);
+  return `<div class="panel"><h3>📣 攻撃指示</h3>
+    <div class="small">${TILE_DEFS[t.type].name}(${t.x}, ${t.y}) ｜ 包囲 ${pct}% / 上限${CONFIG.ORDER_SIEGE_MAX}%
+      ｜ 防御 ${fmt(getTileDefense(o.targetIdx))}</div>
+    <div class="vault-bar" style="margin-top:5px"><i style="width:${pct / CONFIG.ORDER_SIEGE_MAX * 100}%"></i></div>
+    <div class="row" style="margin-top:8px">
+      <button class="grow" onclick="UIA.jumpTo(${t.x},${t.y})">🗺️ 地図で見る</button>
+      <button onclick="UIA.cancelOrder()">取り下げ</button></div></div>`;
 }
 /**
  * 同盟倉庫のパネル。加入AIが居ない間は容量0なので出さない。
@@ -4124,6 +4206,7 @@ function renderAlliance() {
     <div class="panel"><h3>🤝 ${S.alliance.name}（${S.alliance.members.length}名）</h3>
       <div class="dim small">発動中バフ: ${buffText}</div>${roleHelp}</div>
     ${incidentPanelHTML()}
+    ${orderPanelHTML()}
     ${vaultPanelHTML()}
     ${memberRows}
     <div class="panel">
@@ -4464,6 +4547,33 @@ const MapView = {
 };
 
 /**
+ * 盟主の攻撃指示と包囲の状況。硬い目標（城・関所・埠頭・皇都）でのみ出る。
+ * 「同盟を育てる → 硬い壁が削れる」という因果を、数字で見えるようにする。
+ */
+function siegeHTML(ti) {
+  const t = S.world.tiles[ti];
+  if (!CONFIG.ORDER_TARGET_TYPES.includes(t.type)) return "";
+  const o = S.alliance && S.alliance.order;
+  const isTarget = o && o.targetIdx === ti;
+  if (isTarget) {
+    const pct = Math.floor(o.siege || 0);
+    const rate = getSiegeRatePerMin();
+    return `<div class="panel" style="margin-top:8px">
+      <div class="small"><b>📣 攻撃指示中</b> ｜ 包囲 ${pct}% / 上限${CONFIG.ORDER_SIEGE_MAX}%</div>
+      <div class="vault-bar" style="margin-top:5px"><i style="width:${pct / CONFIG.ORDER_SIEGE_MAX * 100}%"></i></div>
+      <div class="dim small">同盟員が包囲中: 毎分 +${rate.toFixed(1)}%（忠誠が高いほど速い）<br>
+        この目標の防御が ${pct}% 下がっています</div>
+      <button class="stack-btn" style="margin-top:6px" onclick="UIA.cancelOrder()">指示を取り下げる</button></div>`;
+  }
+  const blocked = getOrderBlocker(ti);
+  const other = o ? `<br><span class="dim">現在の指示: (${S.world.tiles[o.targetIdx].x}, ${S.world.tiles[o.targetIdx].y}) — 出し直すと切り替わります</span>` : "";
+  return `<div class="panel" style="margin-top:8px">
+    <div class="small"><b>📣 同盟に攻撃を指示</b></div>
+    <div class="dim small">同盟員が包囲し、この目標の防御が最大${CONFIG.ORDER_SIEGE_MAX}%下がります${other}</div>
+    <button class="stack-btn" style="margin-top:6px" ${blocked ? "disabled" : ""}
+      onclick="UIA.issueOrder(${ti})">${blocked ? "🔒 " + blocked : "📣 ここを攻めよと下知する"}</button></div>`;
+}
+/**
  * 出撃部隊の選択ボタン群のHTML。資源タイルにもAI城にも同じUIを出すため切り出した。
  * 部隊ごとに「この目標に対する」戦力（＝兵種相性込み）と所要時間を見せ、どれで攻めるか選ばせる。
  */
@@ -4562,6 +4672,7 @@ function openTileSheet(ti) {
       body += `<div class="small" style="margin-top:8px">防御力 ${fmt(getTileDefense(ti))}<br>
         <span style="color:var(--danger)">🏯 落とせば ${ai.name} は滅亡し、領有していた ${ai.ownedTiles.length} 枚が無主に戻ります</span><br>
         💎ボーナス +${CONFIG.CASTLE_CAPTURE_DIAMONDS}</div>`;
+      body += siegeHTML(ti);
       body += squadPickHTML(ti, t);
     }
   } else if (t.ownerId === "player") {
@@ -4619,6 +4730,7 @@ function openTileSheet(ti) {
       dt ? ` ｜ 守備 <span style="color:${dt.color}">${dt.emoji}${dt.name}</span>` : ""}${
       ct ? `<br><span class="rel-good">有利な兵種: ${ct.emoji}${ct.name}</span>` : ""}<br>
       ${resInfo}<br>💎ボーナス +${CONFIG.DIAMOND_CAPTURE_BONUS_PER_LEVEL * t.level}</div>`;
+    body += siegeHTML(ti);
     body += squadPickHTML(ti, t);
   }
   actions.push(`<button onclick="closeSheet()">閉じる</button>`);
@@ -4644,6 +4756,17 @@ const UIA = {
     if (err) toast("⚠️ " + err); else toast("⚡ 普請を完了させました");
     renderCity(); renderHeader();
     if ($("sheet").classList.contains("open")) closeSheet();
+  },
+  /* --- 盟主の目標指示([S24]) --- */
+  issueOrder(ti) {
+    const err = issueOrder(ti);
+    if (err) { toast("⚠️ " + err); return; }
+    openTileSheet(ti); MapView.draw();
+  },
+  cancelOrder() {
+    const err = cancelOrder();
+    if (err) { toast("⚠️ " + err); return; }
+    closeSheet(); renderActiveTab();
   },
   /* --- 同盟倉庫([S24]) --- */
   withdrawVault() {
@@ -4773,6 +4896,12 @@ const UIA = {
     }
   },
   /** 勧誘候補の位置へマップを移動して表示（同盟タブ→マップの導線） */
+  jumpTo(x, y) {
+    switchTab("map");
+    MapView.fit();
+    MapView.centerOn(x, y);
+    MapView.draw();
+  },
   jumpToAI(aiId) {
     const ai = S.aiUsers.find(a => a.id === aiId);
     if (!ai) return;
@@ -5224,6 +5353,7 @@ function tick() {
   applyEconomy(dtSec);
   applyTroopRecovery(dtSec);
   applyVaultCollection(dtSec);
+  applySiegeProgress(dtSec);
   finishUpgrades(t);
   finishResearch(t);
   resolveMarches(t);
