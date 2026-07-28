@@ -1151,6 +1151,32 @@ function getPlayerStart() {
 /** プレイヤー本城のタイルindex */
 function playerStartIdx() { const p = getPlayerStart(); return idx(p.x, p.y); }
 
+/**
+ * 絵文字をマスの中央に置くための水平補正量。
+ *
+ * canvas の textAlign:"center" は「送り幅(advance)」の中心に合わせるが、
+ * ⚙️(U+2699+FE0F) や ⛰️ のような**テキスト既定＋異体字セレクタ**の文字は、
+ * 環境によって送り幅と実際に描かれるインクの位置が食い違う。
+ * iPhone実機で鉄鉱の⚙️がマスの右寄りに見えたのはこれが原因（Windows/Chromeでは再現しない）。
+ * そこで送り幅ではなく**インクの箱の中心**で揃える。
+ * measureText は重いのでフォント＋文字ごとに一度だけ測って使い回す。
+ */
+const _emojiInkOffset = new Map();
+function emojiCenterOffset(ctx, ch) {
+  const key = ctx.font + "|" + ch;
+  let v = _emojiInkOffset.get(key);
+  if (v === undefined) {
+    const m = ctx.measureText(ch);
+    v = (m.actualBoundingBoxRight - m.actualBoundingBoxLeft) / 2;
+    if (!isFinite(v)) v = 0;              // 一部環境で未対応のことがある
+    _emojiInkOffset.set(key, v);
+  }
+  return v;
+}
+/** マスの中心に絵文字を描く（インク基準で中央合わせ） */
+function fillEmojiCentered(ctx, ch, cx, cy) {
+  ctx.fillText(ch, cx - emojiCenterOffset(ctx, ch), cy);
+}
 /** 2点を結ぶ直線上のセル列（ブレゼンハム） */
 function lineCells(x0, y0, x1, y1) {
   const cells = [];
@@ -4775,7 +4801,7 @@ const MapView = {
         // アイコン（ズームが小さい時は省略）
         if (ts >= 13 && TILE_DEFS[t.type].emoji) {
           ctx.fillStyle = "#fff";
-          ctx.fillText(TILE_DEFS[t.type].emoji, px + ts / 2, py + ts / 2 + 1);
+          fillEmojiCentered(ctx, TILE_DEFS[t.type].emoji, px + ts / 2, py + ts / 2 + 1);
         }
         // 自城は主人公として際立たせる（AI城と見分けがつかない問題への対処）
         // 「自城」は本拠地1つだけ。AIから奪った城も ownerId=player なので座標で区別する
@@ -4802,7 +4828,7 @@ const MapView = {
           const gar = getGarrisonSquads(ti).length;
           if (op || (gar && isGarrisonSite(ti))) {
             ctx.font = `${Math.floor(ts * 0.42)}px sans-serif`;
-            if (op) ctx.fillText(structKind(op) === "fort" ? "🗼" : "⛺", px + ts * 0.26, py + ts * 0.28);
+            if (op) fillEmojiCentered(ctx, structKind(op) === "fort" ? "🗼" : "⛺", px + ts * 0.26, py + ts * 0.28);
             if (gar) {
               const bx = px + ts - 7, by = py + ts - 7;
               ctx.beginPath(); ctx.arc(bx, by, 7, 0, Math.PI * 2);
