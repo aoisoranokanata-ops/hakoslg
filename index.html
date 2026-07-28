@@ -195,6 +195,50 @@ select{font:inherit;color:var(--fg);background:var(--bg3);border:1px solid var(-
 .research-node.locked{opacity:.5}
 .research-go{padding:4px 10px;font-size:12px}
 
+/* ---- タイル詳細シートの3層構造（[S14]・ChatGPT確定仕様 2026-07-27）----
+   情報が増えても「出撃」「駐留」が画面外へ行かないようにするための構造。
+   #sheet 自体が transform で開閉するため position:sticky ではなく、
+   アクション部分をスクロール領域の外へ出す方式にしている（iOS Safariで堅牢）。 */
+#sheet.tile-mode{padding:0;max-height:min(78dvh,680px);overflow:hidden;
+  display:flex;flex-direction:column}
+#sheet.tile-mode .sheet-head{flex:0 0 auto;display:flex;align-items:center;gap:8px;
+  padding:12px 16px 8px;border-bottom:1px solid var(--line)}
+#sheet.tile-mode .sheet-head h3{margin:0}
+.sheet-title{flex:1;min-width:0}
+.sheet-close{flex:0 0 40px;width:40px;height:40px;padding:0;font-size:20px;line-height:1}
+/* ★スクロールするのはここだけ */
+#sheet.tile-mode .sheet-body{flex:1 1 auto;min-height:0;overflow-y:auto;
+  padding:10px 16px 12px;overscroll-behavior:contain;-webkit-overflow-scrolling:touch}
+#sheet.tile-mode .sheet-actions{flex:0 0 auto;display:flex;gap:8px;
+  padding:10px 16px calc(10px + var(--safe-b));
+  background:var(--bg2);border-top:1px solid var(--line);box-shadow:0 -4px 12px rgba(0,0,0,.25)}
+#sheet.tile-mode .sheet-actions button{flex:1;min-height:46px}
+#sheet.tile-mode .sheet-actions .primary{flex:1.5}
+.sheet-action-note{flex:0 0 auto;padding:6px 16px 0;font-size:11px;color:var(--fg-dim);
+  background:var(--bg2);text-align:center}
+.tile-summary{display:flex;flex-direction:column;gap:4px;line-height:1.55}
+/* 折りたたみ（HTML標準の details だけで完結させる） */
+.sheet-detail{border-top:1px solid var(--line)}
+.sheet-detail summary{list-style:none;cursor:pointer;padding:11px 2px;font-size:12px;font-weight:600}
+.sheet-detail summary::-webkit-details-marker{display:none}
+.sheet-detail summary::after{content:"›";float:right;color:var(--fg-dim);transition:transform .15s}
+.sheet-detail[open] summary::after{transform:rotate(90deg)}
+.sheet-detail-body{padding:0 2px 12px;font-size:11px;line-height:1.65;color:var(--fg-dim)}
+.sheet-detail-body .stack-btn{margin-top:6px}
+/* 部隊選択ドロワー（固定アクションの直上に開く） */
+.sheet-action-drawer{flex:0 0 auto;max-height:34dvh;overflow-y:auto;padding:8px 16px;
+  background:var(--bg);border-top:1px solid var(--accent)}
+.drawer-head{font-size:12px;font-weight:700;margin-bottom:6px}
+.drawer-row{display:flex;align-items:center;gap:6px;width:100%;text-align:left;
+  min-height:44px;padding:6px 10px;margin-bottom:5px;border-radius:8px;
+  background:var(--bg2);border:1px solid var(--line);font-size:12px}
+.drawer-row .grow{flex:1;min-width:0;display:flex;flex-direction:column}
+.drawer-row.can{border-color:#5aa05a}
+.drawer-row.cannot{opacity:.55}
+.drawer-row.best{border-color:var(--accent);box-shadow:0 0 8px rgba(232,184,74,.3)}
+.drawer-pow{font-weight:700;white-space:nowrap}
+.drawer-back{width:100%;min-height:40px;margin-top:2px}
+
 /* ボトムシート（タイル詳細） */
 #sheet{position:fixed;left:0;right:0;bottom:0;background:var(--bg2);border-top:1px solid var(--line);
   border-radius:14px 14px 0 0;padding:14px 16px calc(14px + var(--safe-b));transform:translateY(105%);
@@ -4219,11 +4263,11 @@ function openLogSheet() {
     return `<div class="log-row"><span class="log-time">${fmtClock(e.ts)}</span>
       <span class="log-text" style="color:${col}">${escapeHtml(e.text)}</span></div>`;
   }).join("");
-  $("sheet").innerHTML = `<h3>📜 出来事の記録</h3>
+  const _logHTML = `<h3>📜 出来事の記録</h3>
     <div class="dim small">新しい順。最大${CONFIG.LOG_MAX}件まで残ります</div>
     <div class="log-list">${rows || '<div class="dim small" style="padding:10px 2px">まだ記録がありません</div>'}</div>
     <div class="actions"><button onclick="closeSheet()">閉じる</button></div>`;
-  $("sheet").classList.add("open");
+  showSheet(_logHTML);
 }
 /** 未読バッジを更新（タブバーのマップと、マップ内📜ボタンの両方） */
 function updateMapBadge() {
@@ -4913,197 +4957,338 @@ const MapView = {
 };
 
 /**
- * 盟主の攻撃指示と包囲の状況。硬い目標（城・関所・埠頭・皇都）でのみ出る。
+ * 盟主の攻撃指示と包囲の状況（折りたたみの中身）。硬い目標でのみ出る。
  * 「同盟を育てる → 硬い壁が削れる」という因果を、数字で見えるようにする。
  */
-function siegeHTML(ti) {
+function siegeDetailHTML(ti) {
   const t = S.world.tiles[ti];
   if (!CONFIG.ORDER_TARGET_TYPES.includes(t.type)) return "";
   const o = S.alliance && S.alliance.order;
-  const isTarget = o && o.targetIdx === ti;
-  if (isTarget) {
+  if (o && o.targetIdx === ti) {
     const pct = Math.floor(o.siege || 0);
-    const rate = getSiegeRatePerMin();
-    return `<div class="panel" style="margin-top:8px">
-      <div class="small"><b>📣 攻撃指示中</b> ｜ 包囲 ${pct}% / 上限${CONFIG.ORDER_SIEGE_MAX}%</div>
-      <div class="vault-bar" style="margin-top:5px"><i style="width:${pct / CONFIG.ORDER_SIEGE_MAX * 100}%"></i></div>
-      <div class="dim small">同盟員が包囲中: 毎分 +${rate.toFixed(1)}%（忠誠が高いほど速い）<br>
-        この目標の防御が ${pct}% 下がっています</div>
-      <button class="stack-btn" style="margin-top:6px" onclick="UIA.cancelOrder()">指示を取り下げる</button></div>`;
+    return detailsHTML(`📣 攻撃指示中（包囲 ${pct}%）`,
+      `包囲 ${pct}% / 上限${CONFIG.ORDER_SIEGE_MAX}%
+       <div class="vault-bar" style="margin:5px 0"><i style="width:${pct / CONFIG.ORDER_SIEGE_MAX * 100}%"></i></div>
+       同盟員が包囲中: 毎分 +${getSiegeRatePerMin().toFixed(1)}%（忠誠が高いほど速い）<br>
+       この目標の防御が ${pct}% 下がっています<br>
+       <button class="stack-btn" style="margin-top:6px" onclick="UIA.cancelOrder()">指示を取り下げる</button>`);
   }
   const blocked = getOrderBlocker(ti);
-  const other = o ? `<br><span class="dim">現在の指示: (${S.world.tiles[o.targetIdx].x}, ${S.world.tiles[o.targetIdx].y}) — 出し直すと切り替わります</span>` : "";
-  return `<div class="panel" style="margin-top:8px">
-    <div class="small"><b>📣 同盟に攻撃を指示</b></div>
-    <div class="dim small">同盟員が包囲し、この目標の防御が最大${CONFIG.ORDER_SIEGE_MAX}%下がります${other}</div>
-    <button class="stack-btn" style="margin-top:6px" ${blocked ? "disabled" : ""}
-      onclick="UIA.issueOrder(${ti})">${blocked ? "🔒 " + blocked : "📣 ここを攻めよと下知する"}</button></div>`;
+  const other = o ? `<br>現在の指示: (${S.world.tiles[o.targetIdx].x}, ${S.world.tiles[o.targetIdx].y}) — 出し直すと切り替わります` : "";
+  return detailsHTML("📣 同盟に攻撃を指示",
+    `同盟員が包囲し、この目標の防御が最大${CONFIG.ORDER_SIEGE_MAX}%下がります${other}<br>
+     <button class="stack-btn" style="margin-top:6px" ${blocked ? "disabled" : ""}
+       onclick="UIA.issueOrder(${ti})">${blocked ? "🔒 " + blocked : "📣 ここを攻めよと下知する"}</button>`);
 }
-/**
- * 出撃部隊の選択ボタン群のHTML。資源タイルにもAI城にも同じUIを出すため切り出した。
- * 部隊ごとに「この目標に対する」戦力（＝兵種相性込み）と所要時間を見せ、どれで攻めるか選ばせる。
- */
-function squadPickHTML(ti, t) {
-  const def = getTileDefense(ti);
+/* --- タイル詳細シート（3層構造）-------------------------------------
+ * ChatGPT確定仕様（2026-07-27）。情報が増えるほど「出撃」ボタンが下へ逃げる問題への対処。
+ *   固定ヘッダー → スクロールする本文 →（選択ドロワー）→ 固定アクション
+ * position:sticky ではなく **アクションをスクロール領域の外へ出す** 方式にしている。
+ * #sheet 自体が transform で開閉するため、iOS Safari では sticky より堅牢。
+ * 判断に要る結論だけを上に出し、内訳は <details> へ畳む。 */
+let openTileIndex = null;        // 開いているタイル（セーブしないUI状態）
+let tileSheetActionMode = null;  // null | "march" | "garrison" — 選択ドロワーの表示状態
+
+/** 出撃できない理由（できるなら null）。ボタンを消さずに理由を出すために使う */
+function getMarchBlockReason(ti) {
   const idle = getIdleSquads();
-  if (!idle.length) return `<div class="small" style="margin-top:8px;color:var(--danger)">全部隊が行軍中です</div>`;
-  return `<div class="squad-pick">` + idle.map(sq => {
-    const p = getSquadPower(sq.id, t.defTroop, t.type);
-    const tr = getSquadTroop(sq.id);
-    const rel = troopMultiplier(tr, t.defTroop, t.type);
-    const tRatio = getSquadTroopRatio(sq.id);
-    // 出撃起点は部隊ごとに違う（駐留していればその駐留地）
-    const origin = getSquadOrigin(sq.id);
-    const canMarch = tRatio >= CONFIG.TROOPS_MIN_RATIO_TO_MARCH
-      && getMarchableTiles(getSquadRange(sq.id), origin).has(ti);
-    const relTag = rel > 1 ? `<span class="rel-good">有利×${rel}</span>`
-      : rel < 1 ? `<span class="rel-bad">不利×${rel}</span>` : "";
-    const trd = tr ? TROOP_DEFS[tr] : null;
-    // 勝てる部隊、かつ相性有利な部隊を最も目立たせて「これを出せばよい」と分かるようにする
-    const cls = (canMarch && p >= def ? "can" : "cannot") + (rel > 1 && p >= def && canMarch ? " best" : "");
-    // 兵種で行軍時間が変わるので、出撃前に所要時間も見せる
-    const spd = CONFIG.MARCH_TILES_PER_SEC * getSquadSpeedMult(sq.id) * (getAllianceBuffs().speed || 1) * researchMult("speed");
-    const eta = fmtSec(Math.max(CONFIG.MARCH_MIN_SEC, getMarchDistance(ti, origin) / spd));
-    const note = tRatio < CONFIG.TROOPS_MIN_RATIO_TO_MARCH ? `<span class="rel-bad">兵力不足</span>`
-      : !canMarch ? `<span class="rel-bad">射程外</span>` : "";
-    const stTag = origin !== playerStartIdx()
-      ? `<span class="dim small">⛺(${S.world.tiles[origin].x},${S.world.tiles[origin].y})発</span>` : "";
-    return `<button class="squad-btn ${cls}" ${canMarch ? "" : "disabled"} onclick="UIA.march(${ti},'${sq.id}')">
-      <b>${sq.name}</b>${trd ? ` <span style="color:${trd.color}">${trd.emoji}</span>` : ""}${stTag}
-      <span class="dim small">兵${Math.round(tRatio * 100)}%</span>
-      <span class="squad-eta">🕐${eta}</span>
-      <span class="squad-pow">${fmt(p)} ${p >= def ? "✅" : "⚠️"}</span>${relTag}${note}</button>`;
-  }).join("") + `</div>
-  <div class="dim small" style="margin-top:4px">出兵コスト 🌾${CONFIG.MARCH_FOOD_COST}／部隊。編成は「カード」タブで変更できます</div>`;
-}
-/**
- * 駐留の状況と操作。駐留できる場所（幕舎・占領した要衝・本城）でのみ中身が出る。
- * 部隊を置くと「守りに戦力が乗る／ここから出撃できる／ここで回復する」の3つが効く。
- */
-function garrisonHTML(ti) {
-  if (!isGarrisonSite(ti)) return "";
-  const t = S.world.tiles[ti];
-  const here = getGarrisonSquads(ti);
-  const isHome = ti === playerStartIdx();
-  const fortress = isFortressSite(ti);
-  let html = `<div class="panel" style="margin-top:8px">
-    <div class="small"><b>${isHome ? "🏯 本城" : getOutpostAt(ti) ? "⛺ 幕舎" : "🛡 " + TILE_DEFS[t.type].name}</b>
-    ${here.length ? ` ｜ 駐留 ${here.length}隊（戦力 ${fmt(getGarrisonPower(ti))}）` : " ｜ 駐留なし"}</div>`;
-  if (fortress) {
-    const archer = here.some(sq => getSquadCards(sq.id).some(c => (CARD_BY_ID[c.defId] || {}).troop === "archer"));
-    html += `<div class="dim small">🏹 要衝に駐屯中は射程${archer ? CONFIG.INTERCEPT_RANGE_ARCHER : CONFIG.INTERCEPT_RANGE}内へ来る侵攻を迎撃します${
-      archer ? "（弓兵を含むため射程・威力が伸びています）" : "（弓兵を入れると射程・威力が伸びます）"}</div>`;
+  if (!idle.length) return "出撃できる待機部隊がありません";
+  const usable = idle.filter(sq => getSquadCards(sq.id).length > 0);
+  if (!usable.length) return "武将が編成されていません";
+  if (!usable.some(sq => getSquadTroopRatio(sq.id) >= CONFIG.TROOPS_MIN_RATIO_TO_MARCH)) {
+    return `兵力が足りません（${Math.round(CONFIG.TROOPS_MIN_RATIO_TO_MARCH * 100)}%未満は出撃不可）`;
   }
-  const busy = new Set(S.player.marches.map(m => m.squadId));
-  html += `<div class="garrison-list">` + ensureSquads().slice(0, getSquadSlots()).map(sq => {
-    const at = sq.stationedAt;
-    const isHere = at === ti;
-    const label = at == null ? "本城" : (S.world.tiles[at] ? `(${S.world.tiles[at].x},${S.world.tiles[at].y})` : "?");
-    if (busy.has(sq.id)) return `<div class="garrison-row dim small">${sq.name} — 行軍中</div>`;
-    return `<div class="garrison-row"><span class="grow small">${sq.name}
-      <span class="dim">${isHere ? "ここに駐留中" : "現在: " + label}</span></span>
-      <button class="stack-btn" onclick="UIA.station('${sq.id}',${isHere ? "null" : ti})">${isHere ? "引き揚げ" : "駐留"}</button></div>`;
-  }).join("") + `</div></div>`;
-  return html;
+  if (!usable.some(sq => getMarchableTiles(getSquadRange(sq.id), getSquadOrigin(sq.id)).has(ti))) {
+    return "射程外です";
+  }
+  return null;
 }
-/** タイル詳細ボトムシートを開く */
-function openTileSheet(ti) {
+/** この目標に対していちばん強い待機部隊（推奨表示に使う） */
+function getBestSquadFor(ti) {
   const t = S.world.tiles[ti];
-  const td = TILE_DEFS[t.type];
+  const cand = getIdleSquads().filter(sq =>
+    getSquadCards(sq.id).length &&
+    getSquadTroopRatio(sq.id) >= CONFIG.TROOPS_MIN_RATIO_TO_MARCH &&
+    getMarchableTiles(getSquadRange(sq.id), getSquadOrigin(sq.id)).has(ti));
+  if (!cand.length) return null;
+  return cand.reduce((a, b) =>
+    getSquadPower(b.id, t.defTroop, t.type) > getSquadPower(a.id, t.defTroop, t.type) ? b : a);
+}
+function detailsHTML(title, inner) {
+  return `<details class="sheet-detail"><summary>${title}</summary>
+    <div class="sheet-detail-body">${inner}</div></details>`;
+}
+
+/** 固定ヘッダー。×は常時ここに出す */
+function renderTileSheetHeader(ti) {
+  const t = S.world.tiles[ti], td = TILE_DEFS[t.type];
   const ai = t.ownerId && t.ownerId !== "player" ? S.aiUsers.find(a => a.id === t.ownerId) : null;
-  const ownerText = t.ownerId === "player" ? "あなたの領地" : ai ? `${ai.name} の領地` : "未所有";
-  // 通行不可の地形はレベルや所有者を出さない（攻略できそうに見えてしまうため）
-  let body = isBlockedType(t.type)
-    ? `<h3>${td.emoji} ${td.name} <span class="dim small">(${t.x}, ${t.y})</span></h3>
-       <div class="small" style="color:var(--danger)">⛔ 通行不可 — 兵を進めることはできません</div>`
-    : `<h3>${td.emoji} ${td.name} Lv${t.level} <span class="dim small">(${t.x}, ${t.y})</span></h3>
-       <div class="dim small">${ownerText}</div>`;
-  if (td.desc) body += `<div class="small" style="margin-top:8px;line-height:1.6">${td.desc}</div>`;
-  const actions = [];
+  const owner = t.ownerId === "player" ? "あなたの領地" : ai ? `${ai.name} の領地` : "未所有";
+  const lv = isBlockedType(t.type) ? "" : ` Lv${t.level}`;
+  return `<div class="sheet-head">
+    <div class="sheet-title">
+      <h3>${td.emoji} ${td.name}${lv} <span class="dim small">(${t.x}, ${t.y})</span></h3>
+      <div class="dim small">${isBlockedType(t.type) ? "通行不可の地形" : owner}</div>
+    </div>
+    <button class="sheet-close" onclick="closeSheet()" aria-label="閉じる">×</button>
+  </div>`;
+}
+
+/** レベルA＝開いた瞬間に判断できる結論だけ。原則3行以内 */
+function renderTileSummary(ti) {
+  const t = S.world.tiles[ti], td = TILE_DEFS[t.type];
   if (isBlockedType(t.type)) {
-    // 山・川は出兵対象にならない。説明だけ出して終わる
-  } else if (t.type === "castle" && ai) {
-    // AI城: 勧誘 と 攻略（滅ぼす）の二択を同じ場所で見せる
-    body += `<div class="small" style="margin-top:6px">城Lv${ai.castleLevel} ｜ 性格: ${
-      { expander: "拡張志向", balanced: "バランス型", turtle: "内政重視" }[ai.personality]}
-      ｜ ${ai.defeated ? "☠️ 滅亡" : ai.allianceId ? "🤝 同盟員" : ai.recruitable ? "✅ 勧誘可能" : "❌ 勧誘不可"}</div>`;
-    if (ai.recruitable && !ai.allianceId && !ai.defeated) {
-      actions.push(`<button class="primary" onclick="UIA.recruit('${ai.id}')">🤝 勧誘する（🌾${CONFIG.RECRUIT_FOOD_COST}）</button>`);
-    }
-    if (ai.defeated) {
-      body += `<div class="small" style="margin-top:8px;color:var(--fg-dim)">この勢力はすでに滅んでいます</div>`;
-    } else if (ai.allianceId === S.alliance.id) {
-      body += `<div class="small" style="margin-top:8px;color:var(--fg-dim)">同盟員の城は攻められません（同盟タブで追放すれば攻略対象になります）</div>`;
-    } else {
-      body += `<div class="small" style="margin-top:8px">防御力 ${fmt(getTileDefense(ti))}<br>
-        <span style="color:var(--danger)">🏯 落とせば ${ai.name} は滅亡し、領有していた ${ai.ownedTiles.length} 枚が無主に戻ります</span><br>
-        💎ボーナス +${CONFIG.CASTLE_CAPTURE_DIAMONDS}</div>`;
-      body += siegeHTML(ti);
-      body += squadPickHTML(ti, t);
-    }
-  } else if (t.ownerId === "player") {
-    // 自領は「どれくらい守れているか」と「駐留の状況」を見せる
+    return `<div class="tile-summary"><div class="small" style="color:var(--danger)">⛔ 兵を進めることはできません</div>
+      ${td.desc ? `<div class="dim small" style="margin-top:6px">${td.desc}</div>` : ""}</div>`;
+  }
+  const rows = [];
+  if (t.ownerId === "player") {
+    const prod = RES_KEYS.includes(t.type)
+      ? `${RES_DEFS[t.type].emoji} +${fmt(CONFIG.TILE_PROD_PER_LEVEL_PER_HOUR * t.level)}/h ｜ ` : "";
+    rows.push(`${prod}🛡️ 守り ${fmt(getPlayerTileDefense(ti))}`);
+    const marks = [];
+    if (getOutpostAt(ti)) marks.push("⛺ 幕舎");
+    if (getFortAt(ti)) marks.push("🗼 防衛施設");
+    const gar = getGarrisonSquads(ti);
+    if (gar.length) marks.push(`🛡 ${gar.map(sq => sq.name).join("・")} 駐留中`);
+    if (marks.length) rows.push(marks.join(" ｜ "));
     const threat = (S.aiMarches || []).find(m => m.targetIdx === ti);
-    const isHome = ti === playerStartIdx();
-    body += `<div class="small" style="margin-top:6px">🛡️ 守り ${fmt(getPlayerTileDefense(ti))}
-      <span class="dim">（本城Lv${S.player.castleLevel}・兵舎Lv${getBuilding("barracks").level}で上昇）</span></div>`;
     if (threat) {
       const ta = S.aiUsers.find(a => a.id === threat.aiId);
-      body += `<div class="small" style="margin-top:6px;color:var(--danger)">🚨 ${ta ? ta.name : "敵"} が侵攻中！
-        敵戦力 ${fmt(threat.power)} ／ 着弾まで ${fmtSec((threat.arriveAt - now()) / 1000)}
-        — ${threat.power >= getPlayerTileDefense(ti) ? "このままでは奪われます" : "守り切れます"}</div>`;
+      const lose = threat.power >= getPlayerTileDefense(ti);
+      rows.push(`<span style="color:var(--danger)">🚨 ${ta ? ta.name : "敵"} 侵攻中 — 敵${fmt(threat.power)} ／ 着弾 ${fmtSec((threat.arriveAt - now()) / 1000)} — ${lose ? "このままでは奪われます" : "守り切れます"}</span>`);
     }
-    body += garrisonHTML(ti);
+  } else {
+    const def = getTileDefense(ti);
+    const dt = t.defTroop ? TROOP_DEFS[t.defTroop] : null;
+    const counterKey = t.defTroop ? TROOP_KEYS.find(k => TROOP_DEFS[k].strong === t.defTroop) : null;
+    const ct = counterKey ? TROOP_DEFS[counterKey] : null;
+    rows.push(`防御 ${fmt(def)}${dt ? ` ｜ 守備 <span style="color:${dt.color}">${dt.emoji}${dt.name}</span>` : ""}`);
+    if (ct) {
+      rows.push(`<span class="rel-good">有利 ${ct.emoji}${ct.name}</span>${FORTRESS_TYPES.includes(t.type) ? ` ｜ <span class="dim">🏗️兵器は攻城特効</span>` : ""}`);
+    } else if (FORTRESS_TYPES.includes(t.type)) {
+      rows.push(`<span class="dim">🏗️ 兵器は攻城特効</span>`);
+    }
+    const o = S.alliance && S.alliance.order;
+    if (o && o.targetIdx === ti) rows.push(`<span style="color:var(--accent)">📣 包囲中 ${Math.floor(o.siege)}% — 防御が下がっています</span>`);
+  }
+  return `<div class="tile-summary">${rows.map(r => `<div class="small">${r}</div>`).join("")}</div>`;
+}
+
+/** 折りたたみの詳細。初期状態はすべて閉じる */
+function renderTileDetails(ti) {
+  const t = S.world.tiles[ti], td = TILE_DEFS[t.type];
+  if (isBlockedType(t.type)) return "";
+  const ai = t.ownerId && t.ownerId !== "player" ? S.aiUsers.find(a => a.id === t.ownerId) : null;
+  let html = "";
+
+  if (t.ownerId === "player") {
+    /* --- 駐留・防衛の内訳 --- */
+    const gar = getGarrisonSquads(ti);
+    let g = `総守り <b>${fmt(getPlayerTileDefense(ti))}</b><br>基本 ${fmt(getTileDefense(ti))}<br>本城Lv${S.player.castleLevel} +${fmt(S.player.castleLevel * CONFIG.TILE_DEF_PLAYER_PER_CASTLE_LV)}<br>兵舎Lv${getBuilding("barracks").level} +${fmt(getBuilding("barracks").level * CONFIG.TILE_DEF_PLAYER_PER_BARRACKS_LV)}`;
+    if (getOutpostAt(ti)) g += `<br>⛺ 幕舎 +${fmt(CONFIG.OUTPOST_DEF_BONUS)}`;
+    if (getFortAt(ti)) g += `<br>🗼 防衛施設 +${fmt(CONFIG.FORT_DEF)}`;
+    const aura = getFortAuraDef(ti);
+    if (aura) g += `<br>🗼 周囲の施設 +${fmt(aura)}`;
+    if (gar.length) g += `<br>🛡 駐留 +${fmt(Math.round(getGarrisonPower(ti) * CONFIG.GARRISON_DEF_RATIO))}`;
+    if (isGarrisonSite(ti)) {
+      g += `<br><span class="dim">駐留すると 出撃起点になり／回復${CONFIG.GARRISON_HEAL_MULT}倍／補充が割引</span>`;
+      if (isFortressSite(ti)) {
+        const archer = gar.some(sq => getSquadCards(sq.id).some(c => (CARD_BY_ID[c.defId] || {}).troop === "archer"));
+        g += `<br><span class="dim">🏹 要衝に駐屯中は射程${archer ? CONFIG.INTERCEPT_RANGE_ARCHER : CONFIG.INTERCEPT_RANGE}内の侵攻を迎撃${archer ? "（弓兵を含むため伸びています）" : "（弓兵を入れると伸びます）"}</span>`;
+      }
+    } else {
+      g += `<br><span class="dim">ここには駐留できません（幕舎を築くか、要衝を占領すると可能に）</span>`;
+    }
+    html += detailsHTML("🛡️ 駐留・防衛の内訳", g);
+
+    /* --- 施設（建設・撤去はここ。固定フッターには出さない） --- */
+    const isHome = ti === playerStartIdx();
+    let f = "";
+    if (getOutpostAt(ti)) f += `⛺ 幕舎あり — 出撃起点・守り+${fmt(CONFIG.OUTPOST_DEF_BONUS)}・回復${CONFIG.GARRISON_HEAL_MULT}倍<br>`;
+    if (getFortAt(ti)) f += `🗼 防衛施設あり — この地+${fmt(CONFIG.FORT_DEF)}／射程${CONFIG.FORT_INTERCEPT_RANGE}を迎撃<br>`;
     if (!isHome && !getStructAt(ti) && !FORTRESS_TYPES.includes(t.type) && t.type !== "castle") {
-      const room = getOutpostMax() - (S.player.outposts || []).length;
-      body += `<div class="small" style="margin-top:8px">⛺ 幕舎を築けば前線の拠点になります
-        <span class="dim">（出撃起点・守り+${CONFIG.OUTPOST_DEF_BONUS}・回復${CONFIG.GARRISON_HEAL_MULT}倍）</span><br>
-        ${fmtCost(CONFIG.OUTPOST_COST)} ｜ 残り枠 ${room}/${getOutpostMax()}</div>`;
-      actions.push(`<button class="primary" ${(room <= 0 || !canAfford(CONFIG.OUTPOST_COST)) ? "disabled" : ""}
-        onclick="UIA.buildOutpost(${ti})">⛺ 幕舎を築く</button>`);
+      const room = getOutpostMax() - countStructs("camp");
+      f += `⛺ <b>幕舎</b>（前線の拠点）<br>${fmtCost(CONFIG.OUTPOST_COST)} ｜ 残り枠 ${room}/${getOutpostMax()}<br><button class="stack-btn" ${(room <= 0 || !canAfford(CONFIG.OUTPOST_COST)) ? "disabled" : ""} onclick="UIA.buildOutpost(${ti})">⛺ 幕舎を築く</button><br>`;
     }
-    // 防衛施設（本城Lv10解禁・自城／占領した関所の近くのみ）
     if (!isHome && !getStructAt(ti) && isFortBuildable(ti)) {
       const locked = S.player.castleLevel < CONFIG.FORT_REQUIRE_CASTLE_LV;
       const room = getFortMax() - countStructs("fort");
-      body += `<div class="small" style="margin-top:8px">🗼 防衛施設を築ける位置です
-        <span class="dim">（この地+${fmt(CONFIG.FORT_DEF)}／周囲${CONFIG.FORT_AURA_RANGE}タイルに+${fmt(CONFIG.FORT_AURA_DEF)}・兵なしで迎撃）</span><br>
-        ${fmtCost(CONFIG.FORT_COST)} ｜ 残り枠 ${room}/${getFortMax()}${
-        locked ? `<br><span style="color:var(--danger)">要 本城Lv${CONFIG.FORT_REQUIRE_CASTLE_LV}（現在Lv${S.player.castleLevel}）</span>` : ""}</div>`;
-      actions.push(`<button class="primary" ${(locked || room <= 0 || !canAfford(CONFIG.FORT_COST)) ? "disabled" : ""}
-        onclick="UIA.buildFort(${ti})">🗼 防衛施設を築く</button>`);
+      f += `🗼 <b>防衛施設</b>（この地+${fmt(CONFIG.FORT_DEF)}／周囲${CONFIG.FORT_AURA_RANGE}タイルに+${fmt(CONFIG.FORT_AURA_DEF)}）<br>${fmtCost(CONFIG.FORT_COST)} ｜ 残り枠 ${room}/${getFortMax()}${locked ? `<br><span style="color:var(--danger)">要 本城Lv${CONFIG.FORT_REQUIRE_CASTLE_LV}（現在Lv${S.player.castleLevel}）</span>` : ""}<br><button class="stack-btn" ${(locked || room <= 0 || !canAfford(CONFIG.FORT_COST)) ? "disabled" : ""} onclick="UIA.buildFort(${ti})">🗼 防衛施設を築く</button><br>`;
     }
-    if (getFortAt(ti)) {
-      body += `<div class="small" style="margin-top:8px">🗼 防衛施設 — この地+${fmt(CONFIG.FORT_DEF)}／射程${CONFIG.FORT_INTERCEPT_RANGE}を迎撃</div>`;
+    if (getStructAt(ti)) {
+      f += `<button class="stack-btn" onclick="UIA.removeStruct(${ti})">${getFortAt(ti) ? "🗼 防衛施設を壊す" : "⛺ 幕舎を畳む"}</button>`;
     }
-    if (getStructAt(ti)) actions.push(`<button onclick="UIA.removeStruct(${ti})">${
-      getFortAt(ti) ? "🗼 防衛施設を壊す" : "⛺ 幕舎を畳む"}</button>`);
-    if (!isHome && t.type !== "castle") actions.push(`<button class="danger" onclick="UIA.abandon(${ti})">🏳️ 放棄する</button>`);
-  } else if (t.ownerId !== "player" && t.type !== "castle") {
-    const def = getTileDefense(ti);
-    const resInfo = RES_KEYS.includes(t.type)
-      ? `制圧すると ${RES_DEFS[t.type].emoji}+${fmt(CONFIG.TILE_PROD_PER_LEVEL_PER_HOUR * t.level)}/h`
-      : t.type === "holy" && isLegacyRuleset() ? "🎉 制圧すると勝利条件達成！"
-      : t.type === "capital" ? "👑 制圧すれば天下統一！"
-      : t.type === "port" ? "⚓ 制圧すると対岸へ進軍できる"
-      : t.type === "gate" ? "🛡️ 制圧するとこの先へ進める"
-      : "制圧すると領地が広がる";
-    const dt = t.defTroop ? TROOP_DEFS[t.defTroop] : null;
-    // 三すくみを暗記していなくても判断できるよう、「何をぶつければ有利か」を明示する
-    const counterKey = t.defTroop ? TROOP_KEYS.find(k => TROOP_DEFS[k].strong === t.defTroop) : null;
-    const ct = counterKey ? TROOP_DEFS[counterKey] : null;
-    body += `<div class="small" style="margin-top:6px">防御力 ${fmt(def)}${
-      dt ? ` ｜ 守備 <span style="color:${dt.color}">${dt.emoji}${dt.name}</span>` : ""}${
-      ct ? `<br><span class="rel-good">有利な兵種: ${ct.emoji}${ct.name}</span>` : ""}<br>
-      ${resInfo}<br>💎ボーナス +${CONFIG.DIAMOND_CAPTURE_BONUS_PER_LEVEL * t.level}</div>`;
-    body += siegeHTML(ti);
-    body += squadPickHTML(ti, t);
+    if (f) html += detailsHTML("🧱 施設", f);
+
+    /* --- 土地の生産 --- */
+    let land = RES_KEYS.includes(t.type) ? `${RES_DEFS[t.type].emoji} +${fmt(CONFIG.TILE_PROD_PER_LEVEL_PER_HOUR * t.level)}/h<br>` : "";
+    land += `💎 +${fmt(CONFIG.DIAMOND_PER_TILELEVEL_PER_HOUR * t.level)}/h（領地のダイヤ）`;
+    if (td.desc) land += `<br><span class="dim">${td.desc}</span>`;
+    html += detailsHTML("📦 土地の生産", land);
+    return html;
   }
-  actions.push(`<button onclick="closeSheet()">閉じる</button>`);
-  $("sheet").innerHTML = body + `<div class="actions">${actions.join("")}</div>`;
-  $("sheet").classList.add("open");
+
+  /* --- 敵地・未所有 --- */
+  if (t.type === "castle" && ai) {
+    let c = `防御 <b>${fmt(getTileDefense(ti))}</b>（城Lv${ai.castleLevel}）<br>`;
+    if (ai.defeated) c += `この勢力はすでに滅んでいます`;
+    else if (ai.allianceId === S.alliance.id) c += `<span class="dim">同盟員の城は攻められません（同盟タブで追放すると攻略対象になります）</span>`;
+    else c += `<span style="color:var(--danger)">落とせば ${ai.name} は滅亡し、領有していた ${ai.ownedTiles.length} 枚が無主に戻ります</span><br>💎ボーナス +${CONFIG.CASTLE_CAPTURE_DIAMONDS}`;
+    html += detailsHTML("🏯 城の守備", c);
+    html += detailsHTML("🤝 勢力・外交",
+      `性格: ${{ expander: "拡張志向", balanced: "バランス型", turtle: "内政重視" }[ai.personality]}<br>状態: ${ai.defeated ? "☠️ 滅亡" : ai.allianceId ? "🤝 同盟員" : ai.recruitable ? "✅ 勧誘可能" : "❌ 勧誘不可"}<br>領有 ${ai.ownedTiles.length} 枚${ai.recruitable && !ai.allianceId && !ai.defeated ? `<br>勧誘成功率 ${Math.round(recruitChance(ai) * 100)}%（🌾${CONFIG.RECRUIT_FOOD_COST}）` : ""}`);
+  } else {
+    const dt = t.defTroop ? TROOP_DEFS[t.defTroop] : null;
+    let w = `防御 <b>${fmt(getTileDefense(ti))}</b><br>`;
+    if (dt) {
+      const counterKey = TROOP_KEYS.find(k => TROOP_DEFS[k].strong === t.defTroop);
+      w += `守備兵種 <span style="color:${dt.color}">${dt.emoji}${dt.name}</span><br>`;
+      if (counterKey) w += `有利 ${TROOP_DEFS[counterKey].emoji}${TROOP_DEFS[counterKey].name}（×${CONFIG.TROOP_ADVANTAGE}）／不利は×${CONFIG.TROOP_DISADVANTAGE}<br>`;
+    } else {
+      w += `<span class="dim">守備兵種なし（相性の影響を受けません）</span><br>`;
+    }
+    if (FORTRESS_TYPES.includes(t.type)) w += `🏗️ 兵器は攻城特効 ×${CONFIG.TROOP_SIEGE_VS_FORTRESS}<br>`;
+    const o = S.alliance && S.alliance.order;
+    if (o && o.targetIdx === ti) w += `<span style="color:var(--accent)">📣 包囲 ${Math.floor(o.siege)}% ぶん防御が下がっています</span>`;
+    html += detailsHTML("⚔️ 戦況の詳細", w);
+  }
+  html += siegeDetailHTML(ti);
+  const resInfo = RES_KEYS.includes(t.type)
+    ? `制圧すると ${RES_DEFS[t.type].emoji}+${fmt(CONFIG.TILE_PROD_PER_LEVEL_PER_HOUR * t.level)}/h`
+    : t.type === "holy" && isLegacyRuleset() ? "🎉 制圧すると勝利条件達成！"
+    : t.type === "capital" ? "👑 制圧すれば天下統一！"
+    : t.type === "port" ? "⚓ 制圧すると対岸へ進軍できる"
+    : t.type === "gate" ? "🛡️ 制圧するとこの先へ進める"
+    : t.type === "castle" ? "🏯 落とせばその勢力は滅亡する"
+    : "制圧すると領地が広がる";
+  html += detailsHTML("📦 土地・報酬",
+    `${resInfo}<br>💎ボーナス +${t.type === "castle" ? CONFIG.CASTLE_CAPTURE_DIAMONDS : CONFIG.DIAMOND_CAPTURE_BONUS_PER_LEVEL * t.level}${td.desc ? `<br><span class="dim">${td.desc}</span>` : ""}`);
+  return html;
 }
-function closeSheet() { $("sheet").classList.remove("open"); openBuildingType = null; researchSheetOpen = false; }
+
+/** 固定アクション。ここに並ぶのは「反復するコア操作」だけ（施設建設は入れない） */
+function renderTileActionBar(ti) {
+  const t = S.world.tiles[ti];
+  if (isBlockedType(t.type)) return "";        // 通行不可は×だけで十分
+  const btns = [];
+  let note = "";
+  if (t.ownerId === "player") {
+    const isHome = ti === playerStartIdx();
+    const gar = getGarrisonSquads(ti);
+    if (isGarrisonSite(ti)) {
+      btns.push(`<button class="primary" onclick="UIA.tileAction(${ti},'garrison')">🛡️ ${gar.length ? "部隊交代" : "駐留"}</button>`);
+    }
+    if (!isHome && t.type !== "castle") {
+      btns.push(`<button class="danger" onclick="UIA.abandon(${ti})">🏳️ 放棄</button>`);
+    }
+  } else {
+    const ai = t.type === "castle" ? S.aiUsers.find(a => a.id === t.ownerId) : null;
+    const attackable = t.type !== "castle" || isAttackableCastle(ti);
+    if (attackable) {
+      const reason = getMarchBlockReason(ti);
+      btns.push(`<button class="primary" ${reason ? "disabled" : ""} onclick="UIA.tileAction(${ti},'march')">${reason ? "⚔️ 出撃不可" : "⚔️ 出撃"}</button>`);
+      // 押せない理由はボタンを消さずに1行で伝える
+      if (reason) note = `<div class="sheet-action-note">⚠️ ${reason}</div>`;
+      else {
+        const best = getBestSquadFor(ti);
+        if (best) {
+          const p = getSquadPower(best.id, t.defTroop, t.type);
+          const rel = troopMultiplier(getSquadTroop(best.id), t.defTroop, t.type);
+          note = `<div class="sheet-action-note">推奨: ${best.name}　戦力${fmt(p)} ${p >= getTileDefense(ti) ? "✅" : "⚠️"}${rel > 1 ? " <span class='rel-good'>有利</span>" : rel < 1 ? " <span class='rel-bad'>不利</span>" : ""}</div>`;
+        }
+      }
+    }
+    if (ai && ai.recruitable && !ai.allianceId && !ai.defeated) {
+      btns.push(`<button onclick="UIA.recruit('${ai.id}')">🤝 勧誘</button>`);
+    }
+  }
+  if (!btns.length) return "";
+  return note + `<div class="sheet-actions">${btns.join("")}</div>`;
+}
+
+/** 出撃する部隊を選ぶドロワー。本文をスクロールさせずに固定アクションの直上へ出す */
+function renderMarchDrawer(ti) {
+  const t = S.world.tiles[ti];
+  const def = getTileDefense(ti);
+  const rows = ensureSquads().slice(0, getSquadSlots()).map(sq => {
+    const busy = S.player.marches.some(m => m.squadId === sq.id);
+    const cards = getSquadCards(sq.id);
+    const p = getSquadPower(sq.id, t.defTroop, t.type);
+    const tr = getSquadTroop(sq.id), trd = tr ? TROOP_DEFS[tr] : null;
+    const rel = troopMultiplier(tr, t.defTroop, t.type);
+    const ratio = getSquadTroopRatio(sq.id);
+    const origin = getSquadOrigin(sq.id);
+    const inRange = getMarchableTiles(getSquadRange(sq.id), origin).has(ti);
+    const ok = !busy && cards.length && ratio >= CONFIG.TROOPS_MIN_RATIO_TO_MARCH && inRange;
+    const why = busy ? "行軍中" : !cards.length ? "未編成" : ratio < CONFIG.TROOPS_MIN_RATIO_TO_MARCH ? "兵力不足" : !inRange ? "射程外" : "";
+    const spd = CONFIG.MARCH_TILES_PER_SEC * getSquadSpeedMult(sq.id) * (getAllianceBuffs().speed || 1) * researchMult("speed");
+    const eta = fmtSec(Math.max(CONFIG.MARCH_MIN_SEC, getMarchDistance(ti, origin) / spd));
+    const best = ok && p >= def && rel > 1;
+    return `<button class="drawer-row ${ok ? (p >= def ? "can" : "cannot") : "cannot"} ${best ? "best" : ""}" ${ok ? "" : "disabled"} onclick="UIA.march(${ti},'${sq.id}')">
+      <span class="grow"><b>${best ? "★ " : ""}${sq.name}</b>${trd ? ` <span style="color:${trd.color}">${trd.emoji}</span>` : ""}
+        <span class="dim small">兵${Math.round(ratio * 100)}% ｜ 🕐${eta}${origin !== playerStartIdx() ? " ⛺発" : ""}</span></span>
+      <span class="drawer-pow">${fmt(p)} ${p >= def ? "✅" : "⚠️"}</span>
+      ${rel > 1 ? '<span class="rel-good">有利</span>' : rel < 1 ? '<span class="rel-bad">不利</span>' : ""}
+      ${why ? `<span class="rel-bad">${why}</span>` : ""}</button>`;
+  }).join("");
+  return `<div class="sheet-action-drawer">
+    <div class="drawer-head">出撃する部隊を選択 <span class="dim small">（🌾${CONFIG.MARCH_FOOD_COST}／部隊）</span></div>
+    ${rows}
+    <button class="drawer-back" onclick="UIA.tileAction(${ti},null)">← 戻る</button></div>`;
+}
+
+/** 駐留させる部隊を選ぶドロワー */
+function renderGarrisonDrawer(ti) {
+  const rows = ensureSquads().slice(0, getSquadSlots()).map(sq => {
+    const busy = S.player.marches.some(m => m.squadId === sq.id);
+    const here = sq.stationedAt === ti;
+    const at = sq.stationedAt;
+    const where = at == null ? "本城" : (S.world.tiles[at] ? `(${S.world.tiles[at].x},${S.world.tiles[at].y})` : "?");
+    return `<button class="drawer-row ${here ? "best" : busy ? "cannot" : "can"}" ${busy ? "disabled" : ""} onclick="UIA.station('${sq.id}',${here ? "null" : ti})">
+      <span class="grow"><b>${here ? "★ " : ""}${sq.name}</b>
+        <span class="dim small">戦力${fmt(getSquadPower(sq.id, null))} ｜ 現在 ${here ? "ここ" : where}</span></span>
+      <span class="drawer-pow">${here ? "引き揚げ" : "駐留"}</span>
+      ${busy ? '<span class="rel-bad">行軍中</span>' : ""}</button>`;
+  }).join("");
+  return `<div class="sheet-action-drawer">
+    <div class="drawer-head">駐留する部隊を選択</div>
+    ${rows}
+    <button class="drawer-back" onclick="UIA.tileAction(${ti},null)">← 戻る</button></div>`;
+}
+
+/** タイル詳細ボトムシートを開く */
+function openTileSheet(ti) {
+  openTileIndex = ti;
+  const drawer = tileSheetActionMode === "march" ? renderMarchDrawer(ti)
+    : tileSheetActionMode === "garrison" ? renderGarrisonDrawer(ti) : "";
+  showSheet(
+    renderTileSheetHeader(ti)
+    + `<div class="sheet-body">${renderTileSummary(ti)}${renderTileDetails(ti)}</div>`
+    + drawer
+    + renderTileActionBar(ti),
+    "tile");
+}
+
+/**
+ * ボトムシートの唯一の入口。
+ * mode="tile" のときだけ **ヘッダー固定／本文スクロール／アクション固定** の3層になる
+ * （タイル詳細は情報が増え続けるため。建物強化・指南・記録は従来どおりの1枚もの）。
+ */
+function showSheet(html, mode = "normal") {
+  const el = $("sheet");
+  el.classList.toggle("tile-mode", mode === "tile");
+  el.innerHTML = html;
+  el.classList.add("open");
+}
+function closeSheet() {
+  const el = $("sheet");
+  el.classList.remove("open", "tile-mode");
+  openBuildingType = null;
+  researchSheetOpen = false;
+  openTileIndex = null;
+  tileSheetActionMode = null;     // 出撃/駐留の選択ドロワーも畳む
+}
 
 /* =====================================================================
  * [S15] UI: ACTIONS — ボタンonclickから呼ばれる操作群
@@ -5122,6 +5307,11 @@ const UIA = {
     if (err) toast("⚠️ " + err); else toast("⚡ 普請を完了させました");
     renderCity(); renderHeader();
     if ($("sheet").classList.contains("open")) closeSheet();
+  },
+  /* --- タイル詳細シートの選択ドロワー --- */
+  tileAction(ti, mode) {
+    tileSheetActionMode = mode;   // null で閉じる
+    openTileSheet(ti);
   },
   /* --- 盟主の目標指示([S24]) --- */
   issueOrder(ti) {
@@ -5236,6 +5426,13 @@ const UIA = {
     renderCards();
   },
   abandon(ti) {
+    // 固定アクション化で押しやすくなったぶん、誤操作を防ぐ確認を入れる
+    const t = S.world.tiles[ti];
+    const extra = [];
+    if (getStructAt(ti)) extra.push(getFortAt(ti) ? "防衛施設" : "幕舎");
+    if (getGarrisonSquads(ti).length) extra.push("駐留部隊");
+    const warn = extra.length ? `\n${extra.join("と")}も失われます。` : "";
+    if (!confirm(`${TILE_DEFS[t.type].name}Lv${t.level} (${t.x}, ${t.y}) を放棄しますか？${warn}`)) return;
     const err = abandonTile(ti);
     if (err) toast("⚠️ " + err); else toast("🏳️ 放棄しました");
     closeSheet(); MapView.draw();
@@ -5415,25 +5612,23 @@ function openTutorialSheet(intro) {
   const step = getTutorialStep();
   if (intro || !step || step === "complete") {
     if (intro) {
-      $("sheet").innerHTML = `<h3>📜 初陣指南</h3>
+      showSheet(`<h3>📜 初陣指南</h3>
         <div class="small" style="line-height:1.7;margin-top:6px">
           天下への道は、一枚の領地から始まる。<br>
           領地は資源とダイヤを生み、ダイヤは新たな将を招く。<br>
           城と兵を鍛え、得た力でさらに領地を広げよ。</div>
-        <div class="actions"><button class="primary" onclick="UIA.guideGo()">⚔️ 初陣へ</button></div>`;
-      $("sheet").classList.add("open");
+        <div class="actions"><button class="primary" onclick="UIA.guideGo()">⚔️ 初陣へ</button></div>`);
     }
     return;
   }
   const d = TUTORIAL_STEPS[step];
-  $("sheet").innerHTML = `<h3>${d.head}</h3>
+  showSheet(`<h3>${d.head}</h3>
     <div class="dim small">初陣指南 ${d.no}/${TUTORIAL_ORDER.length}</div>
     <div class="small" style="line-height:1.7;margin-top:8px">${d.desc}</div>
     <div class="actions">
       <button class="primary" onclick="UIA.guideGo()">${d.cta}</button>
       <button onclick="closeSheet()">閉じる</button>
-    </div>`;
-  $("sheet").classList.add("open");
+    </div>`);
 }
 /** tickから呼ぶ: ステップの進行を検出して達成トーストを出し、完了処理も行う */
 function checkTutorialProgress() {
@@ -5451,15 +5646,14 @@ function checkTutorialProgress() {
 function completeTutorial() {
   S.tutorial.completedAt = now();
   logEvent("tutorial", "🎉 初陣指南 完了");
-  $("sheet").innerHTML = `<h3>🎉 初陣指南 完了</h3>
+  showSheet(`<h3>🎉 初陣指南 完了</h3>
     <div class="small" style="line-height:1.7;margin-top:6px">
       領地を広げれば、資源とダイヤが増える。<br>
       ダイヤで将を迎え、城と兵舎を鍛えれば軍は強くなる。<br>
       強くなった軍で、さらに遠き地へ進め。</div>
     <div class="guide-loop">領土 → ダイヤ → 戦力 → さらに領土</div>
     <div class="dim small" style="margin-top:8px">🗺️ 地図に <b>目標コンパス</b>・<b>外交バッジ</b>・<b>📜記録</b> が現れました</div>
-    <div class="actions"><button class="primary" onclick="closeSheet()">🏯 天下へ進む</button></div>`;
-  $("sheet").classList.add("open");
+    <div class="actions"><button class="primary" onclick="closeSheet()">🏯 天下へ進む</button></div>`);
   renderGuideBar();
   updateMapBadge();
   if (activeTab === "map") MapView.draw(); // 抑えていた表示をすぐ出す
@@ -5610,8 +5804,7 @@ function openBuildingSheet(type) {
     actions.push(`<button class="primary" onclick="UIA.openResearch()">🔬 研究ツリー</button>`);
   }
   actions.push(`<button onclick="closeSheet()">閉じる</button>`);
-  $("sheet").innerHTML = body + `<div class="actions">${actions.join("")}</div>`;
-  $("sheet").classList.add("open");
+  showSheet(body + `<div class="actions">${actions.join("")}</div>`);
 }
 
 /**
@@ -5659,8 +5852,7 @@ function openResearchSheet() {
       onclick="UIA.rushResearch()">⚡ 即完了（💎<span id="researchRush">${rush}</span>）</button>`);
   }
   actions.push(`<button onclick="closeSheet()">閉じる</button>`);
-  $("sheet").innerHTML = body + `<div class="actions">${actions.join("")}</div>`;
-  $("sheet").classList.add("open");
+  showSheet(body + `<div class="actions">${actions.join("")}</div>`);
 }
 /** 毎tickの軽量更新（DOM再構築なし）: サマリー数値・強化中カウントダウン */
 function updateCityLive() {
