@@ -173,6 +173,8 @@ select{font:inherit;color:var(--fg);background:var(--bg3);border:1px solid var(-
 .unit-card.rar-SR{border-color:var(--sr)} .unit-card.rar-SR .rarity{color:var(--sr)}
 .unit-card.rar-SSR{border-color:var(--ssr);box-shadow:0 0 8px rgba(232,184,74,.35)} .unit-card.rar-SSR .rarity{color:var(--ssr)}
 .unit-card.rar-UR{border-color:var(--ur);box-shadow:0 0 12px rgba(255,120,180,.5)} .unit-card.rar-UR .rarity{color:var(--ur)}
+/* 「今できることがある」合図のバッジ（[S25]）。未読件数ではないので●で出す */
+.badge.hint{background:var(--accent);color:#1a1408;min-width:10px;padding:0 4px;font-size:9px}
 .card-stars{font-size:10px;letter-spacing:-1px;color:var(--accent)}
 /* 合体強化（[S22]）。素のカードと見分けがつくよう、ランクバッジと枠で差をつける */
 .rank-badge{position:absolute;left:4px;bottom:4px;background:rgba(224,160,208,.95);color:#1b1220;
@@ -183,6 +185,12 @@ select{font:inherit;color:var(--fg);background:var(--bg3);border:1px solid var(-
   background:linear-gradient(180deg,#7a4a72,#5d3557);color:#ffe9fb;border:1px solid #e0a0d0;border-radius:7px}
 
 /* 研究ツリー（[S21]）。系統ごとに縦1列で「上から順に開いていく」ことを形で示す */
+/* 城タブ最上部の研究行（研究ツリーへの直行導線） */
+.research-row{display:flex;align-items:center;gap:8px;width:100%;text-align:left;margin-top:8px;
+  min-height:48px;padding:8px 10px;border-radius:9px;background:var(--bg3);border:1px solid var(--line)}
+.research-row.ready{border-color:var(--accent);box-shadow:0 0 8px rgba(232,184,74,.25)}
+.research-row .grow{flex:1;min-width:0;line-height:1.5}
+.research-row-go{color:var(--fg-dim);font-size:18px}
 .research-branch{margin-top:10px}
 .research-head{font-size:12px;font-weight:700;color:var(--fg-dim);border-bottom:1px solid var(--line);padding-bottom:3px;margin-bottom:6px}
 .research-node{border:1px solid var(--line);border-left-width:3px;border-radius:8px;padding:7px 9px;margin-bottom:6px;background:var(--bg2)}
@@ -328,8 +336,8 @@ select{font:inherit;color:var(--fg);background:var(--bg3);border:1px solid var(-
 
 <nav id="tabbar">
   <button data-tab="map" class="active"><span class="ico">🗺️</span>マップ<span class="badge" id="mapBadge" style="display:none"></span></button>
-  <button data-tab="city"><span class="ico">🏯</span>城</button>
-  <button data-tab="cards"><span class="ico">🎴</span>カード</button>
+  <button data-tab="city"><span class="ico">🏯</span>城<span class="badge hint" id="cityBadge" style="display:none"></span></button>
+  <button data-tab="cards"><span class="ico">🎴</span>カード<span class="badge hint" id="cardsBadge" style="display:none"></span></button>
   <button data-tab="gacha"><span class="ico">💎</span>ガチャ</button>
   <button data-tab="alliance"><span class="ico">🤝</span>同盟<span class="badge" id="chatBadge" style="display:none"></span></button>
 </nav>
@@ -379,7 +387,7 @@ const CONFIG = {
   DEV_MODE: false,                      // trueで開発用UI（ガチャタブの画像取り込み等）を表示
   SAVE_KEY: "hakoslg_save_v1",          // localStorageキー（名前空間 hakoslg_）
   ASSET_DB: "hakoslg_assets",           // IndexedDB名（画像アセット）
-  SAVE_VERSION: 16,                    // v16: 盟主の目標指示（alliance.order）
+  SAVE_VERSION: 17,                    // v17: 新機能の気づき（hints）
   LOG_MAX: 30,                         // 保持する出来事ログの最大件数
 
   // --- 初陣指南（[S15A]。最初の約1分でコアループを1周させる導線） ---
@@ -592,6 +600,7 @@ const CONFIG = {
   // --- カード合体（[S22]。ダブったカードの救済） ---
   // 同じカードを同ランクで FUSION_COPIES 枚集めると1枚に合体し、ランクが1上がる。
   // ランクは実効レア度を押し上げ、URを超えたぶんは「超人」段階になる。
+  HINT_INTERVAL_SEC: 25,                // 新機能の告知の最短間隔（[S25]。連続して流れるのを防ぐ）
   FUSION_COPIES: 5,                     // 合体に必要な枚数（消費して1枚になる）
   TRANSCEND_MAX: 3,                     // 超人の最大段階（URからさらに何段上げられるか）
   TRANSCEND_POWER_BONUS: 0.25,          // 超人1段ごとの倍率上乗せ
@@ -963,6 +972,8 @@ function migrateSave(data) {
     data.world.capitalIdx = null;
   }
   if (data.flags && data.flags.capitalWon == null) data.flags.capitalWon = false;
+  // v17: 勝利後の統治フェーズ。既に勝っているセーブも制覇率の表示に乗る
+  if (data.flags && data.flags.unifiedAt === undefined) data.flags.unifiedAt = null;
   for (const ai of (data.aiUsers || [])) if (ai.regionId === undefined) ai.regionId = null;
   // v7 → v8: 部隊編成。既存プレイヤーは第一隊が空の状態で始まり、
   // 出撃時に自動編成（従来と同じ「戦力上位N枚」）で埋まるため体験は変わらない
@@ -976,6 +987,19 @@ function migrateSave(data) {
   if (!data.player.buildings.some(b => b.type === "camp")) {
     const p = DEFAULT_BUILDING_LAYOUT.camp;
     data.player.buildings.push({ id: "b_camp", type: "camp", level: 1, upgradeEndsAt: null, x: p.x, y: p.y });
+  }
+
+  // v16 → v17: 新機能の気づき。既存セーブは「まだ何も告知していない」状態から始まる。
+  // すでに使っている機能は done を立てて、いまさら「使えます」と言わないようにする。
+  if (!data.hints) {
+    const p = data.player, done = {};
+    if ((p.cards || []).some(c => (c.rank || 0) > 0)) done.fusion = true;
+    if ((p.squads || []).filter(sq => (sq.cardUids || []).length).length > 1) done.squad = true;
+    if (p.research && (p.research.done.length || p.research.active)) done.research = true;
+    if ((p.outposts || []).some(o => (o.kind || "camp") === "camp")) done.outpost = true;
+    if ((p.outposts || []).some(o => o.kind === "fort")) done.fort = true;
+    if (data.alliance && data.alliance.order) done.order = true;
+    data.hints = { announced: { ...done }, done, nextAt: 0 };
   }
 
   // v15 → v16: 盟主の目標指示。指示なしの状態から始まるだけ
@@ -1472,10 +1496,11 @@ function generateAIUsers(world) {
  *                               // vault=同盟倉庫 / order=盟主の攻撃指示と包囲の進み具合([S24])
  *   aiUsers: [ AIUser ],        // スキーマは generateAIUsers 参照。defeated=true は滅亡済み
  *   aiMarches: [ {id,aiId,targetIdx,power,departAt,arriveAt} ],  // AIからの攻撃([S12])
- *   flags: { holyWon: bool },   // 一度きりイベントの発火記録
+ *   flags: { holyWon, capitalWon, unifiedAt },  // 一度きりイベントの発火記録
  *   chat: { messages:[{id,ts,senderId,text}], nextAmbientAt, unseen },  // 同盟チャット([S18])
  *   incident: {id,aiId,kind,createdAt,expiresAt}|null,  // 発生中の同盟内事件([S19])。同時1件
  *   nextIncidentCheckAt: number(ms),                    // 次の忠誠チェック時刻
+ *   hints: { announced:{id:bool}, done:{id:bool} },  // 新機能の気づき([S25])。告知済み／使用済み
  *   log: [{id,ts,kind,text}],   // 出来事ログ([S20])。上限 CONFIG.LOG_MAX、古い順に切り捨て
  *   logUnseen: number,          // ログの未読件数（開くと0）
  *   tutorial: { version, introSeen, didTenPull, completedAt },  // 初陣指南([S15A])
@@ -1519,10 +1544,11 @@ function newGameState() {
       order: null },                                      // 盟主の攻撃指示（[S24]）
     aiUsers,
     aiMarches: [],             // AIからプレイヤー領への攻撃部隊（[S12]）。到着で解決される
-    flags: { holyWon: false, capitalWon: false },
+    flags: { holyWon: false, capitalWon: false, unifiedAt: null },  // unifiedAt=天下統一した時刻（[S09]）
     chat: { messages: [], nextAmbientAt: 0, unseen: 0 },
     incident: null,            // 発生中の同盟内事件 {id,aiId,kind,createdAt,expiresAt} or null（同時1件）
     nextIncidentCheckAt: 0,    // 次の忠誠チェック時刻(ms)
+    hints: { announced: {}, done: {}, nextAt: 0 },  // 新機能の気づき（[S25]）。告知/使用の履歴と次回告知時刻
     log: [],                   // 出来事ログ [{id,ts,kind,text}]（上限 CONFIG.LOG_MAX）。[S20]
     logUnseen: 0,              // 未読件数（ログを開くと0）
     // 初陣指南([S15A])。現在ステップは保存せず毎回ゲーム状態から算出するため、
@@ -1647,6 +1673,7 @@ function shiftTimersForOffline() {
     if (ai.nextRecruitAt) ai.nextRecruitAt += gap;
   }
   if (S.chat && S.chat.nextAmbientAt) S.chat.nextAmbientAt += gap;
+  if (S.hints && S.hints.nextAt) S.hints.nextAt += gap;
   if (S.nextIncidentCheckAt) S.nextIncidentCheckAt += gap;
   if (S.incident) { S.incident.createdAt += gap; S.incident.expiresAt += gap; }
   return gap;
@@ -1757,12 +1784,60 @@ function isLegacyRuleset() {
   return !S.world.ruleset || S.world.ruleset === "legacy_v1";
 }
 /** 勝利バナーをルールセットに応じた文言で表示 */
+/* --- 勝利後の「天下の統治」フェーズ（Gemini第3回・改善案③）--------------
+ * 皇都を落とすと目的が消えてしまうのがもったいない、という指摘への対応。
+ * 勝利は終わりではなく段階の切り替わりにする。以降は制覇率が目標になる。 */
+/** 制覇の対象になるタイル総数（通行可能で、自城を除く）。起動時に1度だけ数える */
+function getConquestTotal() {
+  if (RUNTIME.conquestTotal == null) {
+    let n = 0;
+    for (let i = 0; i < S.world.tiles.length; i++) {
+      const t = S.world.tiles[i];
+      if (isBlockedType(t.type)) continue;
+      if (i === playerStartIdx()) continue;
+      n++;
+    }
+    RUNTIME.conquestTotal = n;
+  }
+  return RUNTIME.conquestTotal;
+}
+/** 制覇率（0〜100）。領有タイル数ベース */
+function getConquestPct() {
+  const total = getConquestTotal();
+  return total > 0 ? clamp(S.player.ownedTiles.length / total * 100, 0, 100) : 0;
+}
+/** 残っている（滅ぼしていない）AI勢力の数 */
+function getRemainingFactions() {
+  return S.aiUsers.filter(a => !a.defeated).length;
+}
+/** 勝利後フェーズに入っているか */
+function isRulingPhase() {
+  return !!(S.flags && (S.flags.holyWon || S.flags.capitalWon));
+}
+/** 天下を完全に統一したか（全勢力を滅ぼし、全タイルを領有） */
+function isFullyUnified() {
+  return isRulingPhase() && getRemainingFactions() === 0 && getConquestPct() >= 99.5;
+}
 function showWinBanner() {
   const el = $("winBanner"); if (!el) return;
-  el.textContent = isLegacyRuleset()
-    ? "⛩️ 聖地制圧！ 天下統一まであと一歩 ⛩️"
-    : "👑 皇都制圧！ 天下の覇権を握った 👑";
+  // 勝利後は「残る反乱軍を掃討せよ」という次の目標を出し続ける（目的を切らさない）
+  if (S.flags.unifiedAt) {
+    el.textContent = `🏆 天下統一 — 全${S.aiUsers.length}勢力を平定し、大陸のすべてを手にした`;
+  } else {
+    const rest = getRemainingFactions();
+    const head = isLegacyRuleset() ? "⛩️ 聖地制圧" : "👑 皇都制圧";
+    el.textContent = `${head} — 戦乱は平定された。残る反乱軍 ${rest} 勢力を掃討せよ ｜ 制覇率 ${getConquestPct().toFixed(1)}%`;
+  }
   el.classList.add("show");
+}
+/** tickから呼ばれる。統治フェーズの進み具合を見て、完全統一を1度だけ祝う */
+function rulingTick() {
+  if (!isRulingPhase() || S.flags.unifiedAt) return;
+  if (!isFullyUnified()) return;
+  S.flags.unifiedAt = now();
+  toast("🏆 天下統一！ すべての勢力を平定し、大陸のすべてを手にした", "win");
+  chatEvent("onHolyWin");
+  showWinBanner();
 }
 /** カード1枚の戦力 */
 function cardPower(defId) {
@@ -2183,7 +2258,7 @@ function getMarchableTiles(range, originIdx) {
 /* 本城からの地形距離（山・川を迂回した実距離）。行軍時間の算出に使う。
  * 1600マスのBFSを起動時とワールド生成時に1回だけ実行し、RAM上にだけ保持する
  * （派生値なのでセーブには入れない）。draw() から呼んではいけない。 */
-const RUNTIME = { terrainDistance: null };
+const RUNTIME = { terrainDistance: null, conquestTotal: null };  // conquestTotal=制覇率の母数（[S09]）
 function buildTerrainDistanceMap() {
   const dist = new Array(SIZE * SIZE).fill(Infinity);
   const start = playerStartIdx();
@@ -2203,6 +2278,7 @@ function buildTerrainDistanceMap() {
     }
   }
   RUNTIME.terrainDistance = dist;
+  RUNTIME.conquestTotal = null;   // 地形が変われば制覇の母数も変わる
   return dist;
 }
 /**
@@ -2352,6 +2428,8 @@ function resolveMarches(t) {
       // ここで資源タイル向けの祝辞まで続けると「良い土地を押さえました」等が重なって台無しになる
       if (!m.targetAiId) chatEvent("onPlayerCapture", { ctx: { tile: TILE_DEFS[tile.type].name } });
       gainAllianceLoyalty();   // 戦果は同盟員の忠誠にも効く
+      // 統治フェーズでは制覇率が目標になるので、制圧のたびに進み具合を出す
+      if (isRulingPhase()) toast(`🗺️ 制覇率 ${getConquestPct().toFixed(1)}% ｜ 残る勢力 ${getRemainingFactions()}`);
       // 勝利条件はワールドのルールセットで分岐する。
       // 旧ワールド(legacy_v1)=聖地の領有 / 地形ワールド(three_realms_v2)=皇都の制圧
       if (isLegacyRuleset()) {
@@ -2491,6 +2569,98 @@ function setMemberRole(memberId, role) {
     m.role = role;
     const ai = S.aiUsers.find(a => a.id === memberId);
     if (ai) chatEvent("onRole", { ai, sub: role }); // 任命された本人が応じる
+  }
+}
+
+/* =====================================================================
+ * [S25] DISCOVERY HINTS — 新機能の気づき（バッジ通知）
+ *
+ * Gemini第3回検品【問題2】への対応。初陣指南は最初のコアループ1周しか教えないため、
+ * カード合体・幕舎・防衛施設・研究・同盟倉庫・包囲の指示は自力で見つけるしかなかった。
+ *
+ * 2段構えにする:
+ *   ①解禁の告知 … 初めて条件を満たした瞬間に1度だけトースト＋記録（プッシュ）
+ *   ②タブのバッジ … 今できることがある間だけ点く（プル）。やれば自然に消える
+ *
+ * 「今できるか」は毎回ゲーム状態から算出し、保存しない（規約2）。
+ * 保存するのは「告知したか」「一度でも使ったか」の2つだけ。
+ * ===================================================================*/
+const HINT_DEFS = [
+  { id: "fusion", tab: "cards", icon: "✨", name: "カード合体",
+    desc: "同じカードが5枚たまりました。カードタブで合体させると強くなります",
+    ready: () => {
+      const n = {};
+      for (const c of S.player.cards) {
+        const k = c.defId + "|" + (c.rank || 0);
+        n[k] = (n[k] || 0) + 1;
+        if (n[k] >= CONFIG.FUSION_COPIES && getCardRankRoom(c) > 0) return true;
+      }
+      return false;
+    } },
+  { id: "squad", tab: "cards", icon: "⚔️", name: "部隊の増設",
+    desc: "兵舎が育ち、新しい部隊が使えるようになりました",
+    ready: () => getSquadSlots() > S.player.squads.filter(sq => sq.cardUids.length).length
+      && getSquadSlots() > 1 },
+  { id: "research", tab: "city", icon: "🔬", name: "研究ツリー",
+    desc: "研究所で研究を始められます（城タブの「🔬 研究」から）",
+    ready: () => !S.player.research.active && RESEARCH_DEFS.some(d => !getResearchBlocker(d)) },
+  { id: "outpost", tab: "map", icon: "⛺", name: "幕舎",
+    desc: "自分の領地をタップすると幕舎を築けます。前線の拠点になり、そこから出撃できます",
+    ready: () => countStructs("camp") === 0 && canAfford(CONFIG.OUTPOST_COST)
+      && S.player.ownedTiles.some(i => {
+        const t = S.world.tiles[i];
+        return t && t.type !== "castle" && !FORTRESS_TYPES.includes(t.type) && !getStructAt(i);
+      }) },
+  { id: "fort", tab: "map", icon: "🗼", name: "防衛施設",
+    desc: "本城Lv10に到達しました。自城や関所の近くに防衛施設を築けます",
+    ready: () => S.player.castleLevel >= CONFIG.FORT_REQUIRE_CASTLE_LV
+      && countStructs("fort") === 0 && S.player.ownedTiles.some(i => isFortBuildable(i)) },
+  { id: "vault", tab: "alliance", icon: "🏛", name: "同盟倉庫",
+    desc: "同盟員が資源を納めています。同盟タブから引き出せます",
+    ready: () => getVaultCap() > 0
+      && RES_KEYS.reduce((a, k) => a + ((S.alliance.vault || {})[k] || 0), 0) >= 1000 },
+  { id: "order", tab: "alliance", icon: "📣", name: "攻撃の下知",
+    desc: "同盟員に攻撃目標を指示できます。包囲すると硬い城や関所の防御が下がります",
+    ready: () => !S.alliance.order && allianceAIs().length > 0 },
+];
+const HINT_BY_ID = Object.fromEntries(HINT_DEFS.map(h => [h.id, h]));
+
+/** その機能を「今できる」か。使用済みなら促さない */
+function isHintActive(h) {
+  if (!S.hints) return false;
+  if (S.hints.done[h.id]) return false;
+  try { return !!h.ready(); } catch (e) { return false; }
+}
+/** タブに出すバッジの数（0なら出さない） */
+function getHintCount(tab) {
+  return HINT_DEFS.filter(h => h.tab === tab && isHintActive(h)).length;
+}
+/** そのタブで今できることの一覧（ヒント行の表示に使う） */
+function getHintsFor(tab) {
+  return HINT_DEFS.filter(h => h.tab === tab && isHintActive(h));
+}
+/** 一度でも使ったら以後は促さない。各操作の成功時に呼ぶ */
+function markHintDone(id) {
+  if (!S.hints) return;
+  if (!S.hints.done[id]) { S.hints.done[id] = true; updateHintBadges(); }
+}
+/**
+ * tickから呼ばれる。初めて条件を満たした機能を1度だけ告知する。
+ * 指南中は出さない（手順に集中させるため。指南は約1分で終わる）。
+ */
+function hintTick() {
+  if (!S.hints) return;
+  if (CONFIG.TUTORIAL_HIDE_ADVANCED_UI && isGuiding()) return;
+  // tickは毎秒なので、間隔を空けないと複数の告知が一瞬でまとめて流れて読み飛ばされる
+  const t = now();
+  if (t < (S.hints.nextAt || 0)) return;
+  for (const h of HINT_DEFS) {
+    if (S.hints.announced[h.id] || S.hints.done[h.id]) continue;
+    if (!isHintActive(h)) continue;
+    S.hints.announced[h.id] = true;
+    S.hints.nextAt = t + CONFIG.HINT_INTERVAL_SEC * 1000;
+    toast(`${h.icon} ${h.name} が使えます — ${h.desc}`, "hint");
+    break;                     // 一度に1件だけ
   }
 }
 
@@ -4233,6 +4403,7 @@ const LOG_KINDS = {
   defend:   { color: "#7fd4c0" },  // AIの攻撃を撃退した
   research: { color: "#8fd0e8" },  // 研究完了
   fuse:     { color: "#e0a0d0" },  // カード合体で強化
+  hint:     { color: "#7fd4c0" },  // 新しく使えるようになった機能の告知
   win:      { color: "#e8b84a" },  // 聖地制圧＝勝利
   build:    { color: "#9ab6e0" },  // 建物の強化完了
   ally:     { color: "#d0a0e0" },  // 同盟（勧誘・事件の結末）
@@ -4275,8 +4446,11 @@ function updateMapBadge() {
   // 指南中は記録ボタンも隠す（この時期に見返すべき出来事はまだ無い）
   const logBtn = $("logBtn");
   if (logBtn) logBtn.style.display = (CONFIG.TUTORIAL_HIDE_ADVANCED_UI && S && getTutorialStep()) ? "none" : "";
+  const hint = CONFIG.TUTORIAL_HIDE_ADVANCED_UI && isGuiding() ? 0 : getHintCount("map");
   for (const id of ["mapBadge", "mapCtrlBadge"]) {
     const el = $(id); if (!el) continue;
+    // 未読ログが無くても、マップで「今できること」があれば●で知らせる
+    if (!n && hint && id === "mapBadge") { el.textContent = "●"; el.style.display = ""; continue; }
     el.textContent = n > 9 ? "9+" : (n || "");
     el.style.display = n > 0 ? "" : "none";
   }
@@ -4290,6 +4464,8 @@ function updateMapBadge() {
 let activeTab = "map";
 
 function renderHeader() {
+  // 統治フェーズ中はバナーの制覇率を追従させる（領地が増減するたびに変わる）
+  if (S && isRulingPhase()) showWinBanner();
   const cap = getStorageCap();
   const per = getProdPerHour();
   $("header").innerHTML =
@@ -4653,13 +4829,32 @@ function renderChatLog(forceBottom) {
   if (forceBottom || near) box.scrollTop = box.scrollHeight;
 }
 /** 同盟タブの未読バッジ更新（tickから呼ぶ） */
+/** 初陣指南の最中か（進行中のステップがある間） */
+function isGuiding() { return !!(S && getTutorialStep()); }
 function updateChatBadge() {
   const el = $("chatBadge"); if (!el) return;
   const n = (S.chat && S.chat.unseen) || 0;
   // 事件発生中は未読数より優先して「!」を出す（対処待ちを見逃さないため）
   if (S.incident) { el.textContent = "!"; el.style.display = ""; return; }
+  // 未読が無くても、同盟タブで「今できること」があれば●で知らせる
+  const hint = getHintCount("alliance");
+  if (!n && hint) { el.textContent = "●"; el.style.display = ""; return; }
   el.textContent = n > 9 ? "9+" : (n || "");
   el.style.display = n > 0 ? "" : "none";
+}
+/**
+ * 城・カードタブの「今できること」バッジ（[S25]）。
+ * 数字ではなく●にしているのは、未読件数ではなく「新しい操作がある」ことの合図だから。
+ * 指南中は出さない（手順に集中させるため）。
+ */
+function updateHintBadges() {
+  const guiding = CONFIG.TUTORIAL_HIDE_ADVANCED_UI && isGuiding();
+  for (const [id, tab] of [["cityBadge", "city"], ["cardsBadge", "cards"]]) {
+    const el = $(id); if (!el) continue;
+    const n = guiding ? 0 : getHintCount(tab);
+    el.textContent = "●";
+    el.style.display = n > 0 ? "" : "none";
+  }
 }
 
 /* =====================================================================
@@ -5317,6 +5512,7 @@ const UIA = {
   issueOrder(ti) {
     const err = issueOrder(ti);
     if (err) { toast("⚠️ " + err); return; }
+    markHintDone("order");
     openTileSheet(ti); MapView.draw();
   },
   cancelOrder() {
@@ -5328,17 +5524,20 @@ const UIA = {
   withdrawVault() {
     const err = withdrawVault();
     if (err) { toast("⚠️ " + err); return; }
+    markHintDone("vault");
     renderAlliance(); renderHeader();
   },
   /* --- 幕舎・駐留([S23]) --- */
   buildOutpost(ti) {
     const err = buildOutpost(ti);
     if (err) { toast("⚠️ " + err); return; }
+    markHintDone("outpost");
     invalidateMarchable(); openTileSheet(ti); renderHeader(); MapView.draw();
   },
   buildFort(ti) {
     const err = buildFort(ti);
     if (err) { toast("⚠️ " + err); return; }
+    markHintDone("fort");
     openTileSheet(ti); renderHeader(); MapView.draw();
   },
   removeStruct(ti) {
@@ -5359,6 +5558,7 @@ const UIA = {
   fuse(defId, rank) {
     const err = fuseCards(defId, rank);
     if (err) { toast("⚠️ " + err); return; }
+    markHintDone("fusion");
     renderCards();
   },
   /* --- 研究ツリー([S21]) --- */
@@ -5366,6 +5566,7 @@ const UIA = {
   research(id) {
     const err = startResearch(id);
     if (err) { toast("⚠️ " + err); return; }
+    markHintDone("research");
     renderHeader(); openResearchSheet();
   },
   rushResearch() {
@@ -5384,6 +5585,7 @@ const UIA = {
      編成の実体は従来どおり uid 単位で持つ。 */
   /** 同名カードから未使用の1枚を編成に加える */
   addCardToSquad(squadId, defId, rank) {
+    markHintDone("squad");
     const sq = getSquad(squadId); if (!sq) return;
     materializeAutoSquad(squadId);   // 自動編成のままだと1枚追加で他が消えるので先に固定する
     if (sq.cardUids.length >= CONFIG.SQUAD_SIZE) { toast(`⚠️ 1部隊は${CONFIG.SQUAD_SIZE}枚までです`); return; }
@@ -5705,12 +5907,41 @@ function citySummaryHTML() {
   const per = getProdPerHour();
   return `<h3>🏯 本城 Lv${S.player.castleLevel} ｜ 部隊戦力 ${fmt(getArmyPower())}</h3>
     <div class="dim small">毎時 ${RES_KEYS.map(k => RES_DEFS[k].emoji + fmt(per[k])).join(" ")} 💎${fmt(per.diamonds)}
-    ｜ 倉庫容量 ${fmt(getStorageCap())}</div>`;
+    ｜ 倉庫容量 ${fmt(getStorageCap())}</div>
+    ${researchRowHTML()}`;
+}
+/**
+ * 城タブ最上部に置く研究の常設行（Gemini第3回【問題3】への対応）。
+ * 研究は中盤以降の育成方針を決める最重要要素なのに「研究所をタップ→研究ツリー」の
+ * 2段階の奥にあり、進行の節目で見る習慣がつかなかった。ここから直接開けるようにする。
+ */
+function researchRowHTML() {
+  const r = S.player.research;
+  const a = r.active;
+  const done = r.done.length, total = RESEARCH_DEFS.length;
+  let state, cls = "";
+  if (a) {
+    const def = RESEARCH_BY_ID[a.id];
+    state = `<span style="color:var(--accent)">⏳ ${def.icon} ${def.name}</span>
+      <span class="dim">完成まで ${fmtSec((a.endsAt - now()) / 1000)}</span>`;
+  } else {
+    const ready = RESEARCH_DEFS.filter(d => !getResearchBlocker(d));
+    if (ready.length) { state = `<span class="rel-good">✨ ${ready.length}件 研究できます</span>`; cls = " ready"; }
+    else state = `<span class="dim">条件を満たす研究がありません</span>`;
+  }
+  return `<button class="research-row${cls}" onclick="UIA.openResearch()">
+    <span class="grow"><b>🔬 研究</b> <span class="dim small">${done}/${total} 完了</span><br>
+      <span class="small">${state}</span></span>
+    <span class="research-row-go">›</span></button>`;
 }
 /** tick用の署名。type/level/強化中・本城Lvが変われば全再構築（それ以外は軽量更新） */
 function citySignature() {
+  const r = S.player.research;
+  // 研究の常設行が古いままにならないよう、研究状態も再描画の判定に含める
+  const res = (r.active ? "A" + r.active.id : "-") + ":" + r.done.length
+    + ":" + RESEARCH_DEFS.filter(d => !getResearchBlocker(d)).length;
   return S.player.buildings.map(b => b.type + ":" + b.level + (b.upgradeEndsAt ? "U" : "")).join("|")
-    + "#" + S.player.castleLevel;
+    + "#" + S.player.castleLevel + "#" + res;
 }
 /** 建物1つぶんのDOM文字列 */
 function cityNodeHTML(b) {
@@ -5925,8 +6156,11 @@ function tick() {
   checkTutorialProgress();
   renderHeader();
   renderGuideBar();
+  rulingTick();
+  hintTick();
   updateChatBadge();
   updateMapBadge();
+  updateHintBadges();
   // 同盟タブはselect/入力保護のため、構成が変わった時だけ full 再描画（入力中の文字は保全）。
   // タップ中はclick保護のため再描画しない。
   if (!pointerHeld) {
