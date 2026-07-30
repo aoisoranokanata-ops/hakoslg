@@ -411,7 +411,7 @@ const CONFIG = {
   DEV_MODE: false,                      // trueで開発用UI（ガチャタブの画像取り込み等）を表示
   SAVE_KEY: "hakoslg_save_v1",          // localStorageキー（名前空間 hakoslg_）
   ASSET_DB: "hakoslg_assets",           // IndexedDB名（画像アセット）
-  SAVE_VERSION: 19,                    // v19: 武将レベル（cards[].level/exp）
+  SAVE_VERSION: 20,                    // v20: 第二ステージ（stage）とレベル上限20
   LOG_MAX: 30,                         // 保持する出来事ログの最大件数
 
   // --- 初陣指南（[S15A]。最初の約1分でコアループを1周させる導線） ---
@@ -495,6 +495,17 @@ const CONFIG = {
   CASTLE_WOOD_BASE: 1100,               // 本城Lv2→3で必要な木材
   CASTLE_STONE_BASE: 900,               // 同・石材
   CASTLE_COST_GROWTH: 1.6,              // 本城レベルごとの増加率（倉庫の拡張が追いつく速さ）
+
+  // --- 第二ステージと高レベル帯（DESIGN_S2.md §4）---
+  // maxLevel を単に20にすると Lv16→17 の本城コスト(792.6k)が倉庫容量(668.6k)を超えて
+  // **物理的に進めなくなる**（実測で確認）。指数を段階化して釣り合いを取る。
+  // Lv1〜10 の体験は一切変えない（分岐は Lv11 以降にだけ効く）。
+  STAGE2_CASTLE_LV: 10,                 // 第二ステージ開始に必要な本城レベル（＋皇都制圧）
+  BUILDING_MAX_LV_STAGE2: 20,           // 第二ステージで解放される建物レベル上限
+  HIGH_LV_FROM: 11,                     // ここから高レベル帯の式に切り替わる
+  CASTLE_COST_GROWTH_HIGH: 1.35,        // 本城コストの増加率（Lv11以降）
+  WAREHOUSE_CAP_EXP_HIGH: 2.5,          // 倉庫容量の追加指数（Lv11以降に (Lv/10)^これ を掛ける）
+  PROD_HIGH_BONUS_PER_LV: 0.08,         // 建物生産の上乗せ（Lv11以降。線形だと倉庫に追いつかない）
 
   // --- 資源・生産 ---
   START_RESOURCES: { food: 1000, wood: 1000, stone: 600, iron: 300 },
@@ -1053,6 +1064,13 @@ function migrateSave(data) {
     data.player.buildings.push({ id: "b_camp", type: "camp", level: 1, upgradeEndsAt: null, x: p.x, y: p.y });
   }
 
+  // v19 → v20: 第二ステージ。すでに条件を満たしているセーブは2から始める
+  if (data.stage == null) {
+    const won = data.flags && (data.flags.holyWon || data.flags.capitalWon);
+    const lv = (data.player.buildings || []).find(b => b.type === "castle");
+    data.stage = (won && lv && lv.level >= CONFIG.STAGE2_CASTLE_LV) ? 2 : 1;
+  }
+
   // v18 → v19: 武将レベル。既存カードは全てLv1・経験値0から始まる
   for (const c of (data.player.cards || [])) {
     if (c.level == null) c.level = 1;
@@ -1583,6 +1601,7 @@ function generateAIUsers(world) {
  *   },
  *   alliance: { id, name, members:[{id,role}], vault:{...}, order:{targetIdx,issuedAt,siege}|null },
  *                               // vault=同盟倉庫 / order=盟主の攻撃指示と包囲の進み具合([S24])
+ *   stage: 1 | 2,               // 進行段階。2=第二ステージ（皇都制圧＋本城Lv10で解放）
  *   aiUsers: [ AIUser ],        // スキーマは generateAIUsers 参照。defeated=true は滅亡済み
  *   aiMarches: [ {id,aiId,targetIdx,power,departAt,arriveAt} ],  // AIからの攻撃([S12])
  *   flags: { holyWon, capitalWon, unifiedAt },  // 一度きりイベントの発火記録
@@ -1631,6 +1650,7 @@ function newGameState() {
     alliance: { id: "ally_player", name: "無名同盟", members: [{ id: "player", role: "盟主" }],
       vault: { food: 0, wood: 0, stone: 0, iron: 0 },     // 同盟倉庫（[S24]）
       order: null },                                      // 盟主の攻撃指示（[S24]）
+    stage: 1,                  // 進行段階（[S09]）。2で建物レベル上限が20に解放される
     aiUsers,
     aiMarches: [],             // AIからプレイヤー領への攻撃部隊（[S12]）。到着で解決される
     flags: { holyWon: false, capitalWon: false, unifiedAt: null },  // unifiedAt=天下統一した時刻（[S09]）
@@ -1661,7 +1681,8 @@ function getProdPerHour() {
   // 建物生産
   for (const b of S.player.buildings) {
     const def = BUILDING_DEFS[b.type];
-    if (def.prodType) out[def.prodType] += def.prodBase * b.level;
+    // Lv11以降は線形のままだと倉庫容量の伸びに追いつかず、終盤が待ち時間になる
+    if (def.prodType) out[def.prodType] += def.prodBase * b.level * getBuildingProdBonus(b.level);
   }
   // 領有タイル生産＋ダイヤ
   let tileLevelSum = 0;
@@ -1682,10 +1703,19 @@ function getProdPerHour() {
   out.diamonds = tileLevelSum * CONFIG.DIAMOND_PER_TILELEVEL_PER_HOUR * (rb.diamond || 1);
   return out;
 }
+/** 高レベル帯の生産上乗せ（Lv10以下は1.0＝従来どおり） */
+function getBuildingProdBonus(lv) {
+  const hi = CONFIG.HIGH_LV_FROM - 1;
+  return lv > hi ? 1 + CONFIG.PROD_HIGH_BONUS_PER_LV * (lv - hi) : 1;
+}
 /** 倉庫容量（食料/木材/石材/鉄の各上限） */
 function getStorageCap() {
   const lv = getBuilding("warehouse").level;
-  return Math.floor(CONFIG.WAREHOUSE_CAP_BASE * Math.pow(lv, 1.7) * researchMult("cap"));
+  // Lv10以下は従来と完全に同じ。Lv11以降だけ伸びを加速させて本城コストに追いつかせる。
+  const hi = CONFIG.HIGH_LV_FROM - 1;   // 10
+  const base = CONFIG.WAREHOUSE_CAP_BASE * Math.pow(Math.min(lv, hi), 1.7);
+  const ext = lv > hi ? Math.pow(lv / hi, CONFIG.WAREHOUSE_CAP_EXP_HIGH) : 1;
+  return Math.floor(base * ext * researchMult("cap"));
 }
 /**
  * 兵力の自然回復と、徴兵所による予備兵の蓄積（tickから呼ぶ）。
@@ -1797,7 +1827,13 @@ function getUpgradeCost(b) {
   // 本城だけを一気に伸ばすことができない。
   // （Lv1→2は従来コスト。初陣指南②が達成できなくなるのを避けるため）
   if (b.type === "castle" && b.level >= 2) {
-    const g = Math.pow(CONFIG.CASTLE_COST_GROWTH, b.level - 2);
+    // Lv2〜10は従来どおり×1.6。Lv11以降は×1.35に緩める。
+    // 緩めないと倉庫容量が追いつかず Lv16 で詰む（DESIGN_S2.md §4-1 の実測）。
+    const hi = CONFIG.HIGH_LV_FROM;
+    const g = b.level < hi
+      ? Math.pow(CONFIG.CASTLE_COST_GROWTH, b.level - 2)
+      : Math.pow(CONFIG.CASTLE_COST_GROWTH, hi - 3)
+        * Math.pow(CONFIG.CASTLE_COST_GROWTH_HIGH, b.level - (hi - 1));
     cost.wood = Math.max(cost.wood || 0, Math.floor(CONFIG.CASTLE_WOOD_BASE * g));
     cost.stone = Math.max(cost.stone || 0, Math.floor(CONFIG.CASTLE_STONE_BASE * g));
   }
@@ -1827,7 +1863,7 @@ function startUpgrade(type) {
   const b = getBuilding(type);
   const def = BUILDING_DEFS[type];
   if (b.upgradeEndsAt) return "アップグレード中です";
-  if (b.level >= def.maxLevel) return "最大レベルです";
+  if (b.level >= getBuildingMaxLevel(b.type)) return "最大レベルです";
   if (type !== "castle" && b.level >= S.player.castleLevel) return "本城レベルが必要です";
   const extra = getExtraSlotCost();
   if (extra && Math.floor(S.player.diamonds) < extra) {
@@ -1898,6 +1934,29 @@ function getConquestPct() {
 /** 残っている（滅ぼしていない）AI勢力の数 */
 function getRemainingFactions() {
   return S.aiUsers.filter(a => !a.defeated).length;
+}
+/* --- 第二ステージ（DESIGN_S2.md §3-1）--------------------------------
+ * 皇都を制圧し、かつ本城Lv10に達すると始まる。建物レベル上限20の解放が報酬。
+ * 異民族の流入は 6-4 で載せる。 */
+/** 第二ステージに入っているか */
+function isStage2() { return (S && S.stage) >= 2; }
+/** 第二ステージの開始条件を満たしているか */
+function canEnterStage2() {
+  return isRulingPhase() && S.player.castleLevel >= CONFIG.STAGE2_CASTLE_LV;
+}
+/** tickから呼ばれる。条件を満たしたら一度だけ第二ステージへ進める */
+function stageTick() {
+  if (!S || isStage2() || !canEnterStage2()) return;
+  S.stage = 2;
+  toast(`⚔️ 第二ステージ開始 — 建物レベルの上限が ${CONFIG.BUILDING_MAX_LV_STAGE2} まで解放された`, "win");
+  logEvent("win", "🏯 皇都を制した者として、さらなる高みへ。建物レベル上限 "
+    + CONFIG.BUILDING_MAX_LV_STAGE2 + " 解放");
+  citySig = null;   // 城タブの「MAX」表示を作り直す
+}
+/** 建物のレベル上限。静的定義は触らず、ステージで返り値を変える（規約2） */
+function getBuildingMaxLevel(type) {
+  const base = BUILDING_DEFS[type].maxLevel;
+  return isStage2() ? Math.max(base, CONFIG.BUILDING_MAX_LV_STAGE2) : base;
 }
 /** 勝利後フェーズに入っているか */
 function isRulingPhase() {
@@ -6597,7 +6656,7 @@ function cityNodeHTML(b) {
   const pos = cellToPct(b.x ?? 0, b.y ?? 0);
   const cls = "bld tier-" + tier + (b.type === "castle" ? " big" : "") + (b.upgradeEndsAt ? " upgrading" : "");
   const status = b.upgradeEndsAt ? "⏳" + fmtSec((b.upgradeEndsAt - now()) / 1000)
-    : (b.level >= def.maxLevel ? "MAX" : "");
+    : (b.level >= getBuildingMaxLevel(b.type) ? "MAX" : "");
   return `<div class="${cls}" data-type="${b.type}" style="left:${pos.left}%;top:${pos.top}%">
       <div class="bld-flags">${"★".repeat(tier)}</div>
       <div class="bld-icon">${artHTML(artTierKey(def.imageKey, b.level), def.emoji)}</div>
@@ -6659,7 +6718,7 @@ function openBuildingSheet(type) {
     body += `<div class="small" id="sheetCountdown" style="margin-top:8px;color:var(--accent)">⏳ 完成まで ${fmtSec((b.upgradeEndsAt - t) / 1000)}</div>`;
     actions.push(`<button class="primary" ${Math.floor(S.player.diamonds) < rush ? "disabled" : ""}
       onclick="UIA.rush('${type}')">⚡ 即完了（💎<span id="sheetRush">${rush}</span>）</button>`);
-  } else if (b.level >= def.maxLevel) {
+  } else if (b.level >= getBuildingMaxLevel(type)) {
     body += `<div class="small" style="margin-top:8px">最大レベルに到達しています</div>`;
   } else {
     const cost = getUpgradeCost(b);
@@ -6739,7 +6798,7 @@ function updateCityLive() {
   for (const b of S.player.buildings) {
     const st = $("st-" + b.type);
     if (st) st.textContent = b.upgradeEndsAt ? "⏳" + fmtSec((b.upgradeEndsAt - t) / 1000)
-      : (b.level >= BUILDING_DEFS[b.type].maxLevel ? "MAX" : "");
+      : (b.level >= getBuildingMaxLevel(b.type) ? "MAX" : "");
   }
   if (openBuildingType) {
     const b = getBuilding(openBuildingType), cd = $("sheetCountdown");
@@ -6803,6 +6862,7 @@ function tick() {
   checkTutorialProgress();
   renderHeader();
   renderGuideBar();
+  stageTick();
   rulingTick();
   hintTick();
   updateChatBadge();
