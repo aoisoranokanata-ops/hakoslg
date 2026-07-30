@@ -189,6 +189,13 @@ select{font:inherit;color:var(--fg);background:var(--bg3);border:1px solid var(-
 .card-detail-stat{flex:1;min-width:0}
 .stat-row{display:flex;align-items:baseline;gap:6px;font-size:12px;padding:2px 0;border-bottom:1px solid var(--line)}
 .stat-row span:first-child{width:34px;color:var(--fg-dim)}
+/* 武将レベルの育成箱（[S26]） */
+/* 育成の入口ボタン。.stack-btn は「±」用の細いボタンなので流用すると縦に潰れる */
+.train-btn{display:block;width:100%;min-height:40px;margin-top:6px;padding:6px 10px;font-size:12px;
+  border-radius:8px;background:var(--bg2);border:1px solid var(--line);color:var(--fg)}
+.level-box{margin-top:10px;padding:8px 10px;border-radius:8px;background:var(--bg3);border-left:3px solid #8fd0a0}
+.lv-badge{display:inline-block;margin-left:4px;padding:0 4px;border-radius:4px;
+  background:#8fd0a0;color:#12201a;font-size:9px;font-weight:700}
 .feed-box{margin-top:10px;padding:8px 10px;border-radius:8px;background:var(--bg2);border:1px solid var(--line)}
 .feed-list{max-height:32dvh;overflow-y:auto;margin-top:5px}
 .feed-row{display:flex;align-items:center;gap:6px;padding:3px 0;border-top:1px solid var(--line)}
@@ -404,7 +411,7 @@ const CONFIG = {
   DEV_MODE: false,                      // trueで開発用UI（ガチャタブの画像取り込み等）を表示
   SAVE_KEY: "hakoslg_save_v1",          // localStorageキー（名前空間 hakoslg_）
   ASSET_DB: "hakoslg_assets",           // IndexedDB名（画像アセット）
-  SAVE_VERSION: 18,                    // v18: 必殺技（cards[].skillLv/skillExp）
+  SAVE_VERSION: 19,                    // v19: 武将レベル（cards[].level/exp）
   LOG_MAX: 30,                         // 保持する出来事ログの最大件数
 
   // --- 初陣指南（[S15A]。最初の約1分でコアループを1周させる導線） ---
@@ -613,6 +620,16 @@ const CONFIG = {
   FORT_AURA_RANGE: 2,                   // その範囲
   FORT_INTERCEPT_RANGE: 3,              // 施設は駐留部隊なしでも迎撃する
   FORT_INTERCEPT_POWER: 1200,           // 迎撃で削る固定量
+
+  // --- 武将レベル（[S26]・DESIGN_S2.md §1）---
+  // 素のステータスが伸びる軸。素材は SR以上（N/Rは戦法へ回す）。
+  CARD_LEVEL_MAX: 30,                   // 武将レベルの上限（レア度によらず一律）
+  CARD_STAT_PER_LEVEL: 0.035,           // ステータス倍率 = 1 + これ×(Lv-1) → Lv30で×2.015
+  CARD_EXP_BASE: 6,                     // Lv1→2に必要な経験値
+  CARD_EXP_GROWTH: 1.18,                // 以降 ×これ。Lv30までの累計は約4,000
+  CARD_EXP_BY_RARITY: { N: 0, R: 0, SR: 40, SSR: 120, UR: 0 },  // 0＝素材にならない
+  CARD_FEED_MIN_RARITY: "SR",           // これ以上のレア度だけ素材にできる
+  CARD_TRAIN_FOOD: 500,                 // 素材1枚あたりの食料
 
   // --- 必殺技（戦法）[S26] ---
   // 低レア武将を素材にして必殺技レベルを上げる。引いたけど使わない武将に使い道を作る。
@@ -1034,6 +1051,12 @@ function migrateSave(data) {
   if (!data.player.buildings.some(b => b.type === "camp")) {
     const p = DEFAULT_BUILDING_LAYOUT.camp;
     data.player.buildings.push({ id: "b_camp", type: "camp", level: 1, upgradeEndsAt: null, x: p.x, y: p.y });
+  }
+
+  // v18 → v19: 武将レベル。既存カードは全てLv1・経験値0から始まる
+  for (const c of (data.player.cards || [])) {
+    if (c.level == null) c.level = 1;
+    if (c.exp == null) c.exp = 0;
   }
 
   // v17 → v18: 必殺技。既存カードは全てLv1・経験値0から始まる
@@ -1545,8 +1568,8 @@ function generateAIUsers(world) {
  *     resources: {food,wood,stone,iron},   // 浮動小数。表示はfloor
  *     diamonds: number,         // プレミア通貨。容量キャップなし
  *     ownedTiles: [tileIndex],  // 制圧済みタイル（自城タイルは含まない）
- *     cards: [ {uid,defId,obtainedAt,rank,skillLv,skillExp} ], // ガチャ獲得カード（重複可）
- *                                          // rank=合体強化段数([S22]) / skillLv,skillExp=必殺技([S26])
+ *     cards: [ {uid,defId,obtainedAt,rank,skillLv,skillExp,level,exp} ], // ガチャ獲得カード（重複可）
+ *                                          // rank=合体強化段数([S22]) / skillLv,skillExp=必殺技 / level,exp=武将レベル([S26])
  *     squads: [ {id,name,cardUids[],troops,stationedAt} ], // 出撃部隊([S09])。兵舎Lvで解禁数が増える
  *                                          // stationedAt=駐留地のtileIndex([S23])。nullなら本城詰め
  *                                          // cardUidsが空なら出撃時に自動編成で補う
@@ -1591,8 +1614,8 @@ function newGameState() {
       diamonds: CONFIG.START_DIAMONDS,
       ownedTiles: [],
       cards: [
-        { uid: uid("c"), defId: "n_taichi", obtainedAt: t, rank: 0, skillLv: 1, skillExp: 0 },
-        { uid: uid("c"), defId: "n_kosuzu", obtainedAt: t, rank: 0, skillLv: 1, skillExp: 0 },
+        { uid: uid("c"), defId: "n_taichi", obtainedAt: t, rank: 0, skillLv: 1, skillExp: 0, level: 1, exp: 0 },
+        { uid: uid("c"), defId: "n_kosuzu", obtainedAt: t, rank: 0, skillLv: 1, skillExp: 0, level: 1, exp: 0 },
       ],
       // 出撃部隊。兵舎レベルで解禁数が増える（[S09]）。空なら自動編成で補われる
       // troops は現在兵力。-1 は未初期化で、初回参照時に最大兵力で満たす
@@ -1910,6 +1933,81 @@ function cardPower(defId) {
   const d = CARD_BY_ID[defId];
   return Math.round((d.atk * 1.2 + d.lead * 1.0 + d.int * 0.6) * RARITY_MULT[d.rarity]);
 }
+/* --- 武将レベル（[S26]・DESIGN_S2.md §1）--------------------------------
+ * 素のステータスが伸びる軸。素材は **SR以上**。
+ * これで所持カードの軸が3つに分かれ、レア度ごとの役割が完全に決まる:
+ *   N/R   … 戦法（skillLv）の素材。大量に湧くので受け皿になる
+ *   SR    … 武将レベルの素材
+ *   SSR/UR… 育てる対象（Lv30・必殺技Lv10・合体で終盤まで伸びる）
+ * 合体の rankMult とは**独立に掛ける**ので、接続点は cardPowerOf / cardLeadOf の2つだけ。 */
+/** 武将レベル（未初期化は1） */
+function getCardLevel(card) {
+  return clamp(card.level || 1, 1, CONFIG.CARD_LEVEL_MAX);
+}
+/** 武将レベルによる素ステータスの倍率。Lv30で ×2.015 */
+function getCardLevelMult(card) {
+  return 1 + CONFIG.CARD_STAT_PER_LEVEL * (getCardLevel(card) - 1);
+}
+/** 次のレベルに必要な経験値 */
+function getCardExpNeed(lv) {
+  return Math.round(CONFIG.CARD_EXP_BASE * Math.pow(CONFIG.CARD_EXP_GROWTH, lv - 1));
+}
+/** 素材1枚が与える経験値（レア度で決まる。N/RとURは0＝素材にならない） */
+function getCardFeedExp(card) {
+  return CONFIG.CARD_EXP_BY_RARITY[getCardRarity(card)] || 0;
+}
+/** 武将レベルの素材にできるか。SR以上・編成中は不可・自分自身は不可 */
+function canFeedForLevel(card, targetUid) {
+  if (!card || card.uid === targetUid) return false;
+  if (getCardFeedExp(card) <= 0) return false;                 // N/R/UR は経験値0
+  // RARITY_ORDER は「小さいほど希少」。SR以上＝ORDERがSR以下
+  if (RARITY_ORDER[getCardRarity(card)] > RARITY_ORDER[CONFIG.CARD_FEED_MIN_RARITY]) return false;
+  for (const sq of S.player.squads) if (sq.cardUids.includes(card.uid)) return false;
+  return true;
+}
+function getLevelFeedCandidates(targetUid) {
+  return S.player.cards.filter(c => canFeedForLevel(c, targetUid))
+    .sort((a, b) => cardPowerOf(a) - cardPowerOf(b));           // 弱い順＝先に捧げるべき順
+}
+/**
+ * 武将を消費して対象のレベルを上げる。失敗理由 or null。
+ * 統率が伸びる＝最大兵力が変わるので withTroopRatioPreserved で包む
+ * （包まないと最大だけ増えて充足率が下がり「育てたのに弱くなる」）。
+ */
+function trainCardLevel(targetUid, feedUids) {
+  const card = S.player.cards.find(c => c.uid === targetUid);
+  if (!card) return "対象の武将が見つかりません";
+  const max = CONFIG.CARD_LEVEL_MAX;
+  if (getCardLevel(card) >= max) return `すでに最大レベルです（Lv${max}）`;
+  const feeds = (feedUids || []).map(u => S.player.cards.find(c => c.uid === u)).filter(Boolean);
+  if (!feeds.length) return "素材にする武将を選んでください";
+  if (feeds.some(f => !canFeedForLevel(f, targetUid))) {
+    return "SR・SSR で、どの部隊にも編成していない武将だけが素材になります";
+  }
+  const cost = feeds.length * CONFIG.CARD_TRAIN_FOOD;
+  if (S.player.resources.food < cost) return `食料が足りません（${fmt(cost)}必要）`;
+
+  S.player.resources.food -= cost;
+  const burn = new Set(feeds.map(f => f.uid));
+  S.player.cards = S.player.cards.filter(c => !burn.has(c.uid));
+  const gain = feeds.reduce((a, f) => a + getCardFeedExp(f), 0);
+  let exp = (card.exp || 0) + gain;
+  let lv = getCardLevel(card), up = 0;
+  while (lv < max && exp >= getCardExpNeed(lv)) { exp -= getCardExpNeed(lv); lv++; up++; }
+  if (lv >= max) exp = 0;                    // 上限に達したら余りは繰り越さない
+  withTroopRatioPreserved(S.player.squads.map(sq => sq.id), () => {
+    card.level = lv; card.exp = exp;
+  });
+  const d = CARD_BY_ID[card.defId];
+  const m = getCardLevelMult(card);
+  toast(up
+    ? `📈 ${d.name} が Lv${lv} に成長！ 武${Math.round(d.atk * m * getCardRankMult(card))}
+       知${Math.round(d.int * m * getCardRankMult(card))} 統${Math.round(d.lead * m * getCardRankMult(card))}`.replace(/\s+/g, " ")
+    : `📈 ${d.name} に経験を積んだ（次のLvまで ${fmt(getCardExpNeed(lv) - exp)}）`,
+    up ? "grow" : null);
+  return null;
+}
+
 /**
  * 必殺技（戦法）の定義。[S26]
  *
@@ -2116,14 +2214,22 @@ function getCardRankMult(card) {
   const rar = RARITY_MULT[getCardRarity(card)] / RARITY_MULT[d.rarity];
   return rar * (1 + CONFIG.TRANSCEND_POWER_BONUS * getCardTranscend(card));
 }
+/**
+ * 素のステータスに掛かる総倍率。合体(rank)と武将レベル(level)は独立に掛ける。
+ *   実効ステータス = 素の値 × rankMult × levelMult
+ * 戦力・統率（最大兵力）・詳細シートの表示がすべてここを通る。
+ */
+function getCardTotalMult(card) {
+  return getCardRankMult(card) * getCardLevelMult(card);
+}
 /** 所持カード1枚の戦力（ランク込み）。defIdしか無い場面では cardPower を使う */
 function cardPowerOf(card) {
-  return Math.round(cardPower(card.defId) * getCardRankMult(card));
+  return Math.round(cardPower(card.defId) * getCardTotalMult(card));
 }
 /** 所持カード1枚の実効統率（最大兵力の算出に使う） */
 function cardLeadOf(card) {
   const d = CARD_BY_ID[card.defId];
-  return d ? d.lead * getCardRankMult(card) : 0;
+  return d ? d.lead * getCardTotalMult(card) : 0;
 }
 /** 合体したらどうなるかのラベル（ボタンに出して結果を先に見せる） */
 function fuseResultLabel(card) {
@@ -2767,7 +2873,7 @@ function doGacha(count) {
     results[9] = pick(CARD_POOL.filter(c => c.rarity === CONFIG.GACHA_TEN_GUARANTEE));
   }
   const t = now();
-  for (const def of results) S.player.cards.push({ uid: uid("c"), defId: def.id, obtainedAt: t, rank: 0, skillLv: 1, skillExp: 0 });
+  for (const def of results) S.player.cards.push({ uid: uid("c"), defId: def.id, obtainedAt: t, rank: 0, skillLv: 1, skillExp: 0, level: 1, exp: 0 });
   // 初陣指南④は「10連を引いた」ことが条件（単発では達成しない）
   if (count === CONFIG.TUTORIAL_GACHA_COUNT && S.tutorial) S.tutorial.didTenPull = true;
   return results;
@@ -4665,6 +4771,7 @@ const LOG_KINDS = {
   research: { color: "#8fd0e8" },  // 研究完了
   fuse:     { color: "#e0a0d0" },  // カード合体で強化
   skill:    { color: "#e0c060" },  // 必殺技のレベルアップ
+  grow:     { color: "#8fd0a0" },  // 武将のレベルアップ
   hint:     { color: "#7fd4c0" },  // 新しく使えるようになった機能の告知
   win:      { color: "#e8b84a" },  // 聖地制圧＝勝利
   build:    { color: "#9ab6e0" },  // 建物の強化完了
@@ -4809,14 +4916,15 @@ function renderCards() {
     const free = own - inSquad - inOther;
     const shown = auto ? autoIn : inSquad;                 // 自動編成中は自動で選ばれた枚数を出す
     const canAdd = free > 0 && (sq.cardUids.length || getSquadCards(sq.id).length) < CONFIG.SQUAD_SIZE;
-    const mult = getCardRankMult(g.sample);
+    const mult = getCardTotalMult(g.sample);
     const skd = getCardSkill(d.id);
     return `<div class="unit-card rar-${rarity} ${getCardTranscend(g.sample) ? "transcend" : ""} ${shown ? "picked" : ""} ${!free && !shown ? "locked" : ""}"
         onclick="UIA.cardTap('${sq.id}','${d.id}',${g.rank})">
       <span class="rarity">${rarity}</span>
       <div class="art">${artHTML(d.imageKey, d.emoji)}${own > 1 ? `<span class="stack-count">×${own}</span>` : ""}${
         g.rank ? `<span class="rank-badge">+${g.rank}</span>` : ""}</div>
-      <b>${d.name}</b> <span class="card-stars">${cardRankLabel(g.sample)}</span>
+      <b>${d.name}</b> <span class="card-stars">${cardRankLabel(g.sample)}</span>${
+        getCardLevel(g.sample) > 1 ? `<span class="lv-badge">Lv${getCardLevel(g.sample)}</span>` : ""}
       <div class="dim small">${trd ? `<span style="color:${trd.color}">${trd.emoji}${trd.name}</span> ｜ ` : ""}戦力${fmt(cardPowerOf(g.sample))}</div>
       <div class="dim small">武${Math.round(d.atk * mult)} 知${Math.round(d.int * mult)} 統${Math.round(d.lead * mult)}</div>
       ${skd ? `<div class="card-skill" style="color:${SKILL_KIND_COLOR[skd.kind]}">${skd.icon}${skd.name}
@@ -5462,8 +5570,75 @@ function handleCardTap(squadId, defId, rank) {
   }, CONFIG.DOUBLE_TAP_MS);
 }
 
-/** 素材選択の状態（保存しないUI状態）。uidの集合 */
-let _feedPick = new Set();
+/* 素材選択の状態（保存しないUI状態）。
+   戦法(skill)と武将レベル(level)の素材ピッカーは**同時に開かない**。
+   両方出すとシートが縦に伸びて、3層構造にした意味が薄れるため。 */
+let _feedPick = new Set();      // 戦法強化の素材
+let _lvFeedPick = new Set();    // 武将レベルの素材
+let _trainMode = null;          // null | "skill" | "level"
+
+/** 武将レベルの育成箱。素材はSR以上（N/Rは戦法へ回す） */
+function cardLevelBoxHTML(card) {
+  const lv = getCardLevel(card), max = CONFIG.CARD_LEVEL_MAX;
+  const exp = card.exp || 0, need = getCardExpNeed(lv);
+  const pct = lv >= max ? 100 : clamp(exp / need * 100, 0, 100);
+  const m = getCardTotalMult(card);
+  const d = CARD_BY_ID[card.defId];
+  let html = `<div class="level-box">
+    <div class="small"><b>📈 武将レベル ${lv}/${max}</b>
+      <span class="dim">素ステータス ×${m.toFixed(2)}</span></div>
+    <div class="vault-bar" style="margin-top:5px"><i style="width:${pct}%"></i></div>
+    <div class="dim small">${lv >= max
+      ? "最大レベルです"
+      : `次のLvまで ${fmt(need - exp)}（現在 ${fmt(exp)}/${fmt(need)}）／ Lv${max}で武${Math.round(d.atk * getCardRankMult(card) * (1 + CONFIG.CARD_STAT_PER_LEVEL * (max - 1)))}`}</div>`;
+  if (lv < max) {
+    html += _trainMode === "level"
+      ? renderLevelFeedPicker(card)
+      : `<button class="train-btn" onclick="UIA.trainMode('level')">📈 武将を育てる（SR以上を消費）</button>`;
+  }
+  return html + `</div>`;
+}
+
+/** 武将レベルの素材選択。SR/SSR のみ並ぶ */
+function renderLevelFeedPicker(card) {
+  const cands = getLevelFeedCandidates(card.uid);
+  if (!cands.length) {
+    return `<div class="dim small" style="margin-top:8px">素材にできる武将がいません
+      （SR・SSRで、どの部隊にも編成していない武将が対象です）
+      <br><button class="train-btn" onclick="UIA.trainMode(null)">閉じる</button></div>`;
+  }
+  const groups = new Map();
+  for (const c of cands) {
+    const k = c.defId + "|" + (c.rank || 0);
+    if (!groups.has(k)) groups.set(k, []);
+    groups.get(k).push(c);
+  }
+  const picked = cands.filter(c => _lvFeedPick.has(c.uid));
+  const gain = picked.reduce((a, c) => a + getCardFeedExp(c), 0);
+  const cost = picked.length * CONFIG.CARD_TRAIN_FOOD;
+  const rows = [...groups.entries()].map(([k, arr]) => {
+    const c0 = arr[0], dd = CARD_BY_ID[c0.defId];
+    const sel = arr.filter(c => _lvFeedPick.has(c.uid)).length;
+    return `<div class="feed-row">
+      <span class="grow small">${dd.name} <span class="dim">${getCardRarity(c0)}${c0.rank ? "+" + c0.rank : ""}
+        ｜ 経験${getCardFeedExp(c0)}</span></span>
+      <button class="stack-btn" ${sel <= 0 ? "disabled" : ""} onclick="UIA.lvFeedPick('${k}',-1)">−</button>
+      <span class="stack-state">${sel}/${arr.length}</span>
+      <button class="stack-btn" ${sel >= arr.length ? "disabled" : ""} onclick="UIA.lvFeedPick('${k}',1)">＋</button>
+    </div>`;
+  }).join("");
+  const max = CONFIG.CARD_LEVEL_MAX;
+  let simLv = getCardLevel(card), simExp = (card.exp || 0) + gain;
+  while (simLv < max && simExp >= getCardExpNeed(simLv)) { simExp -= getCardExpNeed(simLv); simLv++; }
+  const poor = S.player.resources.food < cost;
+  return `<div class="feed-list">${rows}</div>
+    <div class="small" style="margin-top:6px">選択 ${picked.length}枚 ｜ 経験 +${fmt(gain)} ｜ 🌾${fmt(cost)}
+      ${simLv > getCardLevel(card) ? `<span class="rel-good">→ Lv${simLv} まで上がります</span>` : ""}
+      ${poor ? `<span class="rel-bad">食料不足</span>` : ""}</div>
+    <button class="primary" style="width:100%;margin-top:6px;min-height:42px"
+      ${(!picked.length || poor) ? "disabled" : ""} onclick="UIA.trainCardLevel()">📈 ${picked.length}枚を捧げて育てる</button>
+    <button class="train-btn" onclick="UIA.trainMode(null)">閉じる</button>`;
+}
 
 /**
  * カード1枚の詳細。ステータス・必殺技・強化（合体／戦法）をまとめて見せる。
@@ -5478,7 +5653,7 @@ function openCardSheet(defId, rank) {
   const d = CARD_BY_ID[defId];
   const trd = TROOP_DEFS[d.troop];
   const sk = getCardSkill(defId);
-  const mult = getCardRankMult(card);
+  const mult = getCardTotalMult(card);
   const rarity = getCardRarity(card);
   openCardSheetTarget = { defId, rank: r, uid: card.uid };
 
@@ -5502,6 +5677,9 @@ function openCardSheet(defId, rank) {
     </div>
   </div>`;
 
+  /* --- 武将レベル（素ステータスの伸び） --- */
+  body += cardLevelBoxHTML(card);
+
   /* --- 必殺技 --- */
   if (sk) {
     const lv = getSkillLv(card), max = getSkillMaxLv(card);
@@ -5515,7 +5693,11 @@ function openCardSheet(defId, rank) {
       <div class="vault-bar" style="margin-top:5px"><i style="width:${pct}%"></i></div>
       <div class="dim small">${lv >= max ? "上限に達しています" : `次のLvまで ${fmt(need - exp)}（現在 ${fmt(exp)}/${fmt(need)}）`}</div>
     </div>`;
-    if (lv < max) body += renderFeedPicker(card);
+    if (lv < max) {
+      body += _trainMode === "skill"
+        ? renderFeedPicker(card)
+        : `<button class="train-btn" onclick="UIA.trainMode('skill')">🔥 戦法を鍛える（SSR以下を消費）</button>`;
+    }
   } else {
     body += `<div class="dim small" style="margin-top:8px">この武将は必殺技を持ちません</div>`;
   }
@@ -5578,7 +5760,7 @@ function renderFeedPicker(card) {
   while (simLv < max && simExp >= getSkillExpNeed(simLv)) { simExp -= getSkillExpNeed(simLv); simLv++; }
   const poor = S.player.resources.food < cost;
   return `<div class="feed-box">
-    <div class="small"><b>🔥 戦法を鍛える</b> <span class="dim">武将を消費して必殺技Lvを上げます</span></div>
+    <div class="small"><b>🔥 戦法を鍛える</b> <span class="dim">SSR以下を消費して必殺技Lvを上げます</span></div>
     <div class="feed-list">${rows}</div>
     <div class="small" style="margin-top:6px">選択 ${picked.length}枚 ｜ 経験 +${fmt(exp)} ｜ 🌾${fmt(cost)}
       ${simLv > lv ? `<span class="rel-good">→ Lv${simLv} まで上がります</span>` : ""}
@@ -5586,7 +5768,7 @@ function renderFeedPicker(card) {
     <button class="primary" style="width:100%;margin-top:6px;min-height:42px"
       ${(!picked.length || poor) ? "disabled" : ""}
       onclick="UIA.trainSkill()">🔥 ${picked.length}枚を捧げて鍛える</button>
-    ${picked.length ? `<button class="stack-btn" style="width:100%;margin-top:4px" onclick="UIA.feedClear()">選択を解除</button>` : ""}
+    <button class="train-btn" onclick="UIA.trainMode(null)">閉じる</button>
   </div>`;
 }
 
@@ -5901,7 +6083,7 @@ function closeSheet() {
   openTileIndex = null;
   tileSheetActionMode = null;     // 出撃/駐留の選択ドロワーも畳む
   openCardSheetTarget = null;
-  _feedPick.clear();              // 戦法強化の素材選択もリセット
+  _feedPick.clear(); _lvFeedPick.clear(); _trainMode = null;   // 育成の選択状態もリセット
 }
 
 /* =====================================================================
@@ -5975,6 +6157,31 @@ const UIA = {
   },
   /* --- 必殺技([S26]) --- */
   cardTap(squadId, defId, rank) { handleCardTap(squadId, defId, rank); },
+  /* 育成モードの切り替え。戦法と武将レベルは同時に開かない */
+  trainMode(mode) {
+    _trainMode = mode;
+    if (mode !== "skill") _feedPick.clear();
+    if (mode !== "level") _lvFeedPick.clear();
+    if (openCardSheetTarget) openCardSheet(openCardSheetTarget.defId, openCardSheetTarget.rank);
+  },
+  lvFeedPick(key, delta) {
+    const [defId, rankStr] = key.split("|");
+    const rank = Number(rankStr);
+    const t = openCardSheetTarget;
+    const arr = S.player.cards.filter(c => c.defId === defId && (c.rank || 0) === rank
+      && canFeedForLevel(c, t ? t.uid : null));
+    if (delta > 0) { const add = arr.find(c => !_lvFeedPick.has(c.uid)); if (add) _lvFeedPick.add(add.uid); }
+    else { const rm = arr.slice().reverse().find(c => _lvFeedPick.has(c.uid)); if (rm) _lvFeedPick.delete(rm.uid); }
+    if (t) openCardSheet(t.defId, t.rank);
+  },
+  trainCardLevel() {
+    const t = openCardSheetTarget; if (!t) return;
+    const err = trainCardLevel(t.uid, [..._lvFeedPick]);
+    if (err) { toast("⚠️ " + err); return; }
+    _lvFeedPick.clear(); _trainMode = null;
+    renderCards();
+    openCardSheet(t.defId, t.rank);   // 育った姿を見せる
+  },
   feedPick(key, delta) {
     const [defId, rankStr] = key.split("|");
     const rank = Number(rankStr);
@@ -5985,10 +6192,7 @@ const UIA = {
     else { const rm = arr.slice().reverse().find(c => _feedPick.has(c.uid)); if (rm) _feedPick.delete(rm.uid); }
     if (target) openCardSheet(target.defId, target.rank);
   },
-  feedClear() {
-    _feedPick.clear();
-    if (openCardSheetTarget) openCardSheet(openCardSheetTarget.defId, openCardSheetTarget.rank);
-  },
+
   trainSkill() {
     const t = openCardSheetTarget; if (!t) return;
     const err = trainSkill(t.uid, [..._feedPick]);
