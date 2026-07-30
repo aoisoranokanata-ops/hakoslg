@@ -175,6 +175,20 @@ select{font:inherit;color:var(--fg);background:var(--bg3);border:1px solid var(-
 .unit-card.rar-UR{border-color:var(--ur);box-shadow:0 0 12px rgba(255,120,180,.5)} .unit-card.rar-UR .rarity{color:var(--ur)}
 /* 「今できることがある」合図のバッジ（[S25]）。未読件数ではないので●で出す */
 .badge.hint{background:var(--accent);color:#1a1408;min-width:10px;padding:0 4px;font-size:9px}
+/* 必殺技（[S26]） */
+.card-skill{font-size:10px;font-weight:700;margin-top:2px}
+.skill-kind{display:inline-block;padding:0 4px;margin:0 3px;border-radius:4px;color:#12161f;font-size:9px;font-weight:700}
+.skill-box{margin-top:10px;padding:8px 10px;border-radius:8px;background:var(--bg3);border-left:3px solid var(--accent)}
+.card-detail-top{display:flex;gap:10px;margin-bottom:4px}
+.card-detail-art{width:92px;flex:0 0 92px;aspect-ratio:1;border-radius:8px;overflow:hidden;background:var(--bg3);
+  display:flex;align-items:center;justify-content:center;font-size:40px}
+.card-detail-art img{width:100%;height:100%;object-fit:cover}
+.card-detail-stat{flex:1;min-width:0}
+.stat-row{display:flex;align-items:baseline;gap:6px;font-size:12px;padding:2px 0;border-bottom:1px solid var(--line)}
+.stat-row span:first-child{width:34px;color:var(--fg-dim)}
+.feed-box{margin-top:10px;padding:8px 10px;border-radius:8px;background:var(--bg2);border:1px solid var(--line)}
+.feed-list{max-height:32dvh;overflow-y:auto;margin-top:5px}
+.feed-row{display:flex;align-items:center;gap:6px;padding:3px 0;border-top:1px solid var(--line)}
 .card-stars{font-size:10px;letter-spacing:-1px;color:var(--accent)}
 /* 合体強化（[S22]）。素のカードと見分けがつくよう、ランクバッジと枠で差をつける */
 .rank-badge{position:absolute;left:4px;bottom:4px;background:rgba(224,160,208,.95);color:#1b1220;
@@ -387,7 +401,7 @@ const CONFIG = {
   DEV_MODE: false,                      // trueで開発用UI（ガチャタブの画像取り込み等）を表示
   SAVE_KEY: "hakoslg_save_v1",          // localStorageキー（名前空間 hakoslg_）
   ASSET_DB: "hakoslg_assets",           // IndexedDB名（画像アセット）
-  SAVE_VERSION: 17,                    // v17: 新機能の気づき（hints）
+  SAVE_VERSION: 18,                    // v18: 必殺技（cards[].skillLv/skillExp）
   LOG_MAX: 30,                         // 保持する出来事ログの最大件数
 
   // --- 初陣指南（[S15A]。最初の約1分でコアループを1周させる導線） ---
@@ -597,6 +611,17 @@ const CONFIG = {
   FORT_INTERCEPT_RANGE: 3,              // 施設は駐留部隊なしでも迎撃する
   FORT_INTERCEPT_POWER: 1200,           // 迎撃で削る固定量
 
+  // --- 必殺技（戦法）[S26] ---
+  // 低レア武将を素材にして必殺技レベルを上げる。引いたけど使わない武将に使い道を作る。
+  SKILL_FEED_MAX_RARITY: "SSR",         // これ以下のレア度だけ素材にできる（URは素材にしない）
+  SKILL_TRAIN_FOOD: 300,                // 素材1枚あたりの食料
+  DOUBLE_TAP_MS: 260,                   // ダブルタップの判定間隔。単タップはこの分だけ遅れて実行される
+  SKILL_EXP_BY_RARITY: { N: 1, R: 2, SR: 4, SSR: 8, UR: 0 },
+  SKILL_EXP_BASE: 2,                    // Lv1→2に必要な経験値。以降 ×GROWTH で増える
+  SKILL_EXP_GROWTH: 1.45,               // Lv10までの累計は約124（＝低レア62枚ぶん）
+  // 効果の上限（%）。重ねすぎて戦闘が壊れるのを防ぐ
+  SKILL_CAP: { power: 40, casualty: 40, speed: 40, siege: 60, guard: 50, pierce: 35 },
+
   // --- カード合体（[S22]。ダブったカードの救済） ---
   // 同じカードを同ランクで FUSION_COPIES 枚集めると1枚に合体し、ランクが1上がる。
   // ランクは実効レア度を押し上げ、URを超えたぶんは「超人」段階になる。
@@ -748,36 +773,36 @@ const RARITY_ORDER = { UR: 0, SSR: 1, SR: 2, R: 3, N: 4 };
 const RARITY_STARS = { N: 1, R: 2, SR: 3, SSR: 4, UR: 5 };
 const CARD_POOL = [
   // --- UR（最高位。1体で戦局を変える） ---
-  { id: "ur_kagurazaka", name: "天佑・神楽坂", rarity: "UR", atk: 99, int: 99, lead: 99, troop: "cavalry", emoji: "🌟", imageKey: "card_ur_kagurazaka" },
-  { id: "ur_gouen",      name: "獄炎・業焔",   rarity: "UR", atk: 105, int: 70, lead: 92, troop: "siege",  emoji: "☄️", imageKey: "card_ur_gouen" },
-  { id: "ur_shirayuki",  name: "白雪・凍月",   rarity: "UR", atk: 82, int: 105, lead: 95, troop: "archer", emoji: "❄️", imageKey: "card_ur_shirayuki" },
+  { id: "ur_kagurazaka", name: "天佑・神楽坂", rarity: "UR", atk: 99, int: 99, lead: 99, troop: "cavalry", emoji: "🌟", imageKey: "card_ur_kagurazaka" , skill: "totsugeki" },
+  { id: "ur_gouen",      name: "獄炎・業焔",   rarity: "UR", atk: 105, int: 70, lead: 92, troop: "siege",  emoji: "☄️", imageKey: "card_ur_gouen" , skill: "kakei" },
+  { id: "ur_shirayuki",  name: "白雪・凍月",   rarity: "UR", atk: 82, int: 105, lead: 95, troop: "archer", emoji: "❄️", imageKey: "card_ur_shirayuki" , skill: "suikei" },
   // --- SSR ---
-  { id: "ssr_tenba",   name: "覇王・天羽",   rarity: "SSR", atk: 95, int: 70, lead: 90, troop: "cavalry",  emoji: "👑", imageKey: "card_ssr_tenba" },
-  { id: "ssr_byakuren",name: "軍神・白蓮",   rarity: "SSR", atk: 88, int: 92, lead: 85, troop: "archer",   emoji: "⚡", imageKey: "card_ssr_byakuren" },
-  { id: "ssr_saya",    name: "聖女・沙耶",   rarity: "SSR", atk: 70, int: 95, lead: 88, troop: "shield",   emoji: "🌸", imageKey: "card_ssr_saya" },
-  { id: "ssr_benimaru",name: "鬼神・紅丸",   rarity: "SSR", atk: 97, int: 60, lead: 82, troop: "infantry", emoji: "🔥", imageKey: "card_ssr_benimaru" },
-  { id: "ssr_raiden",  name: "砲将・雷伝",   rarity: "SSR", atk: 90, int: 78, lead: 80, troop: "siege",    emoji: "💣", imageKey: "card_ssr_raiden" },
+  { id: "ssr_tenba",   name: "覇王・天羽",   rarity: "SSR", atk: 95, int: 70, lead: 90, troop: "cavalry",  emoji: "👑", imageKey: "card_ssr_tenba" , skill: "kobu" },
+  { id: "ssr_byakuren",name: "軍神・白蓮",   rarity: "SSR", atk: 88, int: 92, lead: 85, troop: "archer",   emoji: "⚡", imageKey: "card_ssr_byakuren" , skill: "ransha" },
+  { id: "ssr_saya",    name: "聖女・沙耶",   rarity: "SSR", atk: 70, int: 95, lead: 88, troop: "shield",   emoji: "🌸", imageKey: "card_ssr_saya" , skill: "teppeki" },
+  { id: "ssr_benimaru",name: "鬼神・紅丸",   rarity: "SSR", atk: 97, int: 60, lead: 82, troop: "infantry", emoji: "🔥", imageKey: "card_ssr_benimaru" , skill: "totsugeki" },
+  { id: "ssr_raiden",  name: "砲将・雷伝",   rarity: "SSR", atk: 90, int: 78, lead: 80, troop: "siege",    emoji: "💣", imageKey: "card_ssr_raiden" , skill: "hasai" },
   // --- SR ---
-  { id: "sr_soji",     name: "剣豪・宗二",   rarity: "SR", atk: 70, int: 45, lead: 55, troop: "infantry", emoji: "🗡️", imageKey: "card_sr_soji" },
-  { id: "sr_genba",    name: "策士・玄葉",   rarity: "SR", atk: 45, int: 70, lead: 60, troop: "archer",   emoji: "🪶", imageKey: "card_sr_genba" },
-  { id: "sr_mitsuru",  name: "弓聖・美弦",   rarity: "SR", atk: 65, int: 55, lead: 58, troop: "archer",   emoji: "🏹", imageKey: "card_sr_mitsuru" },
-  { id: "sr_gantetsu", name: "猛将・岩鉄",   rarity: "SR", atk: 68, int: 40, lead: 65, troop: "shield",   emoji: "🛡️", imageKey: "card_sr_gantetsu" },
-  { id: "sr_kasumi",   name: "陰陽師・霞",   rarity: "SR", atk: 50, int: 68, lead: 62, troop: "cavalry",  emoji: "🌙", imageKey: "card_sr_kasumi" },
-  { id: "sr_yariha",   name: "槍将・槍羽",   rarity: "SR", atk: 72, int: 42, lead: 60, troop: "spear",    emoji: "🔱", imageKey: "card_sr_yariha" },
+  { id: "sr_soji",     name: "剣豪・宗二",   rarity: "SR", atk: 70, int: 45, lead: 55, troop: "infantry", emoji: "🗡️", imageKey: "card_sr_soji" , skill: "totsugeki" },
+  { id: "sr_genba",    name: "策士・玄葉",   rarity: "SR", atk: 45, int: 70, lead: 60, troop: "archer",   emoji: "🪶", imageKey: "card_sr_genba" , skill: "konran" },
+  { id: "sr_mitsuru",  name: "弓聖・美弦",   rarity: "SR", atk: 65, int: 55, lead: 58, troop: "archer",   emoji: "🏹", imageKey: "card_sr_mitsuru" , skill: "ransha" },
+  { id: "sr_gantetsu", name: "猛将・岩鉄",   rarity: "SR", atk: 68, int: 40, lead: 65, troop: "shield",   emoji: "🛡️", imageKey: "card_sr_gantetsu" , skill: "kenshu" },
+  { id: "sr_kasumi",   name: "陰陽師・霞",   rarity: "SR", atk: 50, int: 68, lead: 62, troop: "cavalry",  emoji: "🌙", imageKey: "card_sr_kasumi" , skill: "kakei" },
+  { id: "sr_yariha",   name: "槍将・槍羽",   rarity: "SR", atk: 72, int: 42, lead: 60, troop: "spear",    emoji: "🔱", imageKey: "card_sr_yariha" , skill: "totsugeki" },
   // --- R ---
-  { id: "r_katsuma",   name: "侍大将・勝真", rarity: "R", atk: 50, int: 38, lead: 45, troop: "infantry", emoji: "⚔️", imageKey: "card_r_katsuma" },
-  { id: "r_kota",      name: "槍働き・虎太", rarity: "R", atk: 48, int: 35, lead: 40, troop: "spear",    emoji: "🔱", imageKey: "card_r_kota" },
-  { id: "r_senri",     name: "参謀・千里",   rarity: "R", atk: 36, int: 50, lead: 42, troop: "archer",   emoji: "📖", imageKey: "card_r_senri" },
-  { id: "r_hayate",    name: "騎兵長・颯",   rarity: "R", atk: 45, int: 38, lead: 48, troop: "cavalry",  emoji: "🐎", imageKey: "card_r_hayate" },
-  { id: "r_katayama",  name: "守将・堅山",   rarity: "R", atk: 40, int: 40, lead: 50, troop: "shield",   emoji: "🏰", imageKey: "card_r_katayama" },
-  { id: "r_ishizuchi", name: "石槌・石鎚",   rarity: "R", atk: 52, int: 30, lead: 44, troop: "siege",    emoji: "🪨", imageKey: "card_r_ishizuchi" },
+  { id: "r_katsuma",   name: "侍大将・勝真", rarity: "R", atk: 50, int: 38, lead: 45, troop: "infantry", emoji: "⚔️", imageKey: "card_r_katsuma" , skill: "kobu" },
+  { id: "r_kota",      name: "槍働き・虎太", rarity: "R", atk: 48, int: 35, lead: 40, troop: "spear",    emoji: "🔱", imageKey: "card_r_kota" , skill: "totsugeki" },
+  { id: "r_senri",     name: "参謀・千里",   rarity: "R", atk: 36, int: 50, lead: 42, troop: "archer",   emoji: "📖", imageKey: "card_r_senri" , skill: "konran" },
+  { id: "r_hayate",    name: "騎兵長・颯",   rarity: "R", atk: 45, int: 38, lead: 48, troop: "cavalry",  emoji: "🐎", imageKey: "card_r_hayate" , skill: "shikku" },
+  { id: "r_katayama",  name: "守将・堅山",   rarity: "R", atk: 40, int: 40, lead: 50, troop: "shield",   emoji: "🏰", imageKey: "card_r_katayama" , skill: "kenshu" },
+  { id: "r_ishizuchi", name: "石槌・石鎚",   rarity: "R", atk: 52, int: 30, lead: 44, troop: "siege",    emoji: "🪨", imageKey: "card_r_ishizuchi" , skill: "hasai" },
   // --- N ---
-  { id: "n_taichi",    name: "足軽・太一",   rarity: "N", atk: 30, int: 20, lead: 25, troop: "infantry", emoji: "🪖", imageKey: "card_n_taichi" },
-  { id: "n_yosuke",    name: "農兵・与助",   rarity: "N", atk: 25, int: 22, lead: 28, troop: "spear",    emoji: "🌱", imageKey: "card_n_yosuke" },
-  { id: "n_kosuzu",    name: "斥候・小鈴",   rarity: "N", atk: 22, int: 32, lead: 24, troop: "cavalry",  emoji: "🔔", imageKey: "card_n_kosuzu" },
-  { id: "n_gonroku",   name: "衛兵・権六",   rarity: "N", atk: 28, int: 20, lead: 30, troop: "shield",   emoji: "🚪", imageKey: "card_n_gonroku" },
-  { id: "n_maruta",    name: "新兵・丸太",   rarity: "N", atk: 26, int: 24, lead: 22, troop: "archer",   emoji: "🌰", imageKey: "card_n_maruta" },
-  { id: "n_nihei",     name: "輜重兵・荷平", rarity: "N", atk: 20, int: 28, lead: 30, troop: "siege",    emoji: "📦", imageKey: "card_n_nihei" },
+  { id: "n_taichi",    name: "足軽・太一",   rarity: "N", atk: 30, int: 20, lead: 25, troop: "infantry", emoji: "🪖", imageKey: "card_n_taichi" , skill: "hyoro" },
+  { id: "n_yosuke",    name: "農兵・与助",   rarity: "N", atk: 25, int: 22, lead: 28, troop: "spear",    emoji: "🌱", imageKey: "card_n_yosuke" , skill: "hyoro" },
+  { id: "n_kosuzu",    name: "斥候・小鈴",   rarity: "N", atk: 22, int: 32, lead: 24, troop: "cavalry",  emoji: "🔔", imageKey: "card_n_kosuzu" , skill: "shikku" },
+  { id: "n_gonroku",   name: "衛兵・権六",   rarity: "N", atk: 28, int: 20, lead: 30, troop: "shield",   emoji: "🚪", imageKey: "card_n_gonroku" , skill: "kenshu" },
+  { id: "n_maruta",    name: "新兵・丸太",   rarity: "N", atk: 26, int: 24, lead: 22, troop: "archer",   emoji: "🌰", imageKey: "card_n_maruta" , skill: "ransha" },
+  { id: "n_nihei",     name: "輜重兵・荷平", rarity: "N", atk: 20, int: 28, lead: 30, troop: "siege",    emoji: "📦", imageKey: "card_n_nihei" , skill: "hyoro" },
 ];
 const CARD_BY_ID = Object.fromEntries(CARD_POOL.map(c => [c.id, c]));
 
@@ -987,6 +1012,12 @@ function migrateSave(data) {
   if (!data.player.buildings.some(b => b.type === "camp")) {
     const p = DEFAULT_BUILDING_LAYOUT.camp;
     data.player.buildings.push({ id: "b_camp", type: "camp", level: 1, upgradeEndsAt: null, x: p.x, y: p.y });
+  }
+
+  // v17 → v18: 必殺技。既存カードは全てLv1・経験値0から始まる
+  for (const c of (data.player.cards || [])) {
+    if (c.skillLv == null) c.skillLv = 1;
+    if (c.skillExp == null) c.skillExp = 0;
   }
 
   // v16 → v17: 新機能の気づき。既存セーブは「まだ何も告知していない」状態から始まる。
@@ -1480,7 +1511,8 @@ function generateAIUsers(world) {
  *     resources: {food,wood,stone,iron},   // 浮動小数。表示はfloor
  *     diamonds: number,         // プレミア通貨。容量キャップなし
  *     ownedTiles: [tileIndex],  // 制圧済みタイル（自城タイルは含まない）
- *     cards: [ {uid,defId,obtainedAt,rank} ], // ガチャ獲得カード（重複可）。rank=合体強化段数([S22])
+ *     cards: [ {uid,defId,obtainedAt,rank,skillLv,skillExp} ], // ガチャ獲得カード（重複可）
+ *                                          // rank=合体強化段数([S22]) / skillLv,skillExp=必殺技([S26])
  *     squads: [ {id,name,cardUids[],troops,stationedAt} ], // 出撃部隊([S09])。兵舎Lvで解禁数が増える
  *                                          // stationedAt=駐留地のtileIndex([S23])。nullなら本城詰め
  *                                          // cardUidsが空なら出撃時に自動編成で補う
@@ -1525,8 +1557,8 @@ function newGameState() {
       diamonds: CONFIG.START_DIAMONDS,
       ownedTiles: [],
       cards: [
-        { uid: uid("c"), defId: "n_taichi", obtainedAt: t, rank: 0 },
-        { uid: uid("c"), defId: "n_kosuzu", obtainedAt: t, rank: 0 },
+        { uid: uid("c"), defId: "n_taichi", obtainedAt: t, rank: 0, skillLv: 1, skillExp: 0 },
+        { uid: uid("c"), defId: "n_kosuzu", obtainedAt: t, rank: 0, skillLv: 1, skillExp: 0 },
       ],
       // 出撃部隊。兵舎レベルで解禁数が増える（[S09]）。空なら自動編成で補われる
       // troops は現在兵力。-1 は未初期化で、初回参照時に最大兵力で満たす
@@ -1844,6 +1876,163 @@ function cardPower(defId) {
   const d = CARD_BY_ID[defId];
   return Math.round((d.atk * 1.2 + d.lead * 1.0 + d.int * 0.6) * RARITY_MULT[d.rarity]);
 }
+/**
+ * 必殺技（戦法）の定義。[S26]
+ *
+ * 三國志真戦の戦法と同じ発想で、**低レア武将を消費して必殺技レベルを上げる**。
+ * これで「引いたけど使わない武将」に使い道ができる（＝無駄な武将をなくす）。
+ *
+ * effect のキーは getSquadSkillBuffs() が集計する。値は **Lv1あたりの上昇量**で、
+ * 実際の効果は「値 × 必殺技Lv」。部隊内の同じキーは加算される。
+ *   power    … 部隊戦力 +x%
+ *   casualty … 損耗 -x%（小さいほど良い）
+ *   speed    … 行軍速度 +x%
+ *   siege    … 要衝への攻撃 +x%
+ *   guard    … 駐留時の守り +x%
+ *   pierce   … 火計などの「敵防御を無視する」割合 +x%
+ * kind は表示の色分けだけに使う（攻/防/謀/補）。
+ */
+const SKILL_DEFS = {
+  // --- 攻（純粋な火力）---
+  totsugeki: { name: "突撃",     icon: "⚡", kind: "攻", desc: "部隊戦力 +{power}%",
+               effect: { power: 3.0 } },
+  ransha:    { name: "乱射",     icon: "🏹", kind: "攻", desc: "部隊戦力 +{power}%・損耗 -{casualty}%",
+               effect: { power: 2.0, casualty: 1.5 } },
+  hasai:     { name: "破砕",     icon: "🔨", kind: "攻", desc: "要衝への攻撃 +{siege}%",
+               effect: { siege: 5.0 } },
+  // --- 防（守り）---
+  kenshu:    { name: "堅守",     icon: "🛡", kind: "防", desc: "損耗 -{casualty}%",
+               effect: { casualty: 3.0 } },
+  teppeki:   { name: "鉄壁",     icon: "🧱", kind: "防", desc: "駐留時の守り +{guard}%・損耗 -{casualty}%",
+               effect: { guard: 4.0, casualty: 1.0 } },
+  // --- 謀（知略。防御を無視する系）---
+  kakei:     { name: "火計",     icon: "🔥", kind: "謀", desc: "敵の防御を {pierce}% 無視する",
+               effect: { pierce: 2.5 } },
+  suikei:    { name: "水計",     icon: "🌊", kind: "謀", desc: "敵の防御を {pierce}% 無視・行軍 +{speed}%",
+               effect: { pierce: 1.5, speed: 2.0 } },
+  konran:    { name: "混乱",     icon: "🌀", kind: "謀", desc: "敵の防御を {pierce}% 無視・損耗 -{casualty}%",
+               effect: { pierce: 1.8, casualty: 1.2 } },
+  // --- 補（部隊運用）---
+  kobu:      { name: "鼓舞",     icon: "📣", kind: "補", desc: "部隊戦力 +{power}%・駐留時の守り +{guard}%",
+               effect: { power: 1.8, guard: 2.0 } },
+  shikku:    { name: "疾駆",     icon: "🐎", kind: "補", desc: "行軍速度 +{speed}%",
+               effect: { speed: 4.0 } },
+  hyoro:     { name: "兵糧",     icon: "🌾", kind: "補", desc: "損耗 -{casualty}%・部隊戦力 +{power}%",
+               effect: { casualty: 2.0, power: 1.0 } },
+};
+/** 必殺技レベルの上限（レア度で変わる）。SSR/URだけが10まで伸びる */
+const SKILL_MAX_LV = { N: 3, R: 5, SR: 7, SSR: 10, UR: 10 };
+const SKILL_KIND_COLOR = { 攻: "#e08080", 防: "#8fa8c8", 謀: "#c8a0e0", 補: "#8fd98f" };
+
+/** そのカードの必殺技定義（未設定なら null） */
+function getCardSkill(defId) {
+  const d = CARD_BY_ID[defId];
+  return d && d.skill ? SKILL_DEFS[d.skill] : null;
+}
+/** 必殺技レベル（未初期化は1） */
+function getSkillLv(card) {
+  return Math.max(1, card.skillLv || 1);
+}
+/** そのカードの必殺技レベル上限。**実効レア度**で決まる（合体でレア度が上がれば伸びる） */
+function getSkillMaxLv(card) {
+  return SKILL_MAX_LV[getCardRarity(card)] || 3;
+}
+/** 説明文の {key} を実際の数値に置き換える */
+function skillDescText(card) {
+  const sk = getCardSkill(card.defId);
+  if (!sk) return "";
+  const lv = getSkillLv(card);
+  return sk.desc.replace(/\{(\w+)\}/g, (_, k) => {
+    const v = sk.effect[k];
+    return v == null ? "0" : (v * lv).toFixed(1).replace(/\.0$/, "");
+  });
+}
+/**
+ * 部隊の必殺技効果を集計。編成カードの効果を**加算**する（同じ技を重ねる価値がある）。
+ * 暴走を防ぐため CONFIG.SKILL_CAP でキーごとに上限を掛ける。
+ * 戻り値は % ではなく倍率に直した値（power:1.15 など）。pierce だけ 0〜1 の割合。
+ */
+function getSquadSkillBuffs(squadId) {
+  const sum = { power: 0, casualty: 0, speed: 0, siege: 0, guard: 0, pierce: 0 };
+  for (const c of getSquadCards(squadId)) {
+    const sk = getCardSkill(c.defId);
+    if (!sk) continue;
+    const lv = getSkillLv(c);
+    for (const [k, v] of Object.entries(sk.effect)) {
+      if (sum[k] != null) sum[k] += v * lv;
+    }
+  }
+  const cap = CONFIG.SKILL_CAP;
+  const out = {};
+  for (const k of Object.keys(sum)) out[k] = Math.min(sum[k], cap[k] != null ? cap[k] : 100);
+  return {
+    power: 1 + out.power / 100,
+    casualty: Math.max(0.2, 1 - out.casualty / 100),
+    speed: 1 + out.speed / 100,
+    siege: 1 + out.siege / 100,
+    guard: 1 + out.guard / 100,
+    pierce: clamp(out.pierce / 100, 0, CONFIG.SKILL_CAP.pierce / 100),
+    raw: out,
+  };
+}
+
+/* --- 戦法強化（武将を消費して必殺技レベルを上げる）---------------------- */
+/** 素材にできるか。SSR以下のみ／編成中は不可／自分自身は不可 */
+function canFeedCard(card, targetUid) {
+  if (!card || card.uid === targetUid) return false;
+  if (RARITY_ORDER[getCardRarity(card)] < RARITY_ORDER[CONFIG.SKILL_FEED_MAX_RARITY]) return false;
+  for (const sq of S.player.squads) if (sq.cardUids.includes(card.uid)) return false;
+  return true;
+}
+/** 素材にできるカードの一覧（弱い順＝優先して消費すべき順） */
+function getFeedCandidates(targetUid) {
+  return S.player.cards.filter(c => canFeedCard(c, targetUid))
+    .sort((a, b) => cardPowerOf(a) - cardPowerOf(b));
+}
+/** 素材1枚が与える経験値。レア度が高いほど多い */
+function getFeedExp(card) {
+  return CONFIG.SKILL_EXP_BY_RARITY[getCardRarity(card)] || 1;
+}
+/** 次のレベルに必要な経験値 */
+function getSkillExpNeed(lv) {
+  return Math.round(CONFIG.SKILL_EXP_BASE * Math.pow(CONFIG.SKILL_EXP_GROWTH, lv - 1));
+}
+/**
+ * 武将を消費して必殺技を鍛える。失敗理由 or null。
+ * 素材は uid の配列で受け取る（UIで選んだぶんだけ消費する）。
+ */
+function trainSkill(targetUid, feedUids) {
+  const card = S.player.cards.find(c => c.uid === targetUid);
+  if (!card) return "対象の武将が見つかりません";
+  const sk = getCardSkill(card.defId);
+  if (!sk) return "この武将は必殺技を持ちません";
+  const max = getSkillMaxLv(card);
+  if (getSkillLv(card) >= max) return `必殺技はすでに上限です（Lv${max}）`;
+  const feeds = (feedUids || []).map(u => S.player.cards.find(c => c.uid === u)).filter(Boolean);
+  if (!feeds.length) return "素材にする武将を選んでください";
+  if (feeds.some(f => !canFeedCard(f, targetUid))) return "編成中の武将や、SSRより上の武将は素材にできません";
+  const cost = feeds.length * CONFIG.SKILL_TRAIN_FOOD;
+  if (S.player.resources.food < cost) return `食料が足りません（${fmt(cost)}必要）`;
+
+  S.player.resources.food -= cost;
+  const burn = new Set(feeds.map(f => f.uid));
+  S.player.cards = S.player.cards.filter(c => !burn.has(c.uid));
+  let exp = (card.skillExp || 0) + feeds.reduce((a, f) => a + getFeedExp(f), 0);
+  let lv = getSkillLv(card), up = 0;
+  while (lv < max && exp >= getSkillExpNeed(lv)) { exp -= getSkillExpNeed(lv); lv++; up++; }
+  if (lv >= max) exp = 0;                       // 上限に達したら余りは繰り越さない
+  card.skillLv = lv;
+  card.skillExp = exp;
+  // 統率は変わらないが、戦力は必殺技で変わるので充足率を保つ必要はない。
+  // ただし素材が編成に入っていないことは canFeedCard で保証済み。
+  const d = CARD_BY_ID[card.defId];
+  toast(up
+    ? `🔥 ${d.name} の ${sk.icon}${sk.name} が Lv${lv} に！ — ${skillDescText(card)}`
+    : `🔥 ${d.name} の ${sk.icon}${sk.name} に経験を積んだ（次のLvまで ${fmt(getSkillExpNeed(lv) - exp)}）`,
+    up ? "skill" : null);
+  return null;
+}
+
 /* --- カードのランク（[S22] 合体で上がる）---------------------------------
  * 所持カード1枚ごとに rank を持つ（0=素のまま）。rank は**実効レア度**を押し上げ、
  * URを超えたぶんは「超人」段階になる。CARD_POOL（静的定義）は書き換えない。 */
@@ -2080,9 +2269,13 @@ function getSquadPower(squadId, defTroop, tileType) {
     + getBuilding("barracks").level * CONFIG.POWER_PER_BARRACKS_LV
     + S.player.castleLevel * CONFIG.POWER_PER_CASTLE_LV;
   // 兵力が減っている部隊は、その割合ぶん弱くなる（負傷兵の反映）
+  const sk = getSquadSkillBuffs(squadId);
   const mult = (getAllianceBuffs().power || 1) * researchMult("power")
     * troopMultiplier(getSquadTroop(squadId), defTroop, tileType)
-    * getSquadTroopRatio(squadId);
+    * getSquadTroopRatio(squadId)
+    * sk.power
+    // 「破砕」など要衝向けの必殺技は、相手が要塞の時だけ効く
+    * (tileType && FORTRESS_TYPES.includes(tileType) ? sk.siege : 1);
   return Math.round(base * mult);
 }
 /** 出撃可能な（＝行軍中でない）部隊の一覧 */
@@ -2095,6 +2288,14 @@ function getIdleSquads() {
 function getArmyPower() {
   ensureSquads();
   return getSquadPower(S.player.squads[0].id, null);
+}
+/**
+ * その部隊から見た実効防御力。「火計」などの pierce ぶんを削る。
+ * UIの見積りと実際の戦闘判定で同じ式を使うため、ここに集約する。
+ */
+function getEffectiveDefense(ti, squadId) {
+  const pierce = squadId ? getSquadSkillBuffs(squadId).pierce : 0;
+  return Math.round(getTileDefense(ti) * (1 - pierce));
 }
 /** タイルの防御力 */
 function getTileDefense(ti) {
@@ -2121,7 +2322,9 @@ function getPlayerTileDefense(ti) {
   // 幕舎そのものの防御と、駐留部隊の戦力が上乗せされる＝守りたい場所に兵を置く意味が出る
   const outpost = getOutpostAt(ti) ? CONFIG.OUTPOST_DEF_BONUS : 0;
   const fort = getFortAt(ti) ? CONFIG.FORT_DEF : 0;
-  const garrison = getGarrisonPower(ti) * CONFIG.GARRISON_DEF_RATIO;
+  // 「鉄壁」など守りの必殺技は駐留している部隊のぶんだけ乗る
+  const garrison = getGarrisonSquads(ti).reduce((a, sq) =>
+    a + getSquadPower(sq.id, null) * getSquadSkillBuffs(sq.id).guard, 0) * CONFIG.GARRISON_DEF_RATIO;
   return Math.round((getTileDefense(ti)
     + S.player.castleLevel * CONFIG.TILE_DEF_PLAYER_PER_CASTLE_LV
     + getBuilding("barracks").level * CONFIG.TILE_DEF_PLAYER_PER_BARRACKS_LV
@@ -2330,13 +2533,15 @@ function startMarch(ti, squadId) {
   // 山河を迂回した実距離。川向こうは近く見えても埠頭まで回るぶん時間がかかる
   const dist = getMarchDistance(ti, origin);
   // 兵種で速度が変わる（騎兵は速く、兵器は鈍い）。部隊は最も遅い兵種に合わせる
-  const speed = CONFIG.MARCH_TILES_PER_SEC * getSquadSpeedMult(squad.id) * (getAllianceBuffs().speed || 1) * researchMult("speed");
+  const speed = CONFIG.MARCH_TILES_PER_SEC * getSquadSpeedMult(squad.id) * (getAllianceBuffs().speed || 1)
+    * researchMult("speed") * getSquadSkillBuffs(squad.id).speed;
   const sec = Math.max(CONFIG.MARCH_MIN_SEC, dist / speed);
   // 出撃時点の戦力を確定させる（兵種相性はこの目標に対して計算済み）
   S.player.marches.push({
     id: uid("m"), squadId: squad.id, targetIdx: ti,
     // AI城への攻撃なら撃破処理のために相手を覚えておく（到着時には所有者が変わっている）
     targetAiId: t.type === "castle" ? t.ownerId : null,
+    pierce: getSquadSkillBuffs(squad.id).pierce,   // 出撃時の火計等の貫通率（[S26]）
     power: getSquadPower(squad.id, t.defTroop, t.type),
     troop: getSquadTroop(squad.id),
     departAt: now(), arriveAt: now() + sec * 1000,
@@ -2355,7 +2560,8 @@ function applyCasualties(squadId, enemyDef, ownPower, won) {
   const raw = won
     ? clamp(ratio * CONFIG.CASUALTY_WIN_FACTOR, CONFIG.CASUALTY_WIN_MIN, CONFIG.CASUALTY_WIN_MAX)
     : clamp(ratio * CONFIG.CASUALTY_LOSE_FACTOR, CONFIG.CASUALTY_LOSE_MIN, CONFIG.CASUALTY_LOSE_MAX);
-  const lost = Math.min(before, Math.round(before * raw * getSquadCasualtyMult(squadId) * researchMult("casualty")));
+  const lost = Math.min(before, Math.round(before * raw * getSquadCasualtyMult(squadId)
+    * researchMult("casualty") * getSquadSkillBuffs(squadId).casualty));
   sq.troops = Math.max(0, before - lost);
   return lost;
 }
@@ -2388,7 +2594,8 @@ function resolveMarches(t) {
   S.player.marches = S.player.marches.filter(m => t < m.arriveAt);
   for (const m of done) {
     const tile = S.world.tiles[m.targetIdx];
-    const def = getTileDefense(m.targetIdx);
+    // 出撃時に確定した貫通率で敵防御を削る（包囲が進んでいれば素の防御も下がっている）
+    const def = Math.round(getTileDefense(m.targetIdx) * (1 - (m.pierce || 0)));
     if (m.power >= def) {
       // 前所有者（AI）から剥奪
       if (tile.ownerId && tile.ownerId !== "player") {
@@ -2506,7 +2713,7 @@ function doGacha(count) {
     results[9] = pick(CARD_POOL.filter(c => c.rarity === CONFIG.GACHA_TEN_GUARANTEE));
   }
   const t = now();
-  for (const def of results) S.player.cards.push({ uid: uid("c"), defId: def.id, obtainedAt: t, rank: 0 });
+  for (const def of results) S.player.cards.push({ uid: uid("c"), defId: def.id, obtainedAt: t, rank: 0, skillLv: 1, skillExp: 0 });
   // 初陣指南④は「10連を引いた」ことが条件（単発では達成しない）
   if (count === CONFIG.TUTORIAL_GACHA_COUNT && S.tutorial) S.tutorial.didTenPull = true;
   return results;
@@ -4403,6 +4610,7 @@ const LOG_KINDS = {
   defend:   { color: "#7fd4c0" },  // AIの攻撃を撃退した
   research: { color: "#8fd0e8" },  // 研究完了
   fuse:     { color: "#e0a0d0" },  // カード合体で強化
+  skill:    { color: "#e0c060" },  // 必殺技のレベルアップ
   hint:     { color: "#7fd4c0" },  // 新しく使えるようになった機能の告知
   win:      { color: "#e8b84a" },  // 聖地制圧＝勝利
   build:    { color: "#9ab6e0" },  // 建物の強化完了
@@ -4548,14 +4756,17 @@ function renderCards() {
     const shown = auto ? autoIn : inSquad;                 // 自動編成中は自動で選ばれた枚数を出す
     const canAdd = free > 0 && (sq.cardUids.length || getSquadCards(sq.id).length) < CONFIG.SQUAD_SIZE;
     const mult = getCardRankMult(g.sample);
+    const skd = getCardSkill(d.id);
     return `<div class="unit-card rar-${rarity} ${getCardTranscend(g.sample) ? "transcend" : ""} ${shown ? "picked" : ""} ${!free && !shown ? "locked" : ""}"
-        onclick="UIA.addCardToSquad('${sq.id}','${d.id}',${g.rank})">
+        onclick="UIA.cardTap('${sq.id}','${d.id}',${g.rank})">
       <span class="rarity">${rarity}</span>
       <div class="art">${artHTML(d.imageKey, d.emoji)}${own > 1 ? `<span class="stack-count">×${own}</span>` : ""}${
         g.rank ? `<span class="rank-badge">+${g.rank}</span>` : ""}</div>
       <b>${d.name}</b> <span class="card-stars">${cardRankLabel(g.sample)}</span>
       <div class="dim small">${trd ? `<span style="color:${trd.color}">${trd.emoji}${trd.name}</span> ｜ ` : ""}戦力${fmt(cardPowerOf(g.sample))}</div>
       <div class="dim small">武${Math.round(d.atk * mult)} 知${Math.round(d.int * mult)} 統${Math.round(d.lead * mult)}</div>
+      ${skd ? `<div class="card-skill" style="color:${SKILL_KIND_COLOR[skd.kind]}">${skd.icon}${skd.name}
+        <span class="dim">Lv${getSkillLv(g.sample)}</span></div>` : ""}
       <div class="stack-ctl" onclick="event.stopPropagation()">
         <button class="stack-btn" ${shown <= 0 ? "disabled" : ""} onclick="UIA.removeCardFromSquad('${sq.id}','${d.id}',${g.rank})">−</button>
         <span class="stack-state">編成 ${shown}/${own}${inOther ? `<span class="dim">（他隊${inOther}）</span>` : ""}${auto && autoIn ? "<span class='dim'>自動</span>" : ""}</span>
@@ -4605,7 +4816,7 @@ function renderCards() {
         （有利×${CONFIG.TROOP_ADVANTAGE} / 不利×${CONFIG.TROOP_DISADVANTAGE}）<br>
         🏗️兵器は輪の外: 要塞に×${CONFIG.TROOP_SIEGE_VS_FORTRESS}・野戦×${CONFIG.TROOP_SIEGE_VS_FIELD}、射程2だが損耗×1.6</div>
     </div>
-    <div class="panel dim small">カードをタップで編成に出し入れ（部隊をまたいで同じ武将は使えません）</div>
+    <div class="panel dim small">カードを<b>タップ</b>で編成に出し入れ／<b>ダブルタップ</b>で詳細と戦法強化</div>
     <div class="card-grid">${cards || '<div class="dim">カードなし</div>'}</div>`;
 }
 
@@ -5175,6 +5386,151 @@ function siegeDetailHTML(ti) {
      <button class="stack-btn" style="margin-top:6px" ${blocked ? "disabled" : ""}
        onclick="UIA.issueOrder(${ti})">${blocked ? "🔒 " + blocked : "📣 ここを攻めよと下知する"}</button>`);
 }
+/* --- カード詳細シート（ダブルタップで開く）-----------------------------
+ * 総監督指示: カードをダブルタップすると詳細な情報が見られるようにする。
+ * 単タップは従来どおり「編成に入れる」なので、二重発火を避けるため
+ * **単タップの実行を DOUBLE_TAP_MS だけ遅らせ、2打目が来たら取り消す**方式にする。
+ * iOS Safari では dblclick が安定しないため、自前でタップ間隔を見ている。 */
+let _cardTap = { key: null, timer: null };
+function handleCardTap(squadId, defId, rank) {
+  const key = defId + "|" + rank;
+  if (_cardTap.timer && _cardTap.key === key) {   // 2打目＝ダブルタップ
+    clearTimeout(_cardTap.timer);
+    _cardTap = { key: null, timer: null };
+    openCardSheet(defId, rank);
+    return;
+  }
+  if (_cardTap.timer) clearTimeout(_cardTap.timer);
+  _cardTap.key = key;
+  _cardTap.timer = setTimeout(() => {
+    _cardTap = { key: null, timer: null };
+    UIA.addCardToSquad(squadId, defId, rank);
+  }, CONFIG.DOUBLE_TAP_MS);
+}
+
+/** 素材選択の状態（保存しないUI状態）。uidの集合 */
+let _feedPick = new Set();
+
+/**
+ * カード1枚の詳細。ステータス・必殺技・強化（合体／戦法）をまとめて見せる。
+ * 同名同ランクの束のうち「代表1枚」を対象にする（uidは束の先頭）。
+ */
+function openCardSheet(defId, rank) {
+  const r = rank || 0;
+  const pool = S.player.cards.filter(c => c.defId === defId && (c.rank || 0) === r);
+  if (!pool.length) { closeSheet(); return; }
+  // 必殺技レベルがいちばん高い1枚を代表にする（育てた個体を見せる）
+  const card = pool.reduce((a, b) => getSkillLv(b) > getSkillLv(a) ? b : a);
+  const d = CARD_BY_ID[defId];
+  const trd = TROOP_DEFS[d.troop];
+  const sk = getCardSkill(defId);
+  const mult = getCardRankMult(card);
+  const rarity = getCardRarity(card);
+  openCardSheetTarget = { defId, rank: r, uid: card.uid };
+
+  const head = `<div class="sheet-head">
+    <div class="sheet-title">
+      <h3>${d.name} <span class="card-stars">${cardRankLabel(card)}</span></h3>
+      <div class="dim small">${rarity}${r ? ` ・強化+${r}` : ""} ｜ ${trd ? trd.emoji + trd.name : "—"} ｜ 所持 ${pool.length}枚</div>
+    </div>
+    <button class="sheet-close" onclick="closeSheet()" aria-label="閉じる">×</button>
+  </div>`;
+
+  let body = `<div class="card-detail-top">
+    <div class="card-detail-art">${artHTML(d.imageKey, d.emoji)}</div>
+    <div class="card-detail-stat">
+      <div class="stat-row"><span>戦力</span><b>${fmt(cardPowerOf(card))}</b></div>
+      <div class="stat-row"><span>武力</span><b>${Math.round(d.atk * mult)}</b></div>
+      <div class="stat-row"><span>知力</span><b>${Math.round(d.int * mult)}</b></div>
+      <div class="stat-row"><span>統率</span><b>${Math.round(d.lead * mult)}</b>
+        <span class="dim small">兵${fmt(Math.round(cardLeadOf(card) * CONFIG.TROOPS_PER_LEAD))}</span></div>
+    </div>
+  </div>`;
+
+  /* --- 必殺技 --- */
+  if (sk) {
+    const lv = getSkillLv(card), max = getSkillMaxLv(card);
+    const exp = card.skillExp || 0, need = getSkillExpNeed(lv);
+    const pct = lv >= max ? 100 : clamp(exp / need * 100, 0, 100);
+    body += `<div class="skill-box" style="border-left-color:${SKILL_KIND_COLOR[sk.kind]}">
+      <div class="small"><b>${sk.icon} ${sk.name}</b>
+        <span class="skill-kind" style="background:${SKILL_KIND_COLOR[sk.kind]}">${sk.kind}</span>
+        <span class="dim">Lv${lv}/${max}</span></div>
+      <div class="small" style="margin-top:3px">${skillDescText(card)}</div>
+      <div class="vault-bar" style="margin-top:5px"><i style="width:${pct}%"></i></div>
+      <div class="dim small">${lv >= max ? "上限に達しています" : `次のLvまで ${fmt(need - exp)}（現在 ${fmt(exp)}/${fmt(need)}）`}</div>
+    </div>`;
+    if (lv < max) body += renderFeedPicker(card);
+  } else {
+    body += `<div class="dim small" style="margin-top:8px">この武将は必殺技を持ちません</div>`;
+  }
+
+  /* --- 合体（同名同ランク5枚） --- */
+  const canFuse = pool.length >= CONFIG.FUSION_COPIES && getCardRankRoom(card) > 0;
+  body += detailsHTML("✨ 合体で強化",
+    `同じ武将を同じ強化段で ${CONFIG.FUSION_COPIES} 枚集めると1枚に合体し、実効レア度が上がります。<br>
+     所持 ${pool.length}/${CONFIG.FUSION_COPIES} ｜ 残り強化余地 ${getCardRankRoom(card)}段<br>
+     ${canFuse
+       ? `<button class="stack-btn" onclick="UIA.fuse('${defId}',${r})">✨ ${CONFIG.FUSION_COPIES}枚合体 → ${fuseResultLabel(card)}</button>`
+       : `<span class="dim">${getCardRankRoom(card) <= 0 ? "これ以上は強化できません" : "枚数が足りません"}</span>`}`);
+
+  body += detailsHTML("📖 兵種と相性",
+    trd ? `${trd.emoji} <b>${trd.name}</b><br>
+      ${trd.strong ? `${TROOP_DEFS[trd.strong].emoji}${TROOP_DEFS[trd.strong].name} に有利（×${CONFIG.TROOP_ADVANTAGE}）<br>` : ""}
+      移動速度 ×${trd.speed}${trd.fortress ? `<br>要衝への攻撃 ×${CONFIG.TROOP_SIEGE_VS_FORTRESS}／野戦 ×${CONFIG.TROOP_SIEGE_VS_FIELD}` : ""}${
+      trd.range ? `<br>射程 ${trd.range}（後方攻撃）` : ""}${
+      trd.casualtyMult ? `<br>損耗 ×${trd.casualtyMult}` : ""}` : "—");
+
+  showSheet(head + `<div class="sheet-body">${body}</div>`
+    + `<div class="sheet-actions"><button onclick="closeSheet()">閉じる</button></div>`, "tile");
+}
+let openCardSheetTarget = null;
+
+/** 戦法強化の素材選択。弱い武将から並べ、まとめて選べるようにする */
+function renderFeedPicker(card) {
+  const cands = getFeedCandidates(card.uid);
+  if (!cands.length) {
+    return `<div class="dim small" style="margin-top:8px">素材にできる武将がいません
+      （SSR以下で、どの部隊にも編成していない武将が対象です）</div>`;
+  }
+  // 同じ武将・同じ強化段でまとめて表示する
+  const groups = new Map();
+  for (const c of cands) {
+    const k = c.defId + "|" + (c.rank || 0);
+    if (!groups.has(k)) groups.set(k, []);
+    groups.get(k).push(c);
+  }
+  const picked = [...groups.values()].flat().filter(c => _feedPick.has(c.uid));
+  const exp = picked.reduce((a, c) => a + getFeedExp(c), 0);
+  const cost = picked.length * CONFIG.SKILL_TRAIN_FOOD;
+  const rows = [...groups.entries()].map(([k, arr]) => {
+    const c0 = arr[0], dd = CARD_BY_ID[c0.defId];
+    const sel = arr.filter(c => _feedPick.has(c.uid)).length;
+    return `<div class="feed-row">
+      <span class="grow small">${dd.name} <span class="dim">${getCardRarity(c0)}${c0.rank ? "+" + c0.rank : ""}
+        ｜ 経験${getFeedExp(c0)}</span></span>
+      <button class="stack-btn" ${sel <= 0 ? "disabled" : ""} onclick="UIA.feedPick('${k}',-1)">−</button>
+      <span class="stack-state">${sel}/${arr.length}</span>
+      <button class="stack-btn" ${sel >= arr.length ? "disabled" : ""} onclick="UIA.feedPick('${k}',1)">＋</button>
+    </div>`;
+  }).join("");
+  const lv = getSkillLv(card), max = getSkillMaxLv(card);
+  let simLv = lv, simExp = (card.skillExp || 0) + exp;
+  while (simLv < max && simExp >= getSkillExpNeed(simLv)) { simExp -= getSkillExpNeed(simLv); simLv++; }
+  const poor = S.player.resources.food < cost;
+  return `<div class="feed-box">
+    <div class="small"><b>🔥 戦法を鍛える</b> <span class="dim">武将を消費して必殺技Lvを上げます</span></div>
+    <div class="feed-list">${rows}</div>
+    <div class="small" style="margin-top:6px">選択 ${picked.length}枚 ｜ 経験 +${fmt(exp)} ｜ 🌾${fmt(cost)}
+      ${simLv > lv ? `<span class="rel-good">→ Lv${simLv} まで上がります</span>` : ""}
+      ${poor ? `<span class="rel-bad">食料不足</span>` : ""}</div>
+    <button class="primary" style="width:100%;margin-top:6px;min-height:42px"
+      ${(!picked.length || poor) ? "disabled" : ""}
+      onclick="UIA.trainSkill()">🔥 ${picked.length}枚を捧げて鍛える</button>
+    ${picked.length ? `<button class="stack-btn" style="width:100%;margin-top:4px" onclick="UIA.feedClear()">選択を解除</button>` : ""}
+  </div>`;
+}
+
 /* --- タイル詳細シート（3層構造）-------------------------------------
  * ChatGPT確定仕様（2026-07-27）。情報が増えるほど「出撃」ボタンが下へ逃げる問題への対処。
  *   固定ヘッダー → スクロールする本文 →（選択ドロワー）→ 固定アクション
@@ -5390,7 +5746,7 @@ function renderTileActionBar(ti) {
         if (best) {
           const p = getSquadPower(best.id, t.defTroop, t.type);
           const rel = troopMultiplier(getSquadTroop(best.id), t.defTroop, t.type);
-          note = `<div class="sheet-action-note">推奨: ${best.name}　戦力${fmt(p)} ${p >= getTileDefense(ti) ? "✅" : "⚠️"}${rel > 1 ? " <span class='rel-good'>有利</span>" : rel < 1 ? " <span class='rel-bad'>不利</span>" : ""}</div>`;
+          note = `<div class="sheet-action-note">推奨: ${best.name}　戦力${fmt(p)} ${p >= getEffectiveDefense(ti, best.id) ? "✅" : "⚠️"}${rel > 1 ? " <span class='rel-good'>有利</span>" : rel < 1 ? " <span class='rel-bad'>不利</span>" : ""}</div>`;
         }
       }
     }
@@ -5405,8 +5761,9 @@ function renderTileActionBar(ti) {
 /** 出撃する部隊を選ぶドロワー。本文をスクロールさせずに固定アクションの直上へ出す */
 function renderMarchDrawer(ti) {
   const t = S.world.tiles[ti];
-  const def = getTileDefense(ti);
   const rows = ensureSquads().slice(0, getSquadSlots()).map(sq => {
+    // 火計などの貫通は部隊ごとに違うので、実効防御も部隊ごとに出す
+    const def = getEffectiveDefense(ti, sq.id);
     const busy = S.player.marches.some(m => m.squadId === sq.id);
     const cards = getSquadCards(sq.id);
     const p = getSquadPower(sq.id, t.defTroop, t.type);
@@ -5417,7 +5774,8 @@ function renderMarchDrawer(ti) {
     const inRange = getMarchableTiles(getSquadRange(sq.id), origin).has(ti);
     const ok = !busy && cards.length && ratio >= CONFIG.TROOPS_MIN_RATIO_TO_MARCH && inRange;
     const why = busy ? "行軍中" : !cards.length ? "未編成" : ratio < CONFIG.TROOPS_MIN_RATIO_TO_MARCH ? "兵力不足" : !inRange ? "射程外" : "";
-    const spd = CONFIG.MARCH_TILES_PER_SEC * getSquadSpeedMult(sq.id) * (getAllianceBuffs().speed || 1) * researchMult("speed");
+    const spd = CONFIG.MARCH_TILES_PER_SEC * getSquadSpeedMult(sq.id) * (getAllianceBuffs().speed || 1)
+      * researchMult("speed") * getSquadSkillBuffs(sq.id).speed;
     const eta = fmtSec(Math.max(CONFIG.MARCH_MIN_SEC, getMarchDistance(ti, origin) / spd));
     const best = ok && p >= def && rel > 1;
     return `<button class="drawer-row ${ok ? (p >= def ? "can" : "cannot") : "cannot"} ${best ? "best" : ""}" ${ok ? "" : "disabled"} onclick="UIA.march(${ti},'${sq.id}')">
@@ -5483,6 +5841,8 @@ function closeSheet() {
   researchSheetOpen = false;
   openTileIndex = null;
   tileSheetActionMode = null;     // 出撃/駐留の選択ドロワーも畳む
+  openCardSheetTarget = null;
+  _feedPick.clear();              // 戦法強化の素材選択もリセット
 }
 
 /* =====================================================================
@@ -5553,6 +5913,30 @@ const UIA = {
     const sq = getSquad(squadId);
     toast(ti == null ? `${sq.name} を本城へ引き揚げました` : `${sq.name} を駐留させました`);
     openTileSheet(ti == null ? playerStartIdx() : ti); MapView.draw();
+  },
+  /* --- 必殺技([S26]) --- */
+  cardTap(squadId, defId, rank) { handleCardTap(squadId, defId, rank); },
+  feedPick(key, delta) {
+    const [defId, rankStr] = key.split("|");
+    const rank = Number(rankStr);
+    const target = openCardSheetTarget;
+    const arr = S.player.cards.filter(c => c.defId === defId && (c.rank || 0) === rank
+      && canFeedCard(c, target ? target.uid : null));
+    if (delta > 0) { const add = arr.find(c => !_feedPick.has(c.uid)); if (add) _feedPick.add(add.uid); }
+    else { const rm = arr.slice().reverse().find(c => _feedPick.has(c.uid)); if (rm) _feedPick.delete(rm.uid); }
+    if (target) openCardSheet(target.defId, target.rank);
+  },
+  feedClear() {
+    _feedPick.clear();
+    if (openCardSheetTarget) openCardSheet(openCardSheetTarget.defId, openCardSheetTarget.rank);
+  },
+  trainSkill() {
+    const t = openCardSheetTarget; if (!t) return;
+    const err = trainSkill(t.uid, [..._feedPick]);
+    if (err) { toast("⚠️ " + err); return; }
+    _feedPick.clear();
+    renderCards();
+    openCardSheet(t.defId, t.rank);   // 強化後の姿を見せる
   },
   /* --- カード合体([S22]) --- */
   fuse(defId, rank) {
