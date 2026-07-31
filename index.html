@@ -294,6 +294,8 @@ select{font:inherit;color:var(--fg);background:var(--bg3);border:1px solid var(-
 #winBanner{display:none;background:linear-gradient(90deg,#3a2f10,#5a4413);border:1px solid var(--accent);
   color:var(--accent);text-align:center;padding:8px;font-weight:700}
 #winBanner.show{display:block}
+/* 皇都を奪われている間は赤く警告する（[S27] 首都堅守） */
+#winBanner.danger{background:linear-gradient(90deg,#4a1414,#6b1d1d);border-color:var(--danger);color:#ffd9d9}
 
 /* 城の箱庭ビュー */
 .city-plot{position:relative;width:100%;height:300px;overflow:hidden;touch-action:pan-y;
@@ -411,7 +413,7 @@ const CONFIG = {
   DEV_MODE: false,                      // trueで開発用UI（ガチャタブの画像取り込み等）を表示
   SAVE_KEY: "hakoslg_save_v1",          // localStorageキー（名前空間 hakoslg_）
   ASSET_DB: "hakoslg_assets",           // IndexedDB名（画像アセット）
-  SAVE_VERSION: 20,                    // v20: 第二ステージ（stage）とレベル上限20
+  SAVE_VERSION: 21,                    // v21: 異民族（tribe / aiUsers[].tribe）
   LOG_MAX: 30,                         // 保持する出来事ログの最大件数
 
   // --- 初陣指南（[S15A]。最初の約1分でコアループを1周させる導線） ---
@@ -495,6 +497,19 @@ const CONFIG = {
   CASTLE_WOOD_BASE: 1100,               // 本城Lv2→3で必要な木材
   CASTLE_STONE_BASE: 900,               // 同・石材
   CASTLE_COST_GROWTH: 1.6,              // 本城レベルごとの増加率（倉庫の拡張が追いつく速さ）
+
+  // --- 異民族（[S27]・DESIGN_S2.md §3）---
+  // 第二ステージの本体。北端から波状に流入し、皇都を狙う。
+  TRIBE_WAVES: [                        // 波ごとの勢力数と城レベル
+    { count: 3, castleLv: 12 },
+    { count: 3, castleLv: 14 },
+    { count: 2, castleLv: 16 },
+  ],
+  TRIBE_SPAWN_MAX_Y: 3,                 // 出現はマップ北端（y ≤ この値）
+  TRIBE_MIN_DIST: 5,                    // 既存の城からこの距離以上離して置く
+  TRIBE_ATTACK_MULT: 1.4,               // 攻撃戦力の補正（通常AIより強い）
+  TRIBE_ATTACK_CHANCE: 0.65,            // 行動1回あたりの攻撃確率（通常は0.45）
+  TRIBE_MAX_CONCURRENT_MARCHES: 5,      // 異民族が居る間は同時侵攻の上限を増やす
 
   // --- 第二ステージと高レベル帯（DESIGN_S2.md §4）---
   // maxLevel を単に20にすると Lv16→17 の本城コスト(792.6k)が倉庫容量(668.6k)を超えて
@@ -914,7 +929,7 @@ const LOWER_IS_BETTER_RESEARCH = ["casualty", "buildTime"];
 const ASSIGNABLE_ROLES = ["一般", "軍師", "将軍", "都督", "斥候"];
 
 /** AI城の名前・カラーパレット（生成時にindex順で使用） */
-const AI_NAMES = ["北条庵", "夜叉丸", "百合園", "鉄舟斎", "花菱", "雷鳥院", "静waves", "黒曜", "月白", "杉浦党"];
+const AI_NAMES = ["北条庵", "夜叉丸", "百合園", "鉄舟斎", "花菱", "雷鳥院", "静波", "黒曜", "月白", "杉浦党"];
 const AI_COLORS = ["#e06666", "#6aa84f", "#6d9eeb", "#e69138", "#a64d79", "#45818e", "#c27ba0", "#8e7cc3", "#bf9000", "#76a5af"];
 
 /** タイル種別の描画定義 */
@@ -1063,6 +1078,10 @@ function migrateSave(data) {
     const p = DEFAULT_BUILDING_LAYOUT.camp;
     data.player.buildings.push({ id: "b_camp", type: "camp", level: 1, upgradeEndsAt: null, x: p.x, y: p.y });
   }
+
+  // v20 → v21: 異民族。未開始の状態から始まるだけで既存の進行に影響しない
+  if (!data.tribe) data.tribe = { wave: 0, startedAt: null, clearedAt: null };
+  for (const ai of (data.aiUsers || [])) if (ai.tribe == null) ai.tribe = false;
 
   // v19 → v20: 第二ステージ。すでに条件を満たしているセーブは2から始める
   if (data.stage == null) {
@@ -1602,6 +1621,8 @@ function generateAIUsers(world) {
  *   alliance: { id, name, members:[{id,role}], vault:{...}, order:{targetIdx,issuedAt,siege}|null },
  *                               // vault=同盟倉庫 / order=盟主の攻撃指示と包囲の進み具合([S24])
  *   stage: 1 | 2,               // 進行段階。2=第二ステージ（皇都制圧＋本城Lv10で解放）
+ *   tribe: { wave, startedAt, clearedAt },  // 異民族の進行([S27])。wave=0は未開始
+ *   aiUsers[].tribe: bool,      // 異民族フラグ。既存のAI戦闘の仕組みに相乗りする
  *   aiUsers: [ AIUser ],        // スキーマは generateAIUsers 参照。defeated=true は滅亡済み
  *   aiMarches: [ {id,aiId,targetIdx,power,departAt,arriveAt} ],  // AIからの攻撃([S12])
  *   flags: { holyWon, capitalWon, unifiedAt },  // 一度きりイベントの発火記録
@@ -1651,6 +1672,7 @@ function newGameState() {
       vault: { food: 0, wood: 0, stone: 0, iron: 0 },     // 同盟倉庫（[S24]）
       order: null },                                      // 盟主の攻撃指示（[S24]）
     stage: 1,                  // 進行段階（[S09]）。2で建物レベル上限が20に解放される
+    tribe: { wave: 0, startedAt: null, clearedAt: null },  // 異民族の進行（[S27]）
     aiUsers,
     aiMarches: [],             // AIからプレイヤー領への攻撃部隊（[S12]）。到着で解決される
     flags: { holyWon: false, capitalWon: false, unifiedAt: null },  // unifiedAt=天下統一した時刻（[S09]）
@@ -1968,6 +1990,22 @@ function isFullyUnified() {
 }
 function showWinBanner() {
   const el = $("winBanner"); if (!el) return;
+  el.classList.remove("danger");
+  // 第二ステージに入ったら、目標は異民族の討伐と皇都の堅守になる
+  if (isStage2() && S.tribe && S.tribe.wave > 0) {
+    if (S.tribe.clearedAt) {
+      el.textContent = "🏆 異民族討伐 — 皇都を守り抜き、大陸に平穏をもたらした";
+    } else if (!holdsCapital()) {
+      el.textContent = "🔥 皇都を奪われている！ 取り返さねば討伐は成らぬ";
+      el.classList.add("danger");
+    } else {
+      const rest = livingTribes().length;
+      const total = CONFIG.TRIBE_WAVES.length;
+      el.textContent = `🐺 第${S.tribe.wave}/${total}波 — 残る異民族 ${rest} 勢力 ｜ 皇都 堅守中 ｜ 制覇率 ${getConquestPct().toFixed(1)}%`;
+    }
+    el.classList.add("show");
+    return;
+  }
   // 勝利後は「残る反乱軍を掃討せよ」という次の目標を出し続ける（目的を切らさない）
   if (S.flags.unifiedAt) {
     el.textContent = `🏆 天下統一 — 全${S.aiUsers.length}勢力を平定し、大陸のすべてを手にした`;
@@ -3091,6 +3129,131 @@ function hintTick() {
 }
 
 /* =====================================================================
+ * [S27] TRIBE — 異民族（第二ステージ本体・DESIGN_S2.md §3）
+ *
+ * 皇都を制圧し本城Lv10に達すると、北の草原から異民族が流入する。
+ * 全勢力を討伐し、かつ**皇都を保持したまま**が勝利条件。
+ *
+ * 実装方針: 異民族は `S.aiUsers` に `tribe: true` で足すだけ。これで既存の
+ * AI侵攻([S12] aiAttack/resolveAIMarches)・城攻略([S09] defeatAI)・
+ * マップ描画・防御計算が**そのまま効く**。違いは下記の関数で分岐させる。
+ * ===================================================================*/
+const TRIBE_NAMES = ["狼牙部", "赤角衆", "凍原の民", "砂嵐衆", "黒鷲部",
+                     "鉄蹄衆", "白狼部", "雷斧衆"];
+const TRIBE_COLOR = "#9c6b4a";   // 統一色（褐色系）。既存AIの各色と区別する
+
+/** 異民族か */
+function isTribe(ai) { return !!(ai && ai.tribe); }
+/** 生存している異民族 */
+function livingTribes() { return S.aiUsers.filter(a => isTribe(a) && !a.defeated); }
+/** 皇都（勝利条件のタイル）のindex。旧ワールドでは聖地を代用 */
+function getCapitalIdx() {
+  if (S.world.capitalIdx != null) return S.world.capitalIdx;
+  const i = S.world.tiles.findIndex(t => t.type === "capital");
+  if (i >= 0) return i;
+  return S.world.tiles.findIndex(t => t.type === "holy");
+}
+/** 皇都を保持しているか（＝首都堅守が成立しているか） */
+function holdsCapital() {
+  const ci = getCapitalIdx();
+  return ci >= 0 && S.world.tiles[ci] && S.world.tiles[ci].ownerId === "player";
+}
+
+/**
+ * 波を1つ出現させる。マップ北端の通行可能タイルに、既存の城から離して置く。
+ * 置けなければ静かに諦める（マップが埋まっている場合の保険）。
+ */
+function spawnTribeWave(wave) {
+  const def = CONFIG.TRIBE_WAVES[wave - 1];
+  if (!def) return 0;
+  const used = S.aiUsers.filter(a => !a.defeated).map(a => ({ x: a.x, y: a.y }));
+  const cand = [];
+  for (let i = 0; i < S.world.tiles.length; i++) {
+    const t = S.world.tiles[i];
+    if (t.y > CONFIG.TRIBE_SPAWN_MAX_Y) continue;          // 北端のみ
+    if (isBlockedType(t.type) || t.type === "castle") continue;
+    if (t.ownerId === "player") continue;                   // 自領は潰さない
+    cand.push(i);
+  }
+  let placed = 0;
+  for (let k = 0; k < def.count; k++) {
+    let spot = null;
+    for (let guard = 0; guard < 400 && spot == null; guard++) {
+      const ti = pick(cand); if (ti == null) break;
+      const t = S.world.tiles[ti];
+      if (used.some(u => chebyshev(u.x, u.y, t.x, t.y) < CONFIG.TRIBE_MIN_DIST)) continue;
+      spot = ti;
+    }
+    if (spot == null) continue;
+    const t = S.world.tiles[spot];
+    const idxName = S.aiUsers.filter(isTribe).length;
+    const ai = {
+      id: "tribe_" + idxName,
+      name: TRIBE_NAMES[idxName] || "異民族" + idxName,
+      color: TRIBE_COLOR,
+      x: t.x, y: t.y,
+      castleLevel: def.castleLv,
+      personality: "expander",       // 常に攻める
+      recruitable: false,            // 勧誘できない
+      allianceId: null,
+      ownedTiles: [],
+      nextActionAt: 0,
+      nextRecruitAt: 0,
+      loyalty: 0,
+      regionId: null,
+      defeated: false,
+      tribe: true,                   // ★これだけで既存のAI戦闘の仕組みに乗る
+    };
+    // 前の所有者から取り上げて城にする
+    if (t.ownerId) {
+      const prev = S.aiUsers.find(a => a.id === t.ownerId);
+      if (prev) prev.ownedTiles = prev.ownedTiles.filter(i => i !== spot);
+    }
+    S.world.tiles[spot] = { x: t.x, y: t.y, type: "castle", level: def.castleLv, ownerId: ai.id };
+    S.aiUsers.push(ai);
+    used.push({ x: t.x, y: t.y });
+    placed++;
+  }
+  RUNTIME.conquestTotal = null;   // 城タイルが増えて制覇率の母数が変わる
+  invalidateMarchable();
+  return placed;
+}
+
+/**
+ * tickから呼ばれる。第二ステージの進行を見る。
+ *   波が全滅 → 次の波を出す
+ *   最終波まで全滅 かつ 皇都を保持 → 討伐達成
+ */
+function tribeTick() {
+  if (!isStage2() || !S.tribe) return;
+  if (S.tribe.clearedAt) return;
+  // 第1波の出現
+  if (S.tribe.wave === 0) {
+    S.tribe.wave = 1;
+    S.tribe.startedAt = now();
+    const n = spawnTribeWave(1);
+    toast(`🐺 北の草原より異民族が流入した！ ${n}勢力が現れた — 皇都を守り抜き、討ち払え`, "tribe");
+    warChat("onTribeWave", { wave: 1 });
+    return;
+  }
+  if (livingTribes().length > 0) return;              // まだ波が残っている
+  if (S.tribe.wave < CONFIG.TRIBE_WAVES.length) {
+    S.tribe.wave++;
+    const n = spawnTribeWave(S.tribe.wave);
+    toast(`🐺 第${S.tribe.wave}波の異民族が押し寄せる！ ${n}勢力（城Lv${CONFIG.TRIBE_WAVES[S.tribe.wave-1].castleLv}）`, "tribe");
+    warChat("onTribeWave", { wave: S.tribe.wave });
+    return;
+  }
+  // 最終波まで討伐済み。首都を保持していなければ勝利にならない
+  if (!holdsCapital()) return;
+  S.tribe.clearedAt = now();
+  toast("🏆 異民族討伐！ 皇都を守り抜き、大陸に平穏をもたらした", "win");
+  logEvent("win", "🐺 全異民族を討伐し、皇都を堅守した — 第二ステージ制覇");
+  chatEvent("onHolyWin");
+  showWinBanner();
+}
+
+/* =====================================================================
  * [S24] ALLIANCE VAULT — 同盟倉庫
  *
  * 加入したAIが毎分わずかずつ資源を納め、共通の備蓄になる。
@@ -3476,9 +3639,11 @@ const AI_ACTION_INTERVALS = { expander: [20, 60], balanced: [60, 180], turtle: [
  * V1ではAIは地域境界（埠頭・関所）と皇都を越えない＝三地方に自然に閉じ込められ、
  * プレイヤーだけが関を破って次の地域へ進める。
  */
-function isAIExpandableTile(ti) {
+function isAIExpandableTile(ti, ai) {
   const t = S.world.tiles[ti];
   if (isBlockedType(t.type)) return false;
+  // 異民族は地域の壁を越えて皇都を目指す（通常AIは自地方に閉じこもる）
+  if (isTribe(ai)) return true;
   if (t.type === "port") return !!CONFIG.AI_CAN_CAPTURE_PORT;
   if (t.type === "gate") return !!CONFIG.AI_CAN_CAPTURE_GATE;
   if (t.type === "capital") return !!CONFIG.AI_CAN_CAPTURE_CAPITAL;
@@ -3497,14 +3662,23 @@ function aiExpand(ai) {
       const ti = idx(nx, ny);
       const t = S.world.tiles[ti];
       if (t.ownerId || t.type === "castle" || t.type === "holy") continue;
-      if (!isAIExpandableTile(ti)) continue;      // 山河・要衝・皇都へは進出しない
+      if (!isAIExpandableTile(ti, ai)) continue;  // 山河・要衝・皇都へは進出しない（異民族は越える）
       if (!canStepBetween(si, ti)) continue;      // 角抜けもさせない
-      if (t.level > ai.castleLevel + 1) continue; // 分不相応なタイルは取らない
+      if (!isTribe(ai) && t.level > ai.castleLevel + 1) continue; // 分不相応なタイルは取らない
       candidates.push(ti);
     }
   }
   if (candidates.length) {
-    const ti = pick(candidates);
+    // 異民族は皇都へ向かって伸びる（北端から湧くので、放っておくと届かないため）
+    let ti;
+    if (isTribe(ai)) {
+      const ci = getCapitalIdx();
+      const c = ci >= 0 ? S.world.tiles[ci] : getPlayerStart();
+      ti = candidates.reduce((a, b) => {
+        const ta = S.world.tiles[a], tb = S.world.tiles[b];
+        return chebyshev(tb.x, tb.y, c.x, c.y) < chebyshev(ta.x, ta.y, c.x, c.y) ? b : a;
+      });
+    } else ti = pick(candidates);
     S.world.tiles[ti].ownerId = ai.id;
     ai.ownedTiles.push(ti);
   }
@@ -3521,14 +3695,17 @@ function aiGrow(ai) {
  * プレイヤーは気付いて対処（本城/兵舎を上げる・取り返す）できる。 */
 /** AIの攻撃戦力。城レベルの累乗で伸びる */
 function getAIAttackPower(ai) {
-  return Math.round(CONFIG.AI_ATTACK_POWER_BASE * Math.pow(Math.max(1, ai.castleLevel), CONFIG.AI_ATTACK_POWER_EXP));
+  const base = CONFIG.AI_ATTACK_POWER_BASE * Math.pow(Math.max(1, ai.castleLevel), CONFIG.AI_ATTACK_POWER_EXP);
+  return Math.round(base * (isTribe(ai) ? CONFIG.TRIBE_ATTACK_MULT : 1));
 }
 /** そのAIが今まさに攻撃してよいか（同盟員・撃破済み・序盤保護を除外） */
 function canAIAttack(ai) {
   if (!CONFIG.AI_ATTACK_ENABLED || ai.defeated) return false;
   if (ai.allianceId === S.alliance.id) return false;                 // 同盟員は攻めてこない
   if (S.player.ownedTiles.length < CONFIG.AI_ATTACK_MIN_PLAYER_TILES) return false; // 序盤は保護
-  if ((S.aiMarches || []).length >= CONFIG.AI_MAX_CONCURRENT_MARCHES) return false;
+  // 異民族が居る間は同時侵攻の枠を広げる（波で押し寄せる圧を出すため）
+  const cap = livingTribes().length ? CONFIG.TRIBE_MAX_CONCURRENT_MARCHES : CONFIG.AI_MAX_CONCURRENT_MARCHES;
+  if ((S.aiMarches || []).length >= cap) return false;
   return true;
 }
 /**
@@ -3590,6 +3767,12 @@ function resolveAIMarches(t) {
       invalidateMarchable();
       toast(`🔥 ${ai.name} に ${name} を奪われた… 敵戦力${fmt(m.power)} > 守り${fmt(def)}`, "raid");
       warChat("onTileLost", { enemy: ai.name, tile: TILE_DEFS[tile.type].name });
+      // 皇都を奪われると第二ステージの勝利条件が崩れる。強く知らせる
+      if (isStage2() && m.targetIdx === getCapitalIdx()) {
+        toast("🔥 皇都が陥落した！ 取り返さねば異民族の討伐は成らぬ", "raid");
+        warChat("onCapitalLost", { enemy: ai.name });
+        showWinBanner();
+      }
     } else {
       toast(`🛡️ ${ai.name} の攻撃を撃退！ ${name} を守り抜いた（守り${fmt(def)} > 敵${fmt(m.power)}）`, "defend");
       warChat("onDefend", { enemy: ai.name, tile: TILE_DEFS[tile.type].name });
@@ -3604,7 +3787,8 @@ function aiTickAll(t) {
     const [lo, hi] = AI_ACTION_INTERVALS[ai.personality];
     ai.nextActionAt = t + randInt(lo, hi) * 1000;
     // 拡張・内政より先に「攻撃するか」を判定する。成立した時はその行動を攻撃に充てる
-    if (Math.random() < (CONFIG.AI_ATTACK_CHANCE[ai.personality] || 0) && aiAttack(ai)) continue;
+    const atkChance = isTribe(ai) ? CONFIG.TRIBE_ATTACK_CHANCE : (CONFIG.AI_ATTACK_CHANCE[ai.personality] || 0);
+    if (Math.random() < atkChance && aiAttack(ai)) continue;
     if (ai.personality === "expander") aiExpand(ai);
     else if (ai.personality === "turtle") aiGrow(ai);
     else Math.random() < 0.5 ? aiExpand(ai) : aiGrow(ai);
@@ -4138,6 +4322,8 @@ const CHAT_LINES = {
     ],
   },
   onOrder: [],                                            // 盟主が攻撃目標を下知した（[S24]・未執筆）
+  onTribeWave: [],                                        // 異民族の波が来た（[S27]・未執筆）
+  onCapitalLost: [],                                      // 皇都を奪われた（[S27]・未執筆）
   onCastleFail: [
     "{enemy}の城は堅かった。……一旦引きましょう。",
     "攻め切れなかった。損害を認めて、次を備えよ。",
@@ -4831,6 +5017,7 @@ const LOG_KINDS = {
   fuse:     { color: "#e0a0d0" },  // カード合体で強化
   skill:    { color: "#e0c060" },  // 必殺技のレベルアップ
   grow:     { color: "#8fd0a0" },  // 武将のレベルアップ
+  tribe:    { color: "#d89060" },  // 異民族の流入・波の切替
   hint:     { color: "#7fd4c0" },  // 新しく使えるようになった機能の告知
   win:      { color: "#e8b84a" },  // 聖地制圧＝勝利
   build:    { color: "#9ab6e0" },  // 建物の強化完了
@@ -5517,7 +5704,16 @@ const MapView = {
           const ai = S.aiUsers.find(a => a.id === t.ownerId);
           const ally = ai && ai.allianceId;
           const canRecruit = ai && !ally && ai.recruitable;
-          if (ally || canRecruit) {
+          if (isTribe(ai) && !ai.defeated) {
+            // 異民族は勧誘できないので、外交バッジではなく「蕃」で敵と分かるようにする
+            const bx = px + ts - 6, by = py + 6;
+            ctx.beginPath(); ctx.arc(bx, by, 7.5, 0, Math.PI * 2);
+            ctx.fillStyle = `rgba(216,144,96,${0.8 + 0.2 * pulse})`; ctx.fill();
+            ctx.strokeStyle = "rgba(0,0,0,.45)"; ctx.lineWidth = 1; ctx.stroke();
+            ctx.font = "bold 9px sans-serif"; ctx.fillStyle = "#1b1008";
+            ctx.fillText("蕃", bx, by + 1);
+            ctx.font = `${Math.floor(ts * 0.62)}px sans-serif`;
+          } else if (ally || canRecruit) {
             const bx = px + ts - 6, by = py + 6;
             ctx.beginPath(); ctx.arc(bx, by, 7.5, 0, Math.PI * 2);
             ctx.fillStyle = ally ? "rgba(232,184,74,.95)" : `rgba(90,205,150,${0.7 + 0.3 * pulse})`;
@@ -5988,7 +6184,7 @@ function renderTileDetails(ti) {
     else c += `<span style="color:var(--danger)">落とせば ${ai.name} は滅亡し、領有していた ${ai.ownedTiles.length} 枚が無主に戻ります</span><br>💎ボーナス +${CONFIG.CASTLE_CAPTURE_DIAMONDS}`;
     html += detailsHTML("🏯 城の守備", c);
     html += detailsHTML("🤝 勢力・外交",
-      `性格: ${{ expander: "拡張志向", balanced: "バランス型", turtle: "内政重視" }[ai.personality]}<br>状態: ${ai.defeated ? "☠️ 滅亡" : ai.allianceId ? "🤝 同盟員" : ai.recruitable ? "✅ 勧誘可能" : "❌ 勧誘不可"}<br>領有 ${ai.ownedTiles.length} 枚${ai.recruitable && !ai.allianceId && !ai.defeated ? `<br>勧誘成功率 ${Math.round(recruitChance(ai) * 100)}%（🌾${CONFIG.RECRUIT_FOOD_COST}）` : ""}`);
+      `${isTribe(ai) ? "🐺 <b>異民族</b>（勧誘できない侵略者）<br>" : ""}性格: ${{ expander: "拡張志向", balanced: "バランス型", turtle: "内政重視" }[ai.personality]}<br>状態: ${ai.defeated ? "☠️ 滅亡" : ai.allianceId ? "🤝 同盟員" : ai.recruitable ? "✅ 勧誘可能" : "❌ 勧誘不可"}<br>領有 ${ai.ownedTiles.length} 枚${ai.recruitable && !ai.allianceId && !ai.defeated ? `<br>勧誘成功率 ${Math.round(recruitChance(ai) * 100)}%（🌾${CONFIG.RECRUIT_FOOD_COST}）` : ""}`);
   } else {
     const dt = t.defTroop ? TROOP_DEFS[t.defTroop] : null;
     let w = `防御 <b>${fmt(getTileDefense(ti))}</b><br>`;
@@ -6863,6 +7059,7 @@ function tick() {
   renderHeader();
   renderGuideBar();
   stageTick();
+  tribeTick();
   rulingTick();
   hintTick();
   updateChatBadge();
