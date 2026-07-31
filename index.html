@@ -200,6 +200,14 @@ select{font:inherit;color:var(--fg);background:var(--bg3);border:1px solid var(-
 .lv-badge.max{background:var(--danger);color:#2a0f0f}
 .lv-max{color:var(--danger);font-weight:700}
 .feed-box{margin-top:10px;padding:8px 10px;border-radius:8px;background:var(--bg2);border:1px solid var(--line)}
+/* 難易度の選択カード（[S01] CONFIG.DIFFICULTY） */
+.diff-list{display:flex;flex-direction:column;gap:10px;margin-top:12px}
+.diff-card{display:block;width:100%;text-align:left;padding:12px;border-radius:10px;
+  background:var(--bg2);border:1px solid var(--line);color:var(--fg)}
+.diff-card:active{background:var(--bg3)}
+.diff-head{font-size:16px;margin-bottom:4px}
+.diff-stats{display:flex;flex-wrap:wrap;gap:4px 14px;margin-top:8px;color:var(--fg-dim)}
+.diff-stats b{color:var(--fg)}
 .feed-list{max-height:32dvh;overflow-y:auto;margin-top:5px}
 .feed-row{display:flex;align-items:center;gap:6px;padding:3px 0;border-top:1px solid var(--line)}
 .card-stars{font-size:10px;letter-spacing:-1px;color:var(--accent)}
@@ -416,7 +424,7 @@ const CONFIG = {
   DEV_MODE: false,                      // trueで開発用UI（ガチャタブの画像取り込み等）を表示
   SAVE_KEY: "hakoslg_save_v1",          // localStorageキー（名前空間 hakoslg_）
   ASSET_DB: "hakoslg_assets",           // IndexedDB名（画像アセット）
-  SAVE_VERSION: 21,                    // v21: 異民族（tribe / aiUsers[].tribe）
+  SAVE_VERSION: 22,                    // v22: 難易度（difficulty）
   LOG_MAX: 30,                         // 保持する出来事ログの最大件数
 
   // --- 初陣指南（[S15A]。最初の約1分でコアループを1周させる導線） ---
@@ -477,7 +485,6 @@ const CONFIG = {
   CAPITAL_RESOURCE_MIN_LV: 8,           // 皇都州の資源レベル下限
   CAPITAL_RESOURCE_MAX_LV: 10,          // 同上限（通常地域はLv5まで）
   CAPITAL_RESOURCE_COUNT: 12,           // 皇都州に配置する高レベル資源の枚数
-  AI_REGION_COUNTS: { nw: 4, ne: 4, south: 2 }, // AI10勢力の三地方への配分
   AI_CAN_CAPTURE_PORT: false,           // V1ではAIは地域境界を越えない
   AI_CAN_CAPTURE_GATE: false,
   AI_CAN_CAPTURE_CAPITAL: false,
@@ -502,17 +509,54 @@ const CONFIG = {
   CASTLE_COST_GROWTH: 1.6,              // 本城レベルごとの増加率（倉庫の拡張が追いつく速さ）
 
   // --- 異民族（[S27]・DESIGN_S2.md §3）---
-  // 第二ステージの本体。北端から波状に流入し、皇都を狙う。
-  TRIBE_WAVES: [                        // 波ごとの勢力数と城レベル
-    { count: 3, castleLv: 12 },
-    { count: 3, castleLv: 14 },
-    { count: 2, castleLv: 16 },
-  ],
-  TRIBE_SPAWN_MAX_Y: 3,                 // 出現はマップ北端（y ≤ この値）
+  // 第二ステージの本体。マップの縁から波状に流入し、皇都を狙う。
+  // 波の構成（勢力数・城Lv・出現辺）と攻撃補正は**難易度プリセット側**にある。
+  TRIBE_SPAWN_DEPTH: 4,                 // 各辺からこの距離までを出現候補にする
   TRIBE_MIN_DIST: 5,                    // 既存の城からこの距離以上離して置く
-  TRIBE_ATTACK_MULT: 1.4,               // 攻撃戦力の補正（通常AIより強い）
   TRIBE_ATTACK_CHANCE: 0.65,            // 行動1回あたりの攻撃確率（通常は0.45）
-  TRIBE_MAX_CONCURRENT_MARCHES: 5,      // 異民族が居る間は同時侵攻の上限を増やす
+
+  // --- 難易度（DESIGN_S3.md §1）---------------------------------------
+  // 難易度で変わる値は**すべてここに集める**。CONFIG直下にも同名で置くと
+  // どちらが効いているか読めなくなるため、束ねた定数は上から取り除いてある。
+  // 参照は diff("KEY") だけを使うこと（ワールド生成中は S がまだ無いので
+  // generateAIUsers(world, difficulty) のように明示で渡す）。
+  //
+  // ★ノーマルの数値は実装前と完全に同一。既に遊んでいるセーブの手触りを変えない。
+  DIFFICULTY_DEFAULT: "normal",
+  DIFFICULTY: {
+    normal: {
+      label: "ノーマル", icon: "🌾",
+      lead: "積み上げた内政がそのまま勝ちに繋がる、標準の大陸。",
+      AI_COUNT: 10,
+      AI_REGION_COUNTS: { nw: 4, ne: 4, south: 2 },
+      AI_ATTACK_CHANCE: { expander: 0.45, balanced: 0.2, turtle: 0.05 },
+      AI_MAX_CONCURRENT_MARCHES: 3,
+      TRIBE_WAVES: [
+        { count: 3, castleLv: 12, edges: ["n"] },
+        { count: 3, castleLv: 14, edges: ["n"] },
+        { count: 2, castleLv: 16, edges: ["n"] },
+      ],
+      TRIBE_ATTACK_MULT: 1.4,
+      TRIBE_MAX_CONCURRENT_MARCHES: 5,
+      TRIBE_FORTIFY: false,               // 異民族が施設を建てるか（7-5で使う）
+    },
+    hard: {
+      label: "上級", icon: "🔥",
+      lead: "AIは14勢力。異民族は13勢力が三波で押し寄せ、最後は四方から皇都を囲む。",
+      AI_COUNT: 14,
+      AI_REGION_COUNTS: { nw: 5, ne: 5, south: 4 },
+      AI_ATTACK_CHANCE: { expander: 0.60, balanced: 0.32, turtle: 0.10 },
+      AI_MAX_CONCURRENT_MARCHES: 4,
+      TRIBE_WAVES: [
+        { count: 3, castleLv: 14, edges: ["n"] },
+        { count: 4, castleLv: 16, edges: ["n", "e"] },
+        { count: 6, castleLv: 18, edges: ["n", "e", "s", "w"] },  // 四方から
+      ],
+      TRIBE_ATTACK_MULT: 1.8,             // 城Lv14/16/18 で 10,012 / 11,910 / 13,880
+      TRIBE_MAX_CONCURRENT_MARCHES: 7,
+      TRIBE_FORTIFY: true,
+    },
+  },
 
   // --- 第二ステージと高レベル帯（DESIGN_S2.md §4）---
   // maxLevel を単に20にすると Lv16→17 の本城コスト(792.6k)が倉庫容量(668.6k)を超えて
@@ -561,7 +605,7 @@ const CONFIG = {
   // --- AIからの反撃（[S12]。奪われる緊張が「対人感」を作る） ---
   AI_ATTACK_ENABLED: true,
   AI_ATTACK_MIN_PLAYER_TILES: 3,        // 領地がこれ未満の間は攻めてこない（序盤・指南中の保護）
-  AI_ATTACK_CHANCE: { expander: 0.45, balanced: 0.2, turtle: 0.05 }, // 行動1回あたりの攻撃確率
+  // AI_ATTACK_CHANCE は難易度プリセット（CONFIG.DIFFICULTY）にある
   // 攻撃戦力 = BASE × 城Lv^EXP。Lv3=750／Lv10=3,591。
   // 下の自領防御と噛み合わせて「内政を伸ばせば守れる／放置すれば削られる」を作る:
   //   本城Lv5・兵舎Lv5 で Lv6タイルの守り約2,580（Lv10のAIには奪われる）
@@ -570,7 +614,7 @@ const CONFIG = {
   AI_ATTACK_POWER_EXP: 1.3,
   AI_MARCH_TILES_PER_SEC: 0.25,
   AI_MARCH_MIN_SEC: 25,                 // 気付いて対処する猶予を必ず残す（即時に奪わない）
-  AI_MAX_CONCURRENT_MARCHES: 3,         // 同時に飛んでくる攻撃の上限
+  // AI_MAX_CONCURRENT_MARCHES は難易度プリセット（CONFIG.DIFFICULTY）にある
   TILE_DEF_PLAYER_PER_CASTLE_LV: 160,   // 自領の防御 += 本城Lv×この値（内政が防衛になる）
   TILE_DEF_PLAYER_PER_BARRACKS_LV: 120, // 自領の防御 += 兵舎Lv×この値
 
@@ -695,7 +739,7 @@ const CONFIG = {
   RECRUIT_COOLDOWN_SEC: 60,
 
   // --- ワールド生成 ---
-  AI_COUNT: 10,
+  // AI_COUNT / AI_REGION_COUNTS は難易度プリセット（CONFIG.DIFFICULTY）にある
   AI_MIN_DIST_CENTER: 6,                // AI城は中心からこの距離以上
   AI_MIN_DIST_EACH: 5,                  // AI城同士の最低距離
   RESOURCE_TILE_RATIO: 0.45,            // 空地でない確率
@@ -932,8 +976,14 @@ const LOWER_IS_BETTER_RESEARCH = ["casualty", "buildTime"];
 const ASSIGNABLE_ROLES = ["一般", "軍師", "将軍", "都督", "斥候"];
 
 /** AI城の名前・カラーパレット（生成時にindex順で使用） */
-const AI_NAMES = ["北条庵", "夜叉丸", "百合園", "鉄舟斎", "花菱", "雷鳥院", "静波", "黒曜", "月白", "杉浦党"];
-const AI_COLORS = ["#e06666", "#6aa84f", "#6d9eeb", "#e69138", "#a64d79", "#45818e", "#c27ba0", "#8e7cc3", "#bf9000", "#76a5af"];
+/* AI勢力の名前と色。**難易度の最大勢力数（上級=14）まで用意すること**。
+ * 足りないと "AI10" のような仮名と灰色 #888 が並び、勢力の見分けが付かなくなる。 */
+const AI_NAMES = ["北条庵", "夜叉丸", "百合園", "鉄舟斎", "花菱", "雷鳥院", "静波", "黒曜", "月白", "杉浦党",
+                  "紅蓮寺", "氷室家", "天満党", "常盤院"];
+// 11〜14番目（上級で増える4勢力）は、既存10色＋異民族色から**RGB距離85以上**離れた
+// 色相の空き（78°/177°/240°/300°）から選んである。近い色を足すと勢力の見分けが付かない。
+const AI_COLORS = ["#e06666", "#6aa84f", "#6d9eeb", "#e69138", "#a64d79", "#45818e", "#c27ba0", "#8e7cc3",
+                   "#bf9000", "#76a5af", "#3030cf", "#bede73", "#cf30cf", "#30cfc7"];
 
 /** タイル種別の描画定義 */
 const TILE_DEFS = {
@@ -1081,6 +1131,9 @@ function migrateSave(data) {
     const p = DEFAULT_BUILDING_LAYOUT.camp;
     data.player.buildings.push({ id: "b_camp", type: "camp", level: 1, upgradeEndsAt: null, x: p.x, y: p.y });
   }
+
+  // v21 → v22: 難易度。**既存セーブは必ずノーマル**（数値は実装前と同一なので手触りが変わらない）
+  if (!data.difficulty) data.difficulty = CONFIG.DIFFICULTY_DEFAULT;
 
   // v20 → v21: 異民族。未開始の状態から始まるだけで既存の進行に影響しない
   if (!data.tribe) data.tribe = { wave: 0, startedAt: null, clearedAt: null };
@@ -1339,6 +1392,19 @@ const inBounds = (x, y) => x >= 0 && y >= 0 && x < SIZE && y < SIZE;
 const chebyshev = (x1, y1, x2, y2) => Math.max(Math.abs(x1 - x2), Math.abs(y1 - y2));
 const CENTER = Math.floor(SIZE / 2); // 旧ワールドのプレイヤー本城座標 (20,20)
 
+/* --- 難易度（DESIGN_S3.md §1）----------------------------------------
+ * 難易度で変わる値の**唯一の入口**。CONFIG直下には同名の定数を置かない。
+ * 未知のidや古いセーブは既定（ノーマル）へ倒す＝壊れるより鈍る方を選ぶ。 */
+function getDifficultyDef(id) {
+  return CONFIG.DIFFICULTY[id] || CONFIG.DIFFICULTY[CONFIG.DIFFICULTY_DEFAULT];
+}
+/** 現在の難易度の値を引く。ワールド生成中(Sが無い)は使えないので明示で渡すこと */
+function diff(key) {
+  return getDifficultyDef(S && S.difficulty)[key];
+}
+/** 表示用の難易度定義（ラベル・説明） */
+function getDifficulty() { return getDifficultyDef(S && S.difficulty); }
+
 /** プレイヤー本城の座標。旧ワールドは(20,20)、地形ワールドは world.playerStart */
 function getPlayerStart() {
   const ps = S && S.world && S.world.playerStart;
@@ -1541,8 +1607,13 @@ function computeRegionMask(tiles) {
   return mask;
 }
 
-/** AIUser を生成し、city タイルを world に配置する（地形ワールドは三地方へ 4/4/2 で配分） */
-function generateAIUsers(world) {
+/**
+ * AIUser を生成し、city タイルを world に配置する（三地方へ配分）。
+ * **難易度は引数で受け取る**。この時点では S がまだ組み立てられておらず、
+ * diff() が使えないため（呼び出しは newGameState の中の1箇所だけ）。
+ */
+function generateAIUsers(world, difficulty) {
+  const D = getDifficultyDef(difficulty);
   const users = [];
   const PS = world.playerStart || { x: CENTER, y: CENTER };
   const mask = computeRegionMask(world.tiles);
@@ -1556,11 +1627,11 @@ function generateAIUsers(world) {
     cand[r].push(i);
   }
   const plan = [];
-  for (const [region, n] of Object.entries(CONFIG.AI_REGION_COUNTS)) {
+  for (const [region, n] of Object.entries(D.AI_REGION_COUNTS)) {
     for (let k = 0; k < n; k++) plan.push(region);
   }
   for (const region of plan) {
-    if (users.length >= CONFIG.AI_COUNT) break;
+    if (users.length >= D.AI_COUNT) break;
     const pool = cand[region] || [];
     let placed = false;
     for (let guard = 0; guard < 400 && !placed; guard++) {
@@ -1623,6 +1694,7 @@ function generateAIUsers(world) {
  *   },
  *   alliance: { id, name, members:[{id,role}], vault:{...}, order:{targetIdx,issuedAt,siege}|null },
  *                               // vault=同盟倉庫 / order=盟主の攻撃指示と包囲の進み具合([S24])
+ *   difficulty: "normal" | "hard",  // 難易度([S01] CONFIG.DIFFICULTY)。開始時に決め、以降不変
  *   stage: 1 | 2,               // 進行段階。2=第二ステージ（皇都制圧＋本城Lv10で解放）
  *   tribe: { wave, startedAt, clearedAt },  // 異民族の進行([S27])。wave=0は未開始
  *   aiUsers[].tribe: bool,      // 異民族フラグ。既存のAI戦闘の仕組みに相乗りする
@@ -1639,12 +1711,14 @@ function generateAIUsers(world) {
  *     // 現在ステップは保存しない（getTutorialStep がゲーム状態から都度算出する）
  * }
  */
-function newGameState() {
+function newGameState(difficulty) {
+  const diffId = CONFIG.DIFFICULTY[difficulty] ? difficulty : CONFIG.DIFFICULTY_DEFAULT;
   const world = generateWorld();
-  const aiUsers = generateAIUsers(world);
+  const aiUsers = generateAIUsers(world, diffId);
   const t = now();
   return {
     version: CONFIG.SAVE_VERSION,
+    difficulty: diffId,        // 難易度（[S01] CONFIG.DIFFICULTY）。途中変更はできない
     createdAt: t, lastSavedAt: t, lastTickAt: t,
     world,
     player: {
@@ -2003,7 +2077,7 @@ function showWinBanner() {
       el.classList.add("danger");
     } else {
       const rest = livingTribes().length;
-      const total = CONFIG.TRIBE_WAVES.length;
+      const total = diff("TRIBE_WAVES").length;
       el.textContent = `🐺 第${S.tribe.wave}/${total}波 — 残る異民族 ${rest} 勢力 ｜ 皇都 堅守中 ｜ 制覇率 ${getConquestPct().toFixed(1)}%`;
     }
     el.classList.add("show");
@@ -3171,24 +3245,40 @@ function holdsCapital() {
   return ci >= 0 && S.world.tiles[ci] && S.world.tiles[ci].ownerId === "player";
 }
 
+/** タイルがその辺の出現帯に入っているか（n=北 / e=東 / s=南 / w=西） */
+function isOnSpawnEdge(t, edge) {
+  const d = CONFIG.TRIBE_SPAWN_DEPTH;
+  if (edge === "n") return t.y < d;
+  if (edge === "s") return t.y >= SIZE - d;
+  if (edge === "w") return t.x < d;
+  if (edge === "e") return t.x >= SIZE - d;
+  return false;
+}
+
 /**
- * 波を1つ出現させる。マップ北端の通行可能タイルに、既存の城から離して置く。
+ * 波を1つ出現させる。波ごとの出現辺の通行可能タイルに、既存の城から離して置く。
  * 置けなければ静かに諦める（マップが埋まっている場合の保険）。
  */
 function spawnTribeWave(wave) {
-  const def = CONFIG.TRIBE_WAVES[wave - 1];
+  const def = diff("TRIBE_WAVES")[wave - 1];
   if (!def) return 0;
   const used = S.aiUsers.filter(a => !a.defeated).map(a => ({ x: a.x, y: a.y }));
-  const cand = [];
+  // 出現は波ごとの「辺」から。上級の最終波は東西南北に散らして皇都を囲ませる。
+  // 南下ロジック（aiExpand が異民族だけ皇都に最も近い候補を選ぶ）は方角に依存しないので、
+  // どの辺から湧いても同じように皇都へ収束する。
+  const edges = (def.edges && def.edges.length) ? def.edges : ["n"];
+  const byEdge = {};
+  for (const e of edges) byEdge[e] = [];
   for (let i = 0; i < S.world.tiles.length; i++) {
     const t = S.world.tiles[i];
-    if (t.y > CONFIG.TRIBE_SPAWN_MAX_Y) continue;          // 北端のみ
     if (isBlockedType(t.type) || t.type === "castle") continue;
     if (t.ownerId === "player") continue;                   // 自領は潰さない
-    cand.push(i);
+    for (const e of edges) if (isOnSpawnEdge(t, e)) { byEdge[e].push(i); break; }
   }
   let placed = 0;
   for (let k = 0; k < def.count; k++) {
+    // 辺を順番に使い切る＝勢力数が辺の数で割り切れなくても偏りが最小で済む
+    const cand = byEdge[edges[k % edges.length]];
     let spot = null;
     for (let guard = 0; guard < 400 && spot == null; guard++) {
       const ti = pick(cand); if (ti == null) break;
@@ -3249,10 +3339,10 @@ function tribeTick() {
     return;
   }
   if (livingTribes().length > 0) return;              // まだ波が残っている
-  if (S.tribe.wave < CONFIG.TRIBE_WAVES.length) {
+  if (S.tribe.wave < diff("TRIBE_WAVES").length) {
     S.tribe.wave++;
     const n = spawnTribeWave(S.tribe.wave);
-    toast(`🐺 第${S.tribe.wave}波の異民族が押し寄せる！ ${n}勢力（城Lv${CONFIG.TRIBE_WAVES[S.tribe.wave-1].castleLv}）`, "tribe");
+    toast(`🐺 第${S.tribe.wave}波の異民族が押し寄せる！ ${n}勢力（城Lv${diff("TRIBE_WAVES")[S.tribe.wave-1].castleLv}）`, "tribe");
     warChat("onTribeWave", { wave: S.tribe.wave });
     return;
   }
@@ -3708,7 +3798,7 @@ function aiGrow(ai) {
 /** AIの攻撃戦力。城レベルの累乗で伸びる */
 function getAIAttackPower(ai) {
   const base = CONFIG.AI_ATTACK_POWER_BASE * Math.pow(Math.max(1, ai.castleLevel), CONFIG.AI_ATTACK_POWER_EXP);
-  return Math.round(base * (isTribe(ai) ? CONFIG.TRIBE_ATTACK_MULT : 1));
+  return Math.round(base * (isTribe(ai) ? diff("TRIBE_ATTACK_MULT") : 1));
 }
 /** そのAIが今まさに攻撃してよいか（同盟員・撃破済み・序盤保護を除外） */
 function canAIAttack(ai) {
@@ -3716,7 +3806,7 @@ function canAIAttack(ai) {
   if (ai.allianceId === S.alliance.id) return false;                 // 同盟員は攻めてこない
   if (S.player.ownedTiles.length < CONFIG.AI_ATTACK_MIN_PLAYER_TILES) return false; // 序盤は保護
   // 異民族が居る間は同時侵攻の枠を広げる（波で押し寄せる圧を出すため）
-  const cap = livingTribes().length ? CONFIG.TRIBE_MAX_CONCURRENT_MARCHES : CONFIG.AI_MAX_CONCURRENT_MARCHES;
+  const cap = livingTribes().length ? diff("TRIBE_MAX_CONCURRENT_MARCHES") : diff("AI_MAX_CONCURRENT_MARCHES");
   if ((S.aiMarches || []).length >= cap) return false;
   return true;
 }
@@ -3799,7 +3889,7 @@ function aiTickAll(t) {
     const [lo, hi] = AI_ACTION_INTERVALS[ai.personality];
     ai.nextActionAt = t + randInt(lo, hi) * 1000;
     // 拡張・内政より先に「攻撃するか」を判定する。成立した時はその行動を攻撃に充てる
-    const atkChance = isTribe(ai) ? CONFIG.TRIBE_ATTACK_CHANCE : (CONFIG.AI_ATTACK_CHANCE[ai.personality] || 0);
+    const atkChance = isTribe(ai) ? CONFIG.TRIBE_ATTACK_CHANCE : (diff("AI_ATTACK_CHANCE")[ai.personality] || 0);
     if (Math.random() < atkChance && aiAttack(ai)) continue;
     if (ai.personality === "expander") aiExpand(ai);
     else if (ai.personality === "turtle") aiGrow(ai);
@@ -5198,8 +5288,9 @@ function openLogSheet() {
     return `<div class="log-row"><span class="log-time">${fmtClock(e.ts)}</span>
       <span class="log-text" style="color:${col}">${escapeHtml(e.text)}</span></div>`;
   }).join("");
+  const D = getDifficulty();
   const _logHTML = `<h3>📜 出来事の記録</h3>
-    <div class="dim small">新しい順。最大${CONFIG.LOG_MAX}件まで残ります</div>
+    <div class="dim small">難易度 <b>${D.icon} ${D.label}</b> ｜ 新しい順。最大${CONFIG.LOG_MAX}件まで残ります</div>
     <div class="log-list">${rows || '<div class="dim small" style="padding:10px 2px">まだ記録がありません</div>'}</div>
     <div class="actions"><button onclick="closeSheet()">閉じる</button></div>`;
   showSheet(_logHTML);
@@ -7299,10 +7390,44 @@ function tick() {
   }
 }
 
+/* --- 難易度の選択（DESIGN_S3.md §1-1）--------------------------------
+ * **世界を生成する前に**選ばせる必要がある。AI勢力数と地方配分が難易度で変わり、
+ * generateAIUsers は S がまだ無い段階で走るため（difficulty を引数で受ける）。
+ * そのため boot() 側で await し、選び終わってから newGameState に渡す。
+ * 途中変更はできない — 積み上げた防御の意味が壊れるため。 */
+function chooseDifficulty() {
+  return new Promise(resolve => {
+    const card = (id) => {
+      const D = CONFIG.DIFFICULTY[id];
+      const waves = D.TRIBE_WAVES;
+      const total = waves.reduce((a, w) => a + w.count, 0);
+      // 攻撃戦力は式から出す（定数を直書きすると調整時にここだけ古くなる）
+      const atk = w => Math.round(CONFIG.AI_ATTACK_POWER_BASE
+        * Math.pow(w.castleLv, CONFIG.AI_ATTACK_POWER_EXP) * D.TRIBE_ATTACK_MULT);
+      const last = waves[waves.length - 1];
+      return `<button class="diff-card" onclick="UIA.pickDifficulty('${id}')">
+        <div class="diff-head">${D.icon} <b>${D.label}</b></div>
+        <div class="dim small">${D.lead}</div>
+        <div class="diff-stats small">
+          <span>AI勢力 <b>${D.AI_COUNT}</b></span>
+          <span>異民族 <b>${total}</b>勢力／${waves.length}波</span>
+          <span>最終波の攻撃戦力 <b>${atk(last).toLocaleString("en-US")}</b></span>
+          <span>同時侵攻 <b>${D.AI_MAX_CONCURRENT_MARCHES}</b>〜<b>${D.TRIBE_MAX_CONCURRENT_MARCHES}</b></span>
+        </div>
+      </button>`;
+    };
+    UIA.pickDifficulty = (id) => { closeSheet(); resolve(id); };
+    showSheet(`<h3>⚔️ 難易度を選ぶ</h3>
+      <div class="dim small">後から変更できません。迷ったらノーマルで大陸の広さを掴んでください。</div>
+      <div class="diff-list">${card("normal")}${card("hard")}</div>`);
+  });
+}
+
 async function boot() {
   await AssetDB.open();
   await AssetDB.loadAll();
-  S = loadGame() || newGameState();
+  S = loadGame();
+  if (!S) S = newGameState(await chooseDifficulty());   // 生成前に難易度を決める
   if (S.flags.holyWon || S.flags.capitalWon) showWinBanner();
   // 地形を迂回した行軍距離。1600マスのBFSを起動時に1回だけ（描画中には絶対に呼ばない）
   buildTerrainDistanceMap();
