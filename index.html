@@ -446,7 +446,7 @@ const CONFIG = {
   DEV_MODE: false,                      // trueで開発用UI（ガチャタブの画像取り込み等）を表示
   SAVE_KEY: "hakoslg_save_v1",          // localStorageキー（名前空間 hakoslg_）
   ASSET_DB: "hakoslg_assets",           // IndexedDB名（画像アセット）
-  SAVE_VERSION: 23,                    // v23: 異民族編の宣戦（tribe.offeredAt）
+  SAVE_VERSION: 24,                    // v24: 異民族の築城（world.tiles[].struct）
   LOG_MAX: 30,                         // 保持する出来事ログの最大件数
 
   // --- 初陣指南（[S15A]。最初の約1分でコアループを1周させる導線） ---
@@ -536,6 +536,11 @@ const CONFIG = {
   TRIBE_SPAWN_DEPTH: 4,                 // 各辺からこの距離までを出現候補にする
   TRIBE_MIN_DIST: 5,                    // 既存の城からこの距離以上離して置く
   TRIBE_ATTACK_CHANCE: 0.65,            // 行動1回あたりの攻撃確率（通常は0.45）
+  // 異民族の築城（DESIGN_S3.md §6・上級のみ）。南下の進路を固めてくるので、
+  // 取り返しに行く側の手間が増える＝「奪われる前より重い」圧が出る。
+  TRIBE_FORTIFY_CHANCE: 0.30,           // 行動1回あたりの築城確率
+  TRIBE_FORTIFY_MIN_TILES: 3,           // これだけ領地を持ってから建て始める
+  TRIBE_TOWER_MIN_TILES: 6,             // これ以上持っていれば柵ではなく櫓を建てる
 
   // --- 難易度（DESIGN_S3.md §1）---------------------------------------
   // 難易度で変わる値は**すべてここに集める**。CONFIG直下にも同名で置くと
@@ -1192,6 +1197,9 @@ function migrateSave(data) {
     data.player.buildings.push({ id: "b_camp", type: "camp", level: 1, upgradeEndsAt: null, x: p.x, y: p.y });
   }
 
+  // v23 → v24: 異民族の築城。**未築城＝フィールドが無い**状態で始まるので補完は要らない
+  // （1,600タイル全部に null を書くとセーブが無駄に膨らむ）。ここは意図的に何もしない。
+
   // v22 → v23: 異民族編の宣戦。**すでに始まっている進行中のセーブは打診済み扱い**にする
   // （wave>0 なのに「始めますか？」と訊かれるのを防ぐ）
   if (data.tribe && data.tribe.offeredAt === undefined) {
@@ -1765,6 +1773,7 @@ function generateAIUsers(world, difficulty) {
  *   tribe: { wave, startedAt, clearedAt, offeredAt },  // 異民族の進行([S27])。wave=0は未開始
  *                               // offeredAt=宣戦を打診した時刻。1度だけ自動で出す
  *   aiUsers[].tribe: bool,      // 異民族フラグ。既存のAI戦闘の仕組みに相乗りする
+ *   world.tiles[].struct: "palisade"|"tower",  // 異民族が築いた施設([S27])。無い＝未築城
  *   aiUsers: [ AIUser ],        // スキーマは generateAIUsers 参照。defeated=true は滅亡済み
  *   aiMarches: [ {id,aiId,targetIdx,power,departAt,arriveAt} ],  // AIからの攻撃([S12])
  *   flags: { holyWon, capitalWon, unifiedAt },  // 一度きりイベントの発火記録
@@ -2740,6 +2749,9 @@ function getTileDefense(ti) {
     const ai = S.aiUsers.find(a => a.id === t.ownerId);
     if (ai) def += ai.castleLevel * CONFIG.TILE_DEF_AI_PER_CASTLE_LV;
   }
+  // 異民族が築いた柵・櫓（[S27]）。プレイヤー側の施設と同じ値を使う
+  const ts = getTribeStructAt(ti);
+  if (ts) def += (STRUCT_DEFS[ts] || {}).def || 0;
   return Math.round(def * (1 - getSiegeReduction(ti)));
 }
 /**
@@ -3030,6 +3042,9 @@ function resolveMarches(t) {
         const ai = S.aiUsers.find(a => a.id === tile.ownerId);
         if (ai) ai.ownedTiles = ai.ownedTiles.filter(i => i !== m.targetIdx);
       }
+      // 異民族の施設は接収せず取り壊す。残すと S.player.outposts に無い施設が
+      // 自領に居座り、建設上限の外側で防御だけ増えてしまう
+      const razed = razeTribeStruct(m.targetIdx);
       tile.ownerId = "player";
       S.player.ownedTiles.push(m.targetIdx);
       invalidateMarchable(); // 自領が広がると出兵可能範囲も変わる
@@ -3050,6 +3065,7 @@ function resolveMarches(t) {
         warChat("onCastleFall", { enemy: ai ? ai.name : "敵勢力" });
       } else {
         toast(`⚔️ ${winTag}${TILE_DEFS[tile.type].name}Lv${tile.level} を制圧！ 💎+${bonus}`
+          + (razed ? " ／ 異民族の施設を取り壊した" : "")
           + (lost ? ` ／ 損耗 -${fmt(lost)}兵` : ""), "capture");
       }
       // 初制圧時だけ「領地が継続的に何を生むか」を1本にまとめて明示する
@@ -3413,6 +3429,52 @@ function spawnTribeWave(wave) {
   RUNTIME.conquestTotal = null;   // 城タイルが増えて制覇率の母数が変わる
   invalidateMarchable();
   return placed;
+}
+
+/* --- 異民族の築城（DESIGN_S3.md §6・上級のみ）--------------------------
+ * プレイヤーと同じ建設UIは無いので、**AIの行動の一種**として持たせる。
+ * 置き場所は「自領のうち皇都に最も近い1枚」＝進軍路を固める動きになる。
+ *
+ * 保存はタイル自身の `t.struct`（種別文字列）。ownerId や level と同じ
+ * **タイルの状態**なので、配列を別に持つより素直で参照も O(1) で済む。
+ * ただし効くのは**そのタイルの防御だけ**にしてある — オーラや迎撃まで持たせると
+ * getTileDefense が全施設走査になり、AIの攻撃対象を選ぶソートで毎回効いてくる。 */
+
+/** そのタイルの異民族施設（種別 or null）。**異民族が保持している間だけ効く** */
+function getTribeStructAt(ti) {
+  const t = S.world.tiles[ti];
+  if (!t || !t.struct) return null;
+  const owner = t.ownerId && t.ownerId !== "player" && S.aiUsers.find(a => a.id === t.ownerId);
+  return owner && isTribe(owner) && !owner.defeated ? t.struct : null;
+}
+/** 施設を取り壊す。プレイヤーが制圧した時に呼ぶ（接収はしない） */
+function razeTribeStruct(ti) {
+  const t = S.world.tiles[ti];
+  if (t && t.struct) { delete t.struct; return true; }
+  return false;
+}
+/**
+ * 異民族が1つ築城する。建てたら true（その行動を築城に充てた）。
+ * 建てるのは柵と櫓のみ — 駐屯所は駐留の仕組みが要るのでAIには持たせない。
+ */
+function aiFortify(ai) {
+  if (!isTribe(ai) || !diff("TRIBE_FORTIFY")) return false;
+  if (ai.ownedTiles.length < CONFIG.TRIBE_FORTIFY_MIN_TILES) return false;
+  const cand = ai.ownedTiles.filter(i => {
+    const t = S.world.tiles[i];
+    return t && t.ownerId === ai.id && !t.struct && !isBlockedType(t.type) && t.type !== "castle";
+  });
+  if (!cand.length) return false;
+  // 皇都に最も近い1枚＝進軍路の先端を固める
+  const ci = getCapitalIdx();
+  const c = ci >= 0 ? S.world.tiles[ci] : getPlayerStart();
+  const ti = cand.reduce((a, b) => {
+    const ta = S.world.tiles[a], tb = S.world.tiles[b];
+    return chebyshev(tb.x, tb.y, c.x, c.y) < chebyshev(ta.x, ta.y, c.x, c.y) ? b : a;
+  });
+  const kind = ai.ownedTiles.length >= CONFIG.TRIBE_TOWER_MIN_TILES ? "tower" : "palisade";
+  S.world.tiles[ti].struct = kind;
+  return true;
 }
 
 /**
@@ -4097,6 +4159,8 @@ function aiTickAll(t) {
     // 拡張・内政より先に「攻撃するか」を判定する。成立した時はその行動を攻撃に充てる
     const atkChance = isTribe(ai) ? CONFIG.TRIBE_ATTACK_CHANCE : (diff("AI_ATTACK_CHANCE")[ai.personality] || 0);
     if (Math.random() < atkChance && aiAttack(ai)) continue;
+    // 異民族は進軍路に柵と櫓を残す（上級のみ）。攻撃が成立しなかった時の行動に充てる
+    if (Math.random() < CONFIG.TRIBE_FORTIFY_CHANCE && aiFortify(ai)) continue;
     if (ai.personality === "expander") aiExpand(ai);
     else if (ai.personality === "turtle") aiGrow(ai);
     else Math.random() < 0.5 ? aiExpand(ai) : aiGrow(ai);
@@ -6273,6 +6337,16 @@ const MapView = {
             ctx.font = `${Math.floor(ts * 0.62)}px sans-serif`; // 元に戻す
           }
         }
+        // 異民族が築いた柵・櫓（[S27]）。敵領なので自領のマークとは別の分岐で描く。
+        // 位置と絵文字は自分の施設と揃える（同じものが建っている、と読めるように）
+        if (t.ownerId && t.ownerId !== "player" && ts >= 13) {
+          const tsk = getTribeStructAt(ti);
+          if (tsk) {
+            ctx.font = `${Math.floor(ts * 0.42)}px sans-serif`;
+            fillEmojiCentered(ctx, STRUCT_DEFS[tsk].emoji, px + ts * 0.26, py + ts * 0.28);
+            ctx.font = `${Math.floor(ts * 0.62)}px sans-serif`;   // 元に戻す
+          }
+        }
         // 幕舎と駐留のマーク。前線がどこかを地図だけで把握できるようにする
         if (t.ownerId === "player" && ts >= 13) {
           const op = getStructAt(ti);
@@ -6755,6 +6829,13 @@ function renderTileDetails(ti) {
   if (isBlockedType(t.type)) return "";
   const ai = t.ownerId && t.ownerId !== "player" ? S.aiUsers.find(a => a.id === t.ownerId) : null;
   let html = "";
+
+  // 異民族が築いた施設は「なぜ硬いのか」が読めないと理不尽になるので明示する
+  const tsk = getTribeStructAt(ti);
+  if (tsk) {
+    html += `<div class="dim small" style="margin-bottom:6px">${STRUCT_DEFS[tsk].emoji}
+      <b>異民族の${STRUCT_DEFS[tsk].name}</b> — 守り +${fmt(STRUCT_DEFS[tsk].def)}。制圧すると取り壊されます</div>`;
+  }
 
   if (t.ownerId === "player") {
     /* --- 駐留・防衛の内訳 --- */
