@@ -2892,6 +2892,12 @@ function resolveMarches(t) {
       // ここで資源タイル向けの祝辞まで続けると「良い土地を押さえました」等が重なって台無しになる
       if (!m.targetAiId) chatEvent("onPlayerCapture", { ctx: { tile: TILE_DEFS[tile.type].name } });
       gainAllianceLoyalty();   // 戦果は同盟員の忠誠にも効く
+      // 第二ステージ中に皇都を取り返した＝堅守の条件が戻った瞬間
+      if (isStage2() && m.targetIdx === getCapitalIdx()) {
+        toast("🏯 皇都を取り返した！ これで討伐の道が戻った", "capture");
+        warChat("onCapitalRetaken");
+        showWinBanner();
+      }
       // 統治フェーズでは制覇率が目標になるので、制圧のたびに進み具合を出す
       if (isRulingPhase()) toast(`🗺️ 制覇率 ${getConquestPct().toFixed(1)}% ｜ 残る勢力 ${getRemainingFactions()}`);
       // 勝利条件はワールドのルールセットで分岐する。
@@ -3249,7 +3255,7 @@ function tribeTick() {
   S.tribe.clearedAt = now();
   toast("🏆 異民族討伐！ 皇都を守り抜き、大陸に平穏をもたらした", "win");
   logEvent("win", "🐺 全異民族を討伐し、皇都を堅守した — 第二ステージ制覇");
-  chatEvent("onHolyWin");
+  warChat("onTribeCleared");
   showWinBanner();
 }
 
@@ -4324,6 +4330,8 @@ const CHAT_LINES = {
   onOrder: [],                                            // 盟主が攻撃目標を下知した（[S24]・未執筆）
   onTribeWave: [],                                        // 異民族の波が来た（[S27]・未執筆）
   onCapitalLost: [],                                      // 皇都を奪われた（[S27]・未執筆）
+  onCapitalRetaken: [],                                   // 皇都を取り返した（[S27]・未執筆）
+  onTribeCleared: [],                                     // 全異民族を討伐した（[S27]・未執筆）
   onCastleFail: [
     "{enemy}の城は堅かった。……一旦引きましょう。",
     "攻め切れなかった。損害を認めて、次を備えよ。",
