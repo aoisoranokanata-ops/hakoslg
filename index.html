@@ -201,6 +201,10 @@ select{font:inherit;color:var(--fg);background:var(--bg3);border:1px solid var(-
 .lv-max{color:var(--danger);font-weight:700}
 .feed-box{margin-top:10px;padding:8px 10px;border-radius:8px;background:var(--bg2);border:1px solid var(--line)}
 /* 難易度の選択カード（[S01] CONFIG.DIFFICULTY） */
+/* 施設の建設メニュー（[S23]）。未解禁は薄く出して「何を研究すれば増えるか」を見せる */
+.build-row{padding:7px 0;border-top:1px solid var(--line)}
+.build-row:first-child{border-top:0}
+.build-row.locked{opacity:.55}
 .diff-list{display:flex;flex-direction:column;gap:10px;margin-top:12px}
 .diff-card{display:block;width:100%;text-align:left;padding:12px;border-radius:10px;
   background:var(--bg2);border:1px solid var(--line);color:var(--fg)}
@@ -694,6 +698,30 @@ const CONFIG = {
   FORT_INTERCEPT_RANGE: 3,              // 施設は駐留部隊なしでも迎撃する
   FORT_INTERCEPT_POWER: 1200,           // 迎撃で削る固定量
 
+  // --- 築城（[S23]・DESIGN_S3.md §3）------------------------------------
+  // 幕舎・防衛施設に3種を足し、「面で薄く硬く／硬い前線拠点／着弾前に削る」の
+  // 3方向に分ける。数値だけ違う施設を並べても選択にならないため。
+  // 解禁は研究の築城枝（柵塁→駐屯制→望楼術）。
+  PALISADE_COST: { wood: 1500, stone: 800 },
+  PALISADE_DEF: 250,                    // 安く数を置ける。1枚では効かないが列にすると効く
+  PALISADE_BASE_MAX: 4,
+  PALISADE_PER_CASTLE_LV: 0.5,          // 本城Lv20で 4+10=14枚
+
+  GARRISON_POST_COST: { wood: 25000, stone: 20000, iron: 10000 },
+  GARRISON_POST_DEF: 1200,              // 幕舎(400)の3倍
+  GARRISON_POST_DEF_RATIO: 0.8,         // 駐留部隊の戦力が防御に乗る割合（幕舎は0.5）
+  GARRISON_POST_BASE_MAX: 2,
+  GARRISON_POST_PER_CASTLE_LV: 0.15,
+
+  TOWER_COST: { wood: 30000, stone: 25000, iron: 20000 },
+  TOWER_DEF: 800,
+  TOWER_AURA_DEF: 400,
+  TOWER_AURA_RANGE: 3,                  // 防衛施設(900/範囲2)より薄く広い
+  TOWER_INTERCEPT_RANGE: 4,             // 弓兵の駐留迎撃と同じ射程
+  TOWER_INTERCEPT_POWER: 800,           // 兵を置かずに着弾前へ削る。並べると累積する
+  TOWER_BASE_MAX: 2,
+  TOWER_PER_CASTLE_LV: 0.15,
+
   // --- 武将レベル（[S26]・DESIGN_S2.md §1）---
   // 素のステータスが伸びる軸。素材は SR以上（N/Rは戦法へ回す）。
   CARD_LEVEL_MAX: 30,                   // 武将レベルの上限（レア度によらず一律）
@@ -968,9 +996,21 @@ const RESEARCH_DEFS = [
   { id: "tribute",  name: "徴税制度",  icon: "💎", branch: "開拓", labLv: 10, requires: "levy",
     desc: "領地から得るダイヤ +25%", effect: { diamond: 1.25 },
     cost: { food: 120000, wood: 80000, stone: 80000 }, sec: 2400 },
+  // --- 築城（DESIGN_S3.md §3-3）---
+  // effect.unlock は**数値バフではない**。getResearchBuffs は数値だけを掛け合わせ、
+  // 文字列は無視する（混ぜると倍率が NaN になる）。解禁の判定は STRUCT_DEFS.research 側。
+  { id: "palisade",   name: "柵塁",   icon: "🧱", branch: "築城", labLv: 2,  requires: null,
+    desc: "マップに柵を建てられる（守りを面で薄く固める）", effect: { unlock: "palisade" },
+    cost: { wood: 6000, stone: 4000 }, sec: 300 },
+  { id: "garrison",   name: "駐屯制", icon: "🛖", branch: "築城", labLv: 7,  requires: "palisade",
+    desc: "駐屯所を建てられる（幕舎より硬く、駐留の守りが厚い）", effect: { unlock: "garrison_post" },
+    cost: { wood: 60000, stone: 50000, iron: 30000 }, sec: 1500 },
+  { id: "watchtower", name: "望楼術", icon: "🏹", branch: "築城", labLv: 11, requires: "garrison",
+    desc: "櫓を建てられる（着弾前に敵の戦力を削る）", effect: { unlock: "tower" },
+    cost: { wood: 90000, stone: 90000, iron: 60000 }, sec: 2400 },
 ];
 const RESEARCH_BY_ID = Object.fromEntries(RESEARCH_DEFS.map(r => [r.id, r]));
-const RESEARCH_BRANCHES = ["内政", "軍事", "開拓"];
+const RESEARCH_BRANCHES = ["内政", "軍事", "開拓", "築城"];
 /** 小さいほど強い研究バフ（複数取っても掛け算で減っていく） */
 const LOWER_IS_BETTER_RESEARCH = ["casualty", "buildTime"];
 const ASSIGNABLE_ROLES = ["一般", "軍師", "将軍", "都督", "斥候"];
@@ -2654,15 +2694,15 @@ function getTileDefense(ti) {
  */
 function getPlayerTileDefense(ti) {
   // 幕舎そのものの防御と、駐留部隊の戦力が上乗せされる＝守りたい場所に兵を置く意味が出る
-  const outpost = getOutpostAt(ti) ? CONFIG.OUTPOST_DEF_BONUS : 0;
-  const fort = getFortAt(ti) ? CONFIG.FORT_DEF : 0;
+  const st = getStructAt(ti);
+  const struct = st ? structDef(st).def : 0;
   // 「鉄壁」など守りの必殺技は駐留している部隊のぶんだけ乗る
   const garrison = getGarrisonSquads(ti).reduce((a, sq) =>
-    a + getSquadPower(sq.id, null) * getSquadSkillBuffs(sq.id).guard, 0) * CONFIG.GARRISON_DEF_RATIO;
+    a + getSquadPower(sq.id, null) * getSquadSkillBuffs(sq.id).guard, 0) * getGarrisonDefRatio(ti);
   return Math.round((getTileDefense(ti)
     + S.player.castleLevel * CONFIG.TILE_DEF_PLAYER_PER_CASTLE_LV
     + getBuilding("barracks").level * CONFIG.TILE_DEF_PLAYER_PER_BARRACKS_LV
-    + outpost + fort + garrison + getFortAuraDef(ti)) * researchMult("tileDef"));
+    + struct + garrison + getStructAuraDef(ti)) * researchMult("tileDef"));
 }
 
 /* --- 地形の通行判定 --------------------------------------------------
@@ -3465,35 +3505,75 @@ function withdrawVault(resKey) {
  * 駐留した部隊は「そこから出撃し」「そこを守り」「そこで回復する」。
  * 部隊の駐留先は squad.stationedAt（タイルindex）。null なら本城詰め。
  * ===================================================================*/
-/** 建てられる幕舎の上限（本城レベルで増える） */
-function getOutpostMax() {
-  return CONFIG.OUTPOST_BASE_MAX + Math.floor(S.player.castleLevel * CONFIG.OUTPOST_PER_CASTLE_LV);
-}
-/* 幕舎と防衛施設は同じ配列 S.player.outposts に kind で入れる。
-   "camp"=幕舎（駐留地になる） / "fort"=防衛施設（固定防御・単体で迎撃）。
+/* マップ施設の静的定義（[S02]の方針どおり S には入れない・DESIGN_S3.md §3）。
+ * **5種すべてを1つの表にまとめてある**。幕舎と防衛施設の数値は CONFIG から
+ * そのまま引いているので、築城の追加で既存の2種は一切変わらない。
+ *   def            自タイルに乗る固定防御
+ *   aura/auraRange 周囲の自領に乗る防御（重ねがけ可）
+ *   intercept/…    着弾前に削る固定量と射程（兵を置かなくても効く）
+ *   garrison       部隊を置けるか。defRatio は駐留戦力が防御に乗る割合
+ *   research       解禁に要る研究id（無ければ最初から建てられる）
+ *   castleLv       解禁に要る本城レベル
+ *   nearAnchor     自城／占領した関所の近くにしか建てられない
+ * 絵文字はタイル種別（🌾🪵🪨⚙️⛩️🏯⛰️🌊⚓）と重ならないものを選ぶこと。
+ * マップ上でタイルの上に重ねて描くため、被ると地形と施設の区別が付かなくなる。 */
+const STRUCT_DEFS = {
+  camp: {
+    name: "幕舎", emoji: "⛺", lead: "前線の拠点",
+    def: CONFIG.OUTPOST_DEF_BONUS, cost: CONFIG.OUTPOST_COST,
+    baseMax: CONFIG.OUTPOST_BASE_MAX, perCastleLv: CONFIG.OUTPOST_PER_CASTLE_LV,
+    garrison: true, defRatio: CONFIG.GARRISON_DEF_RATIO,
+  },
+  fort: {
+    name: "防衛施設", emoji: "🗼", lead: "拠点を固める砲台",
+    def: CONFIG.FORT_DEF, cost: CONFIG.FORT_COST,
+    baseMax: CONFIG.FORT_BASE_MAX, perCastleLv: CONFIG.FORT_PER_CASTLE_LV,
+    aura: CONFIG.FORT_AURA_DEF, auraRange: CONFIG.FORT_AURA_RANGE,
+    intercept: CONFIG.FORT_INTERCEPT_POWER, interceptRange: CONFIG.FORT_INTERCEPT_RANGE,
+    castleLv: CONFIG.FORT_REQUIRE_CASTLE_LV, nearAnchor: true,
+  },
+  palisade: {
+    name: "柵", emoji: "🧱", lead: "面を薄く硬くする",
+    def: CONFIG.PALISADE_DEF, cost: CONFIG.PALISADE_COST,
+    baseMax: CONFIG.PALISADE_BASE_MAX, perCastleLv: CONFIG.PALISADE_PER_CASTLE_LV,
+    research: "palisade",
+  },
+  garrison_post: {
+    name: "駐屯所", emoji: "🛖", lead: "硬い前線拠点",
+    def: CONFIG.GARRISON_POST_DEF, cost: CONFIG.GARRISON_POST_COST,
+    baseMax: CONFIG.GARRISON_POST_BASE_MAX, perCastleLv: CONFIG.GARRISON_POST_PER_CASTLE_LV,
+    garrison: true, defRatio: CONFIG.GARRISON_POST_DEF_RATIO,
+    research: "garrison",
+  },
+  tower: {
+    name: "櫓", emoji: "🏹", lead: "着弾前に削る",
+    def: CONFIG.TOWER_DEF, cost: CONFIG.TOWER_COST,
+    baseMax: CONFIG.TOWER_BASE_MAX, perCastleLv: CONFIG.TOWER_PER_CASTLE_LV,
+    aura: CONFIG.TOWER_AURA_DEF, auraRange: CONFIG.TOWER_AURA_RANGE,
+    intercept: CONFIG.TOWER_INTERCEPT_POWER, interceptRange: CONFIG.TOWER_INTERCEPT_RANGE,
+    research: "watchtower",
+  },
+};
+/** 建設メニューに並べる順（安い順＝解禁される順） */
+const STRUCT_ORDER = ["palisade", "camp", "garrison_post", "tower", "fort"];
+
+/* 施設はすべて同じ配列 S.player.outposts に kind で入れる。
    kind が無い古いデータは幕舎として扱う（v14で幕舎しか無かったため）。 */
 function structKind(o) { return o.kind || "camp"; }
+function structDef(o) { return STRUCT_DEFS[structKind(o)] || STRUCT_DEFS.camp; }
+/** 種別ごとの建設上限（本城レベルで増える） */
+function getStructMax(kind) {
+  const d = STRUCT_DEFS[kind]; if (!d) return 0;
+  return d.baseMax + Math.floor(S.player.castleLevel * d.perCastleLv);
+}
+
 function getStructAt(ti) {
   return (S.player.outposts || []).find(o => o.tileIdx === ti) || null;
-}
-/** そのタイルの幕舎（防衛施設は含めない） */
-function getOutpostAt(ti) {
-  const o = getStructAt(ti);
-  return o && structKind(o) === "camp" ? o : null;
-}
-/** そのタイルの防衛施設 */
-function getFortAt(ti) {
-  const o = getStructAt(ti);
-  return o && structKind(o) === "fort" ? o : null;
 }
 function countStructs(kind) {
   return (S.player.outposts || []).filter(o => structKind(o) === kind).length;
 }
-/** 建てられる防衛施設の上限 */
-function getFortMax() {
-  return CONFIG.FORT_BASE_MAX + Math.floor(S.player.castleLevel * CONFIG.FORT_PER_CASTLE_LV);
-}
-/** 防衛施設を建てられる位置か（自城か占領した関所の近く） */
+/** 自城／占領した関所の近くか（nearAnchor の施設だけが要求される） */
 function isFortBuildable(ti) {
   const t = S.world.tiles[ti];
   if (!t || t.ownerId !== "player") return false;
@@ -3505,21 +3585,54 @@ function isFortBuildable(ti) {
     return a && chebyshev(a.x, a.y, t.x, t.y) <= CONFIG.FORT_BUILD_RANGE;
   });
 }
-/** 防衛施設を建てる。失敗理由 or null */
-function buildFort(ti) {
+/** その種別が解禁されているか。まだなら理由文字列、解禁済みなら null */
+function getStructLockReason(kind) {
+  const d = STRUCT_DEFS[kind]; if (!d) return "不明な施設です";
+  if (d.research && !isResearchDone(d.research)) {
+    const r = RESEARCH_BY_ID[d.research];
+    return `研究「${r ? r.name : d.research}」で解禁されます`;
+  }
+  if (d.castleLv && S.player.castleLevel < d.castleLv) {
+    return `本城Lv${d.castleLv}で解禁されます（現在Lv${S.player.castleLevel}）`;
+  }
+  return null;
+}
+/**
+ * 施設を建てる。**5種すべてこの1つを通す**。失敗理由 or null。
+ * 種別ごとの違いは STRUCT_DEFS の項目だけで表現し、分岐をここに散らかさない。
+ */
+function buildStruct(ti, kind) {
+  const d = STRUCT_DEFS[kind]; if (!d) return "不明な施設です";
   const t = S.world.tiles[ti];
   if (!t || t.ownerId !== "player") return "自分の領地にのみ建てられます";
-  if (S.player.castleLevel < CONFIG.FORT_REQUIRE_CASTLE_LV) {
-    return `本城Lv${CONFIG.FORT_REQUIRE_CASTLE_LV}で解禁されます（現在Lv${S.player.castleLevel}）`;
+  if (ti === playerStartIdx()) return "本城には建てられません";
+  if (t.type === "castle" || FORTRESS_TYPES.includes(t.type)) {
+    return d.garrison ? "要衝にはそのまま駐留できます（施設は不要）" : "要衝には建てられません";
   }
+  const lock = getStructLockReason(kind);
+  if (lock) return lock;
   if (getStructAt(ti)) return "すでに施設があります";
-  if (!isFortBuildable(ti)) return `自城か占領した関所から${CONFIG.FORT_BUILD_RANGE}タイル以内にのみ建てられます`;
-  if (countStructs("fort") >= getFortMax()) return `防衛施設の上限です（${getFortMax()}）`;
-  if (!canAfford(CONFIG.FORT_COST)) return `資源が足りません（${fmtCost(CONFIG.FORT_COST)}）`;
-  payCost(CONFIG.FORT_COST);
-  S.player.outposts.push({ id: uid("ft"), tileIdx: ti, kind: "fort" });
-  toast(`🗼 (${t.x}, ${t.y}) に防衛施設を築いた — 周囲${CONFIG.FORT_AURA_RANGE}タイルの守りが上がります`, "build");
+  if (d.nearAnchor && !isFortBuildable(ti)) {
+    return `自城か占領した関所から${CONFIG.FORT_BUILD_RANGE}タイル以内にのみ建てられます`;
+  }
+  const max = getStructMax(kind);
+  // **種別ごとに数える**。配列全体の長さで見ると、他の施設を建てるほど枠が減る
+  if (countStructs(kind) >= max) return `${d.name}の上限です（${max}・本城を上げると増えます）`;
+  if (!canAfford(d.cost)) return `資源が足りません（${fmtCost(d.cost)}）`;
+  payCost(d.cost);
+  S.player.outposts.push({ id: uid("st"), tileIdx: ti, kind });
+  toast(`${d.emoji} (${t.x}, ${t.y}) に${d.name}を築いた — ${structEffectText(kind)}`, "build");
+  invalidateMarchable();     // 駐留できる施設なら出撃起点が増える
   return null;
+}
+/** 施設の効果を1行で（トーストと建設メニューで同じ文言を使う） */
+function structEffectText(kind) {
+  const d = STRUCT_DEFS[kind]; if (!d) return "";
+  const parts = [`この地の守り +${fmt(d.def)}`];
+  if (d.aura) parts.push(`周囲${d.auraRange}タイルに +${fmt(d.aura)}`);
+  if (d.intercept) parts.push(`射程${d.interceptRange}を迎撃 −${fmt(d.intercept)}`);
+  if (d.garrison) parts.push(`駐留可（戦力の${Math.round(d.defRatio * 100)}%が守りに乗る）`);
+  return parts.join("／");
 }
 /** 施設の撤去（幕舎・防衛施設の共通） */
 function removeStruct(ti) {
@@ -3530,14 +3643,16 @@ function removeStruct(ti) {
   invalidateMarchable();
   return null;
 }
-/** そのタイルに乗る防衛施設のオーラ防御（範囲内の施設数ぶん加算） */
-function getFortAuraDef(ti) {
+/** そのタイルに乗る周囲の施設のオーラ防御（防衛施設と櫓。範囲内の数ぶん加算） */
+function getStructAuraDef(ti) {
   const t = S.world.tiles[ti];
   let sum = 0;
   for (const o of (S.player.outposts || [])) {
-    if (structKind(o) !== "fort" || o.tileIdx === ti) continue;
+    if (o.tileIdx === ti) continue;
+    const d = structDef(o);
+    if (!d.aura) continue;
     const f = S.world.tiles[o.tileIdx];
-    if (f && chebyshev(f.x, f.y, t.x, t.y) <= CONFIG.FORT_AURA_RANGE) sum += CONFIG.FORT_AURA_DEF;
+    if (f && chebyshev(f.x, f.y, t.x, t.y) <= d.auraRange) sum += d.aura;
   }
   return sum;
 }
@@ -3546,12 +3661,22 @@ function isFortressSite(ti) {
   const t = S.world.tiles[ti];
   return t.ownerId === "player" && FORTRESS_TYPES.includes(t.type);
 }
-/** 部隊を置ける場所か（幕舎 or 占領した要衝 or 本城） */
+/** そのタイルの駐留できる施設（幕舎・駐屯所）。無ければ null */
+function getGarrisonStructAt(ti) {
+  const o = getStructAt(ti);
+  return o && structDef(o).garrison ? o : null;
+}
+/** 部隊を置ける場所か（幕舎・駐屯所 or 占領した要衝 or 本城） */
 function isGarrisonSite(ti) {
   if (ti === playerStartIdx()) return true;
   const t = S.world.tiles[ti];
   if (!t || t.ownerId !== "player") return false;
-  return !!getOutpostAt(ti) || isFortressSite(ti);
+  return !!getGarrisonStructAt(ti) || isFortressSite(ti);
+}
+/** そのタイルで駐留戦力が防御に乗る割合（駐屯所は幕舎より高い） */
+function getGarrisonDefRatio(ti) {
+  const o = getGarrisonStructAt(ti);
+  return o ? structDef(o).defRatio : CONFIG.GARRISON_DEF_RATIO;
 }
 /** そのタイルに駐留している部隊の一覧 */
 function getGarrisonSquads(ti) {
@@ -3566,21 +3691,6 @@ function getSquadOrigin(squadId) {
   const sq = getSquad(squadId);
   if (sq && sq.stationedAt != null && isGarrisonSite(sq.stationedAt)) return sq.stationedAt;
   return playerStartIdx();
-}
-/** 幕舎を建てる。失敗理由 or null */
-function buildOutpost(ti) {
-  const t = S.world.tiles[ti];
-  if (!t || t.ownerId !== "player") return "自分の領地にのみ建てられます";
-  if (t.type === "castle" || FORTRESS_TYPES.includes(t.type)) return "要衝にはそのまま駐留できます（幕舎は不要）";
-  if (getOutpostAt(ti)) return "すでに幕舎があります";
-  if ((S.player.outposts || []).length >= getOutpostMax()) {
-    return `幕舎はあと建てられません（上限${getOutpostMax()}・本城を上げると増えます）`;
-  }
-  if (!canAfford(CONFIG.OUTPOST_COST)) return `資源が足りません（${fmtCost(CONFIG.OUTPOST_COST)}）`;
-  payCost(CONFIG.OUTPOST_COST);
-  S.player.outposts.push({ id: uid("op"), tileIdx: ti, kind: "camp" });
-  toast(`⛺ (${t.x}, ${t.y}) に幕舎を築いた — 部隊を駐留させれば前線の拠点になります`, "build");
-  return null;
 }
 
 /** 部隊の駐留先を変更する（null で本城へ戻す）。失敗理由 or null */
@@ -3631,13 +3741,14 @@ function applyIntercept(march) {
     const power = getSquadPower(sq.id, null);
     cut += march.power * ratio * clamp(power / Math.max(1, march.power), 0, 1);
   }
-  // 防衛施設は兵を置かなくても射程内を叩く（本城・関所周りの固い壁になる）
+  // 防衛施設と櫓は兵を置かなくても射程内を叩く。並べるほど削りが累積する
   for (const o of (S.player.outposts || [])) {
-    if (structKind(o) !== "fort") continue;
+    const d = structDef(o);
+    if (!d.intercept) continue;
     const f = S.world.tiles[o.tileIdx];
     if (!f || f.ownerId !== "player") continue;
-    if (chebyshev(f.x, f.y, target.x, target.y) > CONFIG.FORT_INTERCEPT_RANGE) continue;
-    cut += CONFIG.FORT_INTERCEPT_POWER;
+    if (chebyshev(f.x, f.y, target.x, target.y) > d.interceptRange) continue;
+    cut += d.intercept;
   }
   cut = Math.min(march.power, Math.round(cut));
   if (cut > 0) march.power -= cut;
@@ -3657,7 +3768,10 @@ function getResearchBuffs() {
   const done = (S && S.player.research && S.player.research.done) || [];
   for (const id of done) {
     const def = RESEARCH_BY_ID[id]; if (!def) continue;   // 定義から消えた研究は無視する
-    for (const [k, v] of Object.entries(def.effect)) out[k] = (out[k] == null ? 1 : out[k]) * v;
+    for (const [k, v] of Object.entries(def.effect)) {
+      if (typeof v !== "number") continue;   // unlock 等の非数値は倍率に混ぜない（NaNになる）
+      out[k] = (out[k] == null ? 1 : out[k]) * v;
+    }
   }
   return out;
 }
@@ -5981,7 +6095,7 @@ const MapView = {
           const gar = getGarrisonSquads(ti).length;
           if (op || (gar && isGarrisonSite(ti))) {
             ctx.font = `${Math.floor(ts * 0.42)}px sans-serif`;
-            if (op) fillEmojiCentered(ctx, structKind(op) === "fort" ? "🗼" : "⛺", px + ts * 0.26, py + ts * 0.28);
+            if (op) fillEmojiCentered(ctx, structDef(op).emoji, px + ts * 0.26, py + ts * 0.28);
             if (gar) {
               const bx = px + ts - 7, by = py + ts - 7;
               ctx.beginPath(); ctx.arc(bx, by, 7, 0, Math.PI * 2);
@@ -6398,8 +6512,8 @@ function renderTileSummary(ti) {
       ? `${RES_DEFS[t.type].emoji} +${fmt(CONFIG.TILE_PROD_PER_LEVEL_PER_HOUR * t.level)}/h ｜ ` : "";
     rows.push(`${prod}🛡️ 守り ${fmt(getPlayerTileDefense(ti))}`);
     const marks = [];
-    if (getOutpostAt(ti)) marks.push("⛺ 幕舎");
-    if (getFortAt(ti)) marks.push("🗼 防衛施設");
+    const st = getStructAt(ti);
+    if (st) marks.push(`${structDef(st).emoji} ${structDef(st).name}`);
     const gar = getGarrisonSquads(ti);
     if (gar.length) marks.push(`🛡 ${gar.map(sq => sq.name).join("・")} 駐留中`);
     if (marks.length) rows.push(marks.join(" ｜ "));
@@ -6427,6 +6541,31 @@ function renderTileSummary(ti) {
 }
 
 /** 折りたたみの詳細。初期状態はすべて閉じる */
+/** 施設の建設メニュー。未解禁のものも理由付きで並べる（何を研究すべきか見せる） */
+function buildMenuHTML(ti) {
+  const t = S.world.tiles[ti];
+  if (ti === playerStartIdx() || t.type === "castle" || FORTRESS_TYPES.includes(t.type)) return "";
+  let out = "";
+  for (const kind of STRUCT_ORDER) {
+    const d = STRUCT_DEFS[kind];
+    if (d.nearAnchor && !isFortBuildable(ti)) continue;   // 置ける場所でないものは出さない
+    const lock = getStructLockReason(kind);
+    const max = getStructMax(kind), room = max - countStructs(kind);
+    const poor = !canAfford(d.cost);
+    const err = lock || (room <= 0 ? `枠がありません（上限${max}・本城を上げると増えます）` : null)
+              || (poor ? "資源が足りません" : null);
+    out += `<div class="build-row${lock ? " locked" : ""}">
+      <div class="small"><b>${d.emoji} ${d.name}</b> <span class="dim">${d.lead}</span></div>
+      <div class="dim small">${structEffectText(kind)}</div>
+      <div class="dim small">${fmtCost(d.cost)} ｜ 残り枠 ${Math.max(0, room)}/${max}</div>
+      ${err ? `<div class="small" style="color:var(--danger)">${err}</div>` : ""}
+      <button class="train-btn" ${err ? "disabled" : ""}
+        onclick="UIA.buildStruct(${ti},'${kind}')">${d.emoji} ${d.name}を築く</button>
+    </div>`;
+  }
+  return out;
+}
+
 function renderTileDetails(ti) {
   const t = S.world.tiles[ti], td = TILE_DEFS[t.type];
   if (isBlockedType(t.type)) return "";
@@ -6437,11 +6576,11 @@ function renderTileDetails(ti) {
     /* --- 駐留・防衛の内訳 --- */
     const gar = getGarrisonSquads(ti);
     let g = `総守り <b>${fmt(getPlayerTileDefense(ti))}</b><br>基本 ${fmt(getTileDefense(ti))}<br>本城Lv${S.player.castleLevel} +${fmt(S.player.castleLevel * CONFIG.TILE_DEF_PLAYER_PER_CASTLE_LV)}<br>兵舎Lv${getBuilding("barracks").level} +${fmt(getBuilding("barracks").level * CONFIG.TILE_DEF_PLAYER_PER_BARRACKS_LV)}`;
-    if (getOutpostAt(ti)) g += `<br>⛺ 幕舎 +${fmt(CONFIG.OUTPOST_DEF_BONUS)}`;
-    if (getFortAt(ti)) g += `<br>🗼 防衛施設 +${fmt(CONFIG.FORT_DEF)}`;
-    const aura = getFortAuraDef(ti);
+    const here = getStructAt(ti);
+    if (here) g += `<br>${structDef(here).emoji} ${structDef(here).name} +${fmt(structDef(here).def)}`;
+    const aura = getStructAuraDef(ti);
     if (aura) g += `<br>🗼 周囲の施設 +${fmt(aura)}`;
-    if (gar.length) g += `<br>🛡 駐留 +${fmt(Math.round(getGarrisonPower(ti) * CONFIG.GARRISON_DEF_RATIO))}`;
+    if (gar.length) g += `<br>🛡 駐留 +${fmt(Math.round(getGarrisonPower(ti) * getGarrisonDefRatio(ti)))}`;
     if (isGarrisonSite(ti)) {
       g += `<br><span class="dim">駐留すると 出撃起点になり／回復${CONFIG.GARRISON_HEAL_MULT}倍／補充が割引</span>`;
       if (isFortressSite(ti)) {
@@ -6454,21 +6593,16 @@ function renderTileDetails(ti) {
     html += detailsHTML("🛡️ 駐留・防衛の内訳", g);
 
     /* --- 施設（建設・撤去はここ。固定フッターには出さない） --- */
-    const isHome = ti === playerStartIdx();
     let f = "";
-    if (getOutpostAt(ti)) f += `⛺ 幕舎あり — 出撃起点・守り+${fmt(CONFIG.OUTPOST_DEF_BONUS)}・回復${CONFIG.GARRISON_HEAL_MULT}倍<br>`;
-    if (getFortAt(ti)) f += `🗼 防衛施設あり — この地+${fmt(CONFIG.FORT_DEF)}／射程${CONFIG.FORT_INTERCEPT_RANGE}を迎撃<br>`;
-    if (!isHome && !getStructAt(ti) && !FORTRESS_TYPES.includes(t.type) && t.type !== "castle") {
-      const room = getOutpostMax() - countStructs("camp");
-      f += `⛺ <b>幕舎</b>（前線の拠点）<br>${fmtCost(CONFIG.OUTPOST_COST)} ｜ 残り枠 ${room}/${getOutpostMax()}<br><button class="stack-btn" ${(room <= 0 || !canAfford(CONFIG.OUTPOST_COST)) ? "disabled" : ""} onclick="UIA.buildOutpost(${ti})">⛺ 幕舎を築く</button><br>`;
-    }
-    if (!isHome && !getStructAt(ti) && isFortBuildable(ti)) {
-      const locked = S.player.castleLevel < CONFIG.FORT_REQUIRE_CASTLE_LV;
-      const room = getFortMax() - countStructs("fort");
-      f += `🗼 <b>防衛施設</b>（この地+${fmt(CONFIG.FORT_DEF)}／周囲${CONFIG.FORT_AURA_RANGE}タイルに+${fmt(CONFIG.FORT_AURA_DEF)}）<br>${fmtCost(CONFIG.FORT_COST)} ｜ 残り枠 ${room}/${getFortMax()}${locked ? `<br><span style="color:var(--danger)">要 本城Lv${CONFIG.FORT_REQUIRE_CASTLE_LV}（現在Lv${S.player.castleLevel}）</span>` : ""}<br><button class="stack-btn" ${(locked || room <= 0 || !canAfford(CONFIG.FORT_COST)) ? "disabled" : ""} onclick="UIA.buildFort(${ti})">🗼 防衛施設を築く</button><br>`;
-    }
-    if (getStructAt(ti)) {
-      f += `<button class="stack-btn" onclick="UIA.removeStruct(${ti})">${getFortAt(ti) ? "🗼 防衛施設を壊す" : "⛺ 幕舎を畳む"}</button>`;
+    const cur = getStructAt(ti);
+    if (cur) {
+      const d = structDef(cur);
+      f += `${d.emoji} <b>${d.name}</b>あり — ${structEffectText(structKind(cur))}<br>
+        <button class="train-btn" onclick="UIA.removeStruct(${ti})">${d.emoji} ${d.name}を撤去</button>`;
+    } else {
+      // 建設できる種別を STRUCT_DEFS から並べる。**未解禁も薄く出す**
+      //（無いものは探せない。何を研究すれば増えるのかをここで見せる）
+      f += buildMenuHTML(ti);
     }
     if (f) html += detailsHTML("🧱 施設", f);
 
@@ -6693,23 +6827,20 @@ const UIA = {
     renderAlliance(); renderHeader();
   },
   /* --- 幕舎・駐留([S23]) --- */
-  buildOutpost(ti) {
-    const err = buildOutpost(ti);
+  buildStruct(ti, kind) {
+    const err = buildStruct(ti, kind);
     if (err) { toast("⚠️ " + err); return; }
-    markHintDone("outpost");
-    invalidateMarchable(); openTileSheet(ti); renderHeader(); MapView.draw();
-  },
-  buildFort(ti) {
-    const err = buildFort(ti);
-    if (err) { toast("⚠️ " + err); return; }
-    markHintDone("fort");
-    openTileSheet(ti); renderHeader(); MapView.draw();
+    // 気づきバッジ([S25])は幕舎・防衛施設の2つだけを見ている。種別ごとに立てる
+    if (kind === "camp") markHintDone("outpost");
+    if (kind === "fort") markHintDone("fort");
+    renderHeader(); MapView.draw(); openTileSheet(ti);
   },
   removeStruct(ti) {
-    const wasFort = !!getFortAt(ti);
+    const was = getStructAt(ti);
+    const d = was ? structDef(was) : null;
     const err = removeStruct(ti);
     if (err) { toast("⚠️ " + err); return; }
-    toast(wasFort ? "🗼 防衛施設を壊しました" : "⛺ 幕舎を畳みました");
+    toast(d ? `${d.emoji} ${d.name}を撤去しました` : "施設を撤去しました");
     openTileSheet(ti); MapView.draw();
   },
   station(squadId, ti) {
@@ -6842,7 +6973,7 @@ const UIA = {
     // 固定アクション化で押しやすくなったぶん、誤操作を防ぐ確認を入れる
     const t = S.world.tiles[ti];
     const extra = [];
-    if (getStructAt(ti)) extra.push(getFortAt(ti) ? "防衛施設" : "幕舎");
+    if (getStructAt(ti)) extra.push(structDef(getStructAt(ti)).name);
     if (getGarrisonSquads(ti).length) extra.push("駐留部隊");
     const warn = extra.length ? `\n${extra.join("と")}も失われます。` : "";
     if (!confirm(`${TILE_DEFS[t.type].name}Lv${t.level} (${t.x}, ${t.y}) を放棄しますか？${warn}`)) return;
