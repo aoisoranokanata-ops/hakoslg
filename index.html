@@ -324,6 +324,9 @@ select{font:inherit;color:var(--fg);background:var(--bg3);border:1px solid var(-
 #winBanner{display:none;background:linear-gradient(90deg,#3a2f10,#5a4413);border:1px solid var(--accent);
   color:var(--accent);text-align:center;padding:8px;font-weight:700}
 #winBanner.show{display:block}
+/* バナーに置く操作ボタン（宣戦など）。テキストと同じ行に収める */
+.banner-btn{margin-left:8px;padding:3px 10px;border-radius:6px;background:var(--accent);
+  color:#241c05;border:0;font-weight:700;font-size:12px}
 /* 皇都を奪われている間は赤く警告する（[S27] 首都堅守） */
 #winBanner.danger{background:linear-gradient(90deg,#4a1414,#6b1d1d);border-color:var(--danger);color:#ffd9d9}
 
@@ -443,7 +446,7 @@ const CONFIG = {
   DEV_MODE: false,                      // trueで開発用UI（ガチャタブの画像取り込み等）を表示
   SAVE_KEY: "hakoslg_save_v1",          // localStorageキー（名前空間 hakoslg_）
   ASSET_DB: "hakoslg_assets",           // IndexedDB名（画像アセット）
-  SAVE_VERSION: 22,                    // v22: 難易度（difficulty）
+  SAVE_VERSION: 23,                    // v23: 異民族編の宣戦（tribe.offeredAt）
   LOG_MAX: 30,                         // 保持する出来事ログの最大件数
 
   // --- 初陣指南（[S15A]。最初の約1分でコアループを1周させる導線） ---
@@ -639,7 +642,9 @@ const CONFIG = {
 
   // --- 部隊・兵種（[S09]。硬い関所や皇都をどう抜くかの駆け引きを作る） ---
   SQUAD_SIZE: 5,                        // 1部隊に編成できるカード枚数
-  SQUAD_UNLOCK_BARRACKS_LV: [1, 5, 10], // 各部隊が解禁される兵舎レベル（＝最大3部隊）
+  SQUAD_UNLOCK_BARRACKS_LV: [1, 5, 10, 20], // 各部隊が解禁される兵舎レベル（＝最大4部隊）
+                                        // 兵舎Lv20は第二ステージでしか届かないので、
+                                        // 4部隊目は実質「異民族編の報酬」になる（DESIGN_S3.md §4）
   TROOP_ADVANTAGE: 1.25,                // 相性有利な時の戦力倍率
   TROOP_DISADVANTAGE: 0.8,              // 相性不利な時の戦力倍率
   TROOP_SIEGE_VS_FORTRESS: 1.6,         // 兵器の攻城特効（関所/皇都/城/聖地）
@@ -1185,6 +1190,12 @@ function migrateSave(data) {
   if (!data.player.buildings.some(b => b.type === "camp")) {
     const p = DEFAULT_BUILDING_LAYOUT.camp;
     data.player.buildings.push({ id: "b_camp", type: "camp", level: 1, upgradeEndsAt: null, x: p.x, y: p.y });
+  }
+
+  // v22 → v23: 異民族編の宣戦。**すでに始まっている進行中のセーブは打診済み扱い**にする
+  // （wave>0 なのに「始めますか？」と訊かれるのを防ぐ）
+  if (data.tribe && data.tribe.offeredAt === undefined) {
+    data.tribe.offeredAt = data.tribe.wave > 0 ? (data.tribe.startedAt || Date.now()) : null;
   }
 
   // v21 → v22: 難易度。**既存セーブは必ずノーマル**（数値は実装前と同一なので手触りが変わらない）
@@ -1751,7 +1762,8 @@ function generateAIUsers(world, difficulty) {
  *                               // vault=同盟倉庫 / order=盟主の攻撃指示と包囲の進み具合([S24])
  *   difficulty: "normal" | "hard",  // 難易度([S01] CONFIG.DIFFICULTY)。開始時に決め、以降不変
  *   stage: 1 | 2,               // 進行段階。2=第二ステージ（皇都制圧＋本城Lv10で解放）
- *   tribe: { wave, startedAt, clearedAt },  // 異民族の進行([S27])。wave=0は未開始
+ *   tribe: { wave, startedAt, clearedAt, offeredAt },  // 異民族の進行([S27])。wave=0は未開始
+ *                               // offeredAt=宣戦を打診した時刻。1度だけ自動で出す
  *   aiUsers[].tribe: bool,      // 異民族フラグ。既存のAI戦闘の仕組みに相乗りする
  *   aiUsers: [ AIUser ],        // スキーマは generateAIUsers 参照。defeated=true は滅亡済み
  *   aiMarches: [ {id,aiId,targetIdx,power,departAt,arriveAt} ],  // AIからの攻撃([S12])
@@ -1804,7 +1816,7 @@ function newGameState(difficulty) {
       vault: { food: 0, wood: 0, stone: 0, iron: 0 },     // 同盟倉庫（[S24]）
       order: null },                                      // 盟主の攻撃指示（[S24]）
     stage: 1,                  // 進行段階（[S09]）。2で建物レベル上限が20に解放される
-    tribe: { wave: 0, startedAt: null, clearedAt: null },  // 異民族の進行（[S27]）
+    tribe: { wave: 0, startedAt: null, clearedAt: null, offeredAt: null },  // 異民族の進行（[S27]）
     aiUsers,
     aiMarches: [],             // AIからプレイヤー領への攻撃部隊（[S12]）。到着で解決される
     flags: { holyWon: false, capitalWon: false, unifiedAt: null },  // unifiedAt=天下統一した時刻（[S09]）
@@ -2105,7 +2117,8 @@ function stageTick() {
   toast(`⚔️ 第二ステージ開始 — 建物レベルの上限が ${CONFIG.BUILDING_MAX_LV_STAGE2} まで解放された`, "win");
   logEvent("win", "🏯 皇都を制した者として、さらなる高みへ。建物レベル上限 "
     + CONFIG.BUILDING_MAX_LV_STAGE2 + " 解放");
-  citySig = null;   // 城タブの「MAX」表示を作り直す
+  citySig = null;      // 城タブの「MAX」表示を作り直す
+  showWinBanner();     // 宣戦ボタンの置き場になるので、この時点でバナーを出す
 }
 /** 建物のレベル上限。静的定義は触らず、ステージで返り値を変える（規約2） */
 function getBuildingMaxLevel(type) {
@@ -2123,6 +2136,13 @@ function isFullyUnified() {
 function showWinBanner() {
   const el = $("winBanner"); if (!el) return;
   el.classList.remove("danger");
+  // まだ宣戦していない＝いつでも始められることを常設で見せる（断っても導線が残る）
+  if (canStartTribes()) {
+    el.innerHTML = `⚔️ 建物レベル上限20を解放。準備が整ったら討伐編へ
+      <button class="banner-btn" onclick="UIA.startTribes()">🐺 討伐編を始める</button>`;
+    el.classList.add("show");
+    return;
+  }
   // 第二ステージに入ったら、目標は異民族の討伐と皇都の堅守になる
   if (isStage2() && S.tribe && S.tribe.wave > 0) {
     if (S.tribe.clearedAt) {
@@ -3400,16 +3420,54 @@ function spawnTribeWave(wave) {
  *   波が全滅 → 次の波を出す
  *   最終波まで全滅 かつ 皇都を保持 → 討伐達成
  */
+/** まだ襲来が始まっていない＝宣戦できる状態か */
+function canStartTribes() {
+  return isStage2() && !!S.tribe && S.tribe.wave === 0 && !S.tribe.clearedAt;
+}
+/**
+ * 異民族編の宣戦（DESIGN_S3.md §2）。**プレイヤーが選んだ時だけ始まる**。
+ * 建物レベル上限20の解放は従来どおり自動なので、先に受け取って育ててから挑める。
+ * 失敗理由 or null
+ */
+function startTribeInvasion() {
+  if (!canStartTribes()) return "いま始められる段階ではありません";
+  S.tribe.wave = 1;
+  S.tribe.startedAt = now();
+  const n = spawnTribeWave(1);
+  toast(`🐺 北の草原より異民族が流入した！ ${n}勢力が現れた — 皇都を守り抜き、討ち払え`, "tribe");
+  logEvent("tribe", "🐺 異民族編が始まった — 皇都を保持したまま全勢力を討伐せよ");
+  warChat("onTribeWave", { wave: 1 }, TRIBE_FIRST_WAVE_OK);
+  showWinBanner();
+  return null;
+}
+/** 宣戦の確認ダイアログ。波の構成は難易度から生成する（数値を二重管理しない） */
+function offerTribeStart() {
+  S.tribe.offeredAt = now();     // 提案は1度だけ。断ってもバナーからいつでも始められる
+  const waves = diff("TRIBE_WAVES");
+  const total = waves.reduce((a, w) => a + w.count, 0);
+  const atk = w => Math.round(CONFIG.AI_ATTACK_POWER_BASE
+    * Math.pow(w.castleLv, CONFIG.AI_ATTACK_POWER_EXP) * diff("TRIBE_ATTACK_MULT"));
+  const rows = waves.map((w, i) =>
+    `・第${i + 1}波 城Lv${w.castleLv} × ${w.count}勢力（攻撃戦力 約${atk(w).toLocaleString("en-US")}）`
+    + (w.edges && w.edges.length > 1 ? `<b>・${w.edges.length}方向から</b>` : "")).join("<br>");
+  openConfirmSheet("🐺 北の草原に異民族の兵が集まっている",
+    `討伐編を始めますか？ 始めると <b>${waves.length}波・計${total}勢力</b>が皇都を目指して押し寄せます。
+     <b>皇都を保持したまま全勢力を討伐</b>すればあなたの勝ちです。<br><br>
+     ${rows}<br><br>
+     <span style="color:var(--danger)">一度始めると引き返せません。</span>
+     防衛施設や駐屯所を整えてから挑むことを勧めます。`,
+    "⚔️ 討伐編を始める",
+    () => { const err = startTribeInvasion(); if (err) toast("⚠️ " + err); MapView.draw(); },
+    "まだ準備する");
+}
+
 function tribeTick() {
   if (!isStage2() || !S.tribe) return;
   if (S.tribe.clearedAt) return;
-  // 第1波の出現
+  // 襲来はプレイヤーが宣戦してから始まる（準備の時間を渡す）。
+  // 他のシートを開いている最中には割り込まない（次のtickで出す）
   if (S.tribe.wave === 0) {
-    S.tribe.wave = 1;
-    S.tribe.startedAt = now();
-    const n = spawnTribeWave(1);
-    toast(`🐺 北の草原より異民族が流入した！ ${n}勢力が現れた — 皇都を守り抜き、討ち払え`, "tribe");
-    warChat("onTribeWave", { wave: 1 }, TRIBE_FIRST_WAVE_OK);
+    if (!S.tribe.offeredAt && !$("sheet").classList.contains("open")) offerTribeStart();
     return;
   }
   if (livingTribes().length > 0) return;              // まだ波が残っている
@@ -6899,6 +6957,21 @@ function showSheet(html, mode = "normal") {
   el.classList.add("open");
   if (feedTop) { const f = el.querySelector(".feed-list"); if (f) f.scrollTop = feedTop; }
 }
+/* --- 確認ダイアログ（DESIGN_S3.md §2-3）--------------------------------
+ * 引き返せない操作の前に一拍置く。既存のシート機構をそのまま使うので、
+ * 見た目も閉じ方も他のシートと揃う（window.confirm は見た目が浮くため使わない）。
+ * 呼び出し側は onOk にだけ関心を持てばよい。 */
+let _confirmOk = null;
+function openConfirmSheet(title, bodyHTML, okLabel, onOk, cancelLabel) {
+  _confirmOk = onOk;
+  showSheet(`<h3>${title}</h3>
+    <div class="small" style="margin-top:8px;line-height:1.6">${bodyHTML}</div>
+    <div class="actions">
+      <button class="primary" onclick="UIA.confirmOk()">${okLabel}</button>
+      <button onclick="closeSheet()">${cancelLabel || "やめておく"}</button>
+    </div>`);
+}
+
 function closeSheet() {
   const el = $("sheet");
   el.classList.remove("open", "tile-mode");
@@ -6907,6 +6980,7 @@ function closeSheet() {
   openTileIndex = null;
   tileSheetActionMode = null;     // 出撃/駐留の選択ドロワーも畳む
   openCardSheetTarget = null;
+  _confirmOk = null;              // 確認ダイアログを閉じた＝「やめておく」
   _feedPick.clear(); _lvFeedPick.clear(); _trainMode = null;   // 育成の選択状態もリセット
 }
 
@@ -6927,6 +7001,18 @@ const UIA = {
     if (err) toast("⚠️ " + err); else toast("⚡ 普請を完了させました");
     renderCity(); renderHeader();
     if ($("sheet").classList.contains("open")) closeSheet();
+  },
+  /** 確認ダイアログのOK（[S14] openConfirmSheet） */
+  confirmOk() {
+    const f = _confirmOk;
+    _confirmOk = null;      // closeSheet より先に外す（closeSheet 側の「やめておく」扱いを避ける）
+    closeSheet();
+    if (f) f();
+  },
+  /** 異民族編の宣戦（[S27]）。バナーのボタンからは確認を挟む */
+  startTribes() {
+    if (!canStartTribes()) { toast("⚠️ いま始められる段階ではありません"); return; }
+    offerTribeStart();
   },
   /* --- タイル詳細シートの選択ドロワー --- */
   tileAction(ti, mode) {
