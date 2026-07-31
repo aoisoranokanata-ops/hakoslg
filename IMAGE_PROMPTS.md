@@ -233,14 +233,68 @@ pillars, mystical purple-gold color scheme, awe-inspiring holy atmosphere,
 振り分けは背景の色相で機械的に確定できた（濃紺228°／深紅3°／白紫256°／若草50°／紅5°／水色202°）。
 赤系2枚だけ色相が近いので実物を見て判別した（髭の有無で `m2` と `f2` を分けた）。
 
-> **積み残し**: 女3枚（特に `avatar_f2` 紅蓮の女傑）が**中性的で女性として読みにくい**。
-> 16pxの円では髪色でしか判別できないので実害は小さいが、38pxの同盟欄では気になる。
-> 描き直すなら「女性と明確に分かる顔立ち・体格」を明示すること
-> （今回のプロンプトは "woman in her thirties" だけで、顔立ちの指定が無かった）。
+---
+
+## 5-2. 女性3枚の描き直し（`avatar_f1` / `f2` / `f3`）★発注中
+
+初回納品の女性3枚が**中性的で女性として読みにくい**。**男性3枚はそのまま使う**ので、
+差し替えるのは女性3枚だけ。
+
+### なぜそうなったか（次回以降の教訓）
+
+1. **顔立ちを指定していなかった**。`woman in her thirties` のように年齢しか書いておらず、
+   画風のデフォルト（中性的な美形）に流れた
+2. **髪色の指定が2枚とも無視されていた**。`f2` は「長い紅の髪」、`f3` は「銀白の髪」で
+   発注したのに、どちらも黒髪で届いた。結果、女性3枚が**全員が暗い髪**になり、
+   16pxの円では装束の色でしか見分けが付かない
+
+→ **年齢だけでなく顔立ちを書く**／**髪色は独立した一文で強調する**。
+
+### 差し替え3枚の共通プロンプト
+
+```
+512x512 px, 1:1 square. Bust-up portrait of a CLEARLY FEMALE Japanese
+sengoku-fantasy warlord, unmistakably a woman at a glance.
+Feminine facial structure: soft rounded jawline, small chin, high smooth
+cheekbones, large expressive eyes with long lashes, slender neck and
+narrow shoulders. Feminine adult woman, NOT androgynous, NOT a bishonen,
+NOT a young man.
+Facing the viewer, head centered and large in the frame, shoulders visible.
+Stylized mobile game art, clean bold shapes, warm painterly shading, rich
+saturated colors. Plain near-solid background, subtle gradient only.
+Composition must survive a CIRCULAR CROP: keep the face well inside the
+center circle, nothing important in the corners.
+NO beard, NO stubble, NO heavy square jaw, NO broad muscular shoulders.
+NO card frame, NO border, NO text, NO watermark.
+Character: {下記}
+```
+
+### 3枚の指定
+
+**髪色は必ず指定どおりに**。ここが3枚を16pxで見分ける唯一の手掛かりになる。
+
+| imageKey | 呼称 | 髪色（厳守） | 主色 | Character |
+|---|---|---|---|---|
+| `avatar_f1` | 若き女将 | **明るい栗色** | 若草＋金 | a cheerful young WOMAN in her late teens, LIGHT CHESTNUT-BROWN hair in a high ponytail, round youthful face, bright spirited smile, light green armored haori with gold cord |
+| `avatar_f2` | 紅蓮の女傑 | **鮮やかな紅** | 紅＋黒 | a striking WOMAN in her thirties, LONG VIVID CRIMSON-RED hair swept back, beautiful fierce confident expression, red lips, black armor with crimson under-robe |
+| `avatar_f3` | 静謐の女軍師 | **銀白** | 白銀＋水色 | a serene WOMAN, straight SILVER-WHITE long hair with a jeweled hair ornament, calm gentle eyes, delicate features, pale blue court robe |
+
+### 揃えること
+
+- **画角・寄り・光源は初回納品の男性3枚と同じ**にする。選択画面に3×2で並ぶので、
+  女性3枚だけ寄りが違うと浮く（初回の6枚は綺麗に揃っていたので、そこは維持したい）
+- 背景の色相も初回どおり: `f1` 若草50°／`f2` 紅5°／`f3` 水色202°。
+  **背景色でファイルを振り分けている**ので、ここが変わると突き合わせができなくなる
+
+### 納品
+
+512×512 PNG を3枚。Claude 側で 192px JPEG q82 に落として `art/avatar_f*.jpg` を上書きし、
+`tools/embed_art.py` で同梱し直す。**男性3枚は触らない**。
 
 ---
 
-### 発注時のブリーフ（以下）
+### 初回（2026-08-01）発注時のブリーフ（以下）
+
 
 ゲーム開始時に**男3・女3の計6枚**から選ぶ、プレイヤー自身の姿。
 名前は入力させず **「盟主」で固定**（主役は率いられる武将たちで、盟主はその采配者、という立て付け）。
