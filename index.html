@@ -196,6 +196,9 @@ select{font:inherit;color:var(--fg);background:var(--bg3);border:1px solid var(-
 .level-box{margin-top:10px;padding:8px 10px;border-radius:8px;background:var(--bg3);border-left:3px solid #8fd0a0}
 .lv-badge{display:inline-block;margin-left:4px;padding:0 4px;border-radius:4px;
   background:#8fd0a0;color:#12201a;font-size:9px;font-weight:700}
+/* 上限に達したレベルは赤で知らせる。これ以上は素材を捧げても伸びない、の合図 */
+.lv-badge.max{background:var(--danger);color:#2a0f0f}
+.lv-max{color:var(--danger);font-weight:700}
 .feed-box{margin-top:10px;padding:8px 10px;border-radius:8px;background:var(--bg2);border:1px solid var(--line)}
 .feed-list{max-height:32dvh;overflow-y:auto;margin-top:5px}
 .feed-row{display:flex;align-items:center;gap:6px;padding:3px 0;border-top:1px solid var(--line)}
@@ -5316,7 +5319,9 @@ function renderCards() {
       <div class="art">${artHTML(d.imageKey, d.emoji)}${own > 1 ? `<span class="stack-count">×${own}</span>` : ""}${
         g.rank ? `<span class="rank-badge">+${g.rank}</span>` : ""}</div>
       <b>${d.name}</b> <span class="card-stars">${cardRankLabel(g.sample)}</span>${
-        getCardLevel(g.sample) > 1 ? `<span class="lv-badge">Lv${getCardLevel(g.sample)}</span>` : ""}
+        getCardLevel(g.sample) > 1
+        ? `<span class="lv-badge${getCardLevel(g.sample) >= CONFIG.CARD_LEVEL_MAX ? " max" : ""}">Lv${getCardLevel(g.sample)}</span>`
+        : ""}
       <div class="dim small">${trd ? `<span style="color:${trd.color}">${trd.emoji}${trd.name}</span> ｜ ` : ""}戦力${fmt(cardPowerOf(g.sample))}</div>
       <div class="dim small">武${Math.round(d.atk * mult)} 知${Math.round(d.int * mult)} 統${Math.round(d.lead * mult)}</div>
       ${skd ? `<div class="card-skill" style="color:${SKILL_KIND_COLOR[skd.kind]}">${skd.icon}${skd.name}
@@ -5638,21 +5643,68 @@ const MapView = {
     { const p = getPlayerStart(); this.pendingCenter = [p.x, p.y]; } // 初回の有効サイズ確定時に自城へ中心合わせ
     this.fit();
     window.addEventListener("resize", () => { this.fit(); this.draw(); });
-    // --- パン＆タップ（Pointer Events） ---
-    let down = null, moved = false;
-    this.canvas.addEventListener("pointerdown", e => { down = { x: e.clientX, y: e.clientY, ox: this.offsetX, oy: this.offsetY }; moved = false; });
+    // --- パン／タップ／ピンチ（Pointer Events） ---
+    // 指を2本置いた瞬間にパンを打ち切ってピンチへ移る。触っている2点の**中点**を
+    // 動かさないように拡縮するので、見たい場所を摘まんで広げる操作になる。
+    // 中点自体の移動もそのまま平行移動に使うため、ピンチ中も片手で位置を直せる。
+    let down = null, moved = false, pinch = null;
+    const pts = new Map();                       // pointerId → 現在位置
+    const mid = () => {
+      const [a, b] = [...pts.values()];
+      return { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2, d: Math.hypot(a.x - b.x, a.y - b.y) };
+    };
+    this.canvas.addEventListener("pointerdown", e => {
+      pts.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      if (pts.size === 2) {
+        const m = mid();
+        pinch = { d0: m.d, z0: this.zoom, mx: m.x, my: m.y, ox: this.offsetX, oy: this.offsetY };
+        down = null; moved = true;               // 指を離した時にタップ扱いさせない
+      } else if (pts.size === 1) {
+        down = { x: e.clientX, y: e.clientY, ox: this.offsetX, oy: this.offsetY }; moved = false;
+      }
+    });
     this.canvas.addEventListener("pointermove", e => {
+      if (!pts.has(e.pointerId)) return;
+      pts.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      if (pinch && pts.size >= 2) {
+        const m = mid();
+        if (pinch.d0 > 0) {
+          // 掴んだ時の倍率を基準にする（差分を掛け続けると誤差が溜まる）
+          this.offsetX = pinch.ox; this.offsetY = pinch.oy; this.zoom = pinch.z0;
+          this.zoomAt(pinch.z0 * (m.d / pinch.d0), pinch.mx, pinch.my);
+          this.offsetX += m.x - pinch.mx;        // 中点ごと動かした分は平行移動
+          this.offsetY += m.y - pinch.my;
+          this.draw();
+        }
+        return;
+      }
       if (!down) return;
       const dx = e.clientX - down.x, dy = e.clientY - down.y;
       if (Math.abs(dx) + Math.abs(dy) > 8) moved = true;
       if (moved) { this.offsetX = down.ox + dx; this.offsetY = down.oy + dy; this.draw(); }
     });
+    const lift = e => {
+      pts.delete(e.pointerId);
+      if (pts.size < 2) pinch = null;
+      // 2本目を離した直後に残った指でパンが飛ばないよう、基準を取り直す
+      if (pts.size === 1) {
+        const [a] = [...pts.values()];
+        down = { x: a.x, y: a.y, ox: this.offsetX, oy: this.offsetY }; moved = true;
+      }
+      if (!pts.size) down = null;
+    };
     this.canvas.addEventListener("pointerup", e => {
       // 聖地コンパスのマーカーはタイルより手前にあるので先に判定する
-      if (down && !moved && !this.compassHit(e.clientX, e.clientY)) this.tap(e.clientX, e.clientY);
-      down = null;
+      if (down && !moved && pts.size === 1 && !this.compassHit(e.clientX, e.clientY)) this.tap(e.clientX, e.clientY);
+      lift(e);
     });
-    this.canvas.addEventListener("pointercancel", () => { down = null; });
+    this.canvas.addEventListener("pointercancel", lift);
+    // PCのホイール／トラックパッドのピンチ（ctrlKey付きwheel）でもカーソル位置を軸に拡縮する
+    this.canvas.addEventListener("wheel", e => {
+      e.preventDefault();
+      this.zoomAt(this.zoom * (e.deltaY < 0 ? 1.12 : 1 / 1.12), e.clientX, e.clientY);
+      this.draw();
+    }, { passive: false });
     $("zoomIn").onclick = () => { this.setZoom(this.zoom * 1.3); };
     $("zoomOut").onclick = () => { this.setZoom(this.zoom / 1.3); };
     $("zoomHome").onclick = () => { const p = getPlayerStart(); this.centerOn(p.x, p.y); this.draw(); };
@@ -5671,13 +5723,19 @@ const MapView = {
       this.pendingCenter = null;
     }
   },
-  setZoom(z) {
-    // 画面中央を基準にズーム
-    const cx = this.vw / 2, cy = this.vh / 2;
+  /** 画面上の1点(sx,sy)を動かさずに拡縮する。ピンチとホイールの共通処理 */
+  zoomAt(z, sx, sy) {
+    const r = this.canvas.getBoundingClientRect();
+    const cx = sx - r.left, cy = sy - r.top;
     const wx = (cx - this.offsetX) / this.tilePx, wy = (cy - this.offsetY) / this.tilePx;
     this.zoom = clamp(z, 0.4, 3);
     this.offsetX = cx - wx * this.tilePx;
     this.offsetY = cy - wy * this.tilePx;
+  },
+  setZoom(z) {
+    // 画面中央を基準にズーム（±ボタン用）
+    const r = this.canvas.getBoundingClientRect();
+    this.zoomAt(z, r.left + this.vw / 2, r.top + this.vh / 2);
     this.draw();
   },
   centerOn(x, y) {
@@ -5986,11 +6044,11 @@ function cardLevelBoxHTML(card) {
   const m = getCardTotalMult(card);
   const d = CARD_BY_ID[card.defId];
   let html = `<div class="level-box">
-    <div class="small"><b>📈 武将レベル ${lv}/${max}</b>
+    <div class="small"><b class="${lv >= max ? "lv-max" : ""}">📈 武将レベル ${lv}/${max}${lv >= max ? " MAX" : ""}</b>
       <span class="dim">素ステータス ×${m.toFixed(2)}</span></div>
     <div class="vault-bar" style="margin-top:5px"><i style="width:${pct}%"></i></div>
-    <div class="dim small">${lv >= max
-      ? "最大レベルです"
+    <div class="${lv >= max ? "lv-max small" : "dim small"}">${lv >= max
+      ? "最大レベルです — これ以上は素材を捧げても伸びません"
       : `次のLvまで ${fmt(need - exp)}（現在 ${fmt(exp)}/${fmt(need)}）／ Lv${max}で武${Math.round(d.atk * getCardRankMult(card) * (1 + CONFIG.CARD_STAT_PER_LEVEL * (max - 1)))}`}</div>`;
   if (lv < max) {
     html += _trainMode === "level"
@@ -6056,6 +6114,11 @@ function openCardSheet(defId, rank) {
   const sk = getCardSkill(defId);
   const mult = getCardTotalMult(card);
   const rarity = getCardRarity(card);
+  // 素材の＋/−を押すたびにシートを組み直すので、**同じカードを開き直す時だけ**
+  // 本文のスクロール位置を持ち越す。これが無いと押した＋が画面外へ飛んで連打できない
+  const prevT = openCardSheetTarget;
+  const keepScroll = (prevT && prevT.defId === defId && prevT.rank === r && $("sheet").classList.contains("open"))
+    ? (document.querySelector("#sheet .sheet-body") || {}).scrollTop : null;
   openCardSheetTarget = { defId, rank: r, uid: card.uid };
 
   const head = `<div class="sheet-head">
@@ -6089,10 +6152,10 @@ function openCardSheet(defId, rank) {
     body += `<div class="skill-box" style="border-left-color:${SKILL_KIND_COLOR[sk.kind]}">
       <div class="small"><b>${sk.icon} ${sk.name}</b>
         <span class="skill-kind" style="background:${SKILL_KIND_COLOR[sk.kind]}">${sk.kind}</span>
-        <span class="dim">Lv${lv}/${max}</span></div>
+        <span class="${lv >= max ? "lv-max" : "dim"}">Lv${lv}/${max}${lv >= max ? " MAX" : ""}</span></div>
       <div class="small" style="margin-top:3px">${skillDescText(card)}</div>
       <div class="vault-bar" style="margin-top:5px"><i style="width:${pct}%"></i></div>
-      <div class="dim small">${lv >= max ? "上限に達しています" : `次のLvまで ${fmt(need - exp)}（現在 ${fmt(exp)}/${fmt(need)}）`}</div>
+      <div class="${lv >= max ? "lv-max small" : "dim small"}">${lv >= max ? "上限に達しています — これ以上は素材を捧げても伸びません" : `次のLvまで ${fmt(need - exp)}（現在 ${fmt(exp)}/${fmt(need)}）`}</div>
     </div>`;
     if (lv < max) {
       body += _trainMode === "skill"
@@ -6125,6 +6188,10 @@ function openCardSheet(defId, rank) {
 
   showSheet(head + `<div class="sheet-body">${body}</div>`
     + `<div class="sheet-actions"><button onclick="closeSheet()">閉じる</button></div>`, "tile");
+  if (keepScroll != null) {                       // 0 も有効な値なので != null で見る
+    const b = document.querySelector("#sheet .sheet-body");
+    if (b) b.scrollTop = keepScroll;
+  }
 }
 let openCardSheetTarget = null;
 
@@ -6472,9 +6539,14 @@ function openTileSheet(ti) {
  */
 function showSheet(html, mode = "normal") {
   const el = $("sheet");
+  // 素材リストは max-height でそれ自体がスクロールする。組み直しで先頭に戻ると
+  // 下の方の武将を選べなくなるので、開いたまま差し替える時だけ位置を持ち越す
+  const wasOpen = el.classList.contains("open");
+  const feedTop = wasOpen ? (el.querySelector(".feed-list") || {}).scrollTop : null;
   el.classList.toggle("tile-mode", mode === "tile");
   el.innerHTML = html;
   el.classList.add("open");
+  if (feedTop) { const f = el.querySelector(".feed-list"); if (f) f.scrollTop = feedTop; }
 }
 function closeSheet() {
   const el = $("sheet");
