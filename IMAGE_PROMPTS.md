@@ -224,3 +224,55 @@ stone platform, surrounded by cherry blossom petals and golden divine light
 pillars, mystical purple-gold color scheme, awe-inspiring holy atmosphere,
 1:1 aspect.
 ```
+
+---
+
+## 5. 盟主の容姿（1:1、imageKey: avatar_*）★発注中
+
+ゲーム開始時に**男3・女3の計6枚**から選ぶ、プレイヤー自身の姿。
+名前は入力させず **「盟主」で固定**（主役は率いられる武将たちで、盟主はその采配者、という立て付け）。
+
+### 技術前提
+
+- **1:1 の正方形・バストアップ**。カードと同じく `object-fit: cover` の正方枠に入る
+- **表示は丸くマスクされる**（同盟タブで38px、チャットで16px の円）。
+  **顔を中央に、円の外へ出る四隅には重要なものを置かない**
+- **16pxでも誰か分かること**が最優先。カード（140px）よりさらに小さい。
+  髪色・装束の主色をはっきり分け、顔を大きめに
+- カード枠・縁取りは描かない（CSSが丸マスクと枠を付ける）
+- 背景は塗ってよいが**無地に近い単色〜ごく淡いグラデ**が望ましい（円に切られるため）
+- 納品は 512×512 PNG。Claude 側で 192px JPEG q82 に落として同梱する（カードと同じ方式）
+
+### 共通プロンプト
+
+```
+512x512 px, 1:1 square. Bust-up portrait of a Japanese sengoku-fantasy
+warlord, facing the viewer, head centered and large in the frame, shoulders
+visible. Stylized mobile game art, clean bold shapes, warm painterly shading,
+rich saturated colors. Plain near-solid background, subtle gradient only.
+Composition must survive a CIRCULAR CROP: keep the face well inside the
+center circle, nothing important in the corners.
+NO card frame, NO border, NO text, NO watermark.
+Character: {下記}
+```
+
+### 6枚の指定
+
+**主色を6枚すべてで散らすこと**（16pxの円で見分けるための最重要点）。
+
+| imageKey | 呼称 | 主色 | Character（英語プロンプトに入れる） |
+|---|---|---|---|
+| `avatar_m1` | 青年武官 | 濃紺＋銀 | young man in his twenties, short black hair, determined bright eyes, dark navy lamellar armor with silver trim, no helmet |
+| `avatar_m2` | 壮年の将 | 深紅＋黒 | broad-shouldered man in his forties, thick black beard, weathered scar on cheek, deep crimson armor with black leather straps, commanding gaze |
+| `avatar_m3` | 白髪の軍師 | 白＋薄紫 | elderly man with long white hair and beard, calm narrow eyes, white and pale-violet scholar robe, folding fan at chest |
+| `avatar_f1` | 若き女将 | 若草＋金 | young woman in her late teens, high ponytail of chestnut hair, spirited smile, light green armored haori with gold cord |
+| `avatar_f2` | 紅蓮の女傑 | 紅＋黒 | woman in her thirties, long crimson hair swept back, fierce confident expression, black armor with crimson under-robe |
+| `avatar_f3` | 静謐の女軍師 | 白銀＋水色 | woman with straight silver-white hair and a hair ornament, serene half-closed eyes, pale blue court robe, quiet composed air |
+
+### 注意
+
+- 6枚は**同じ画角・同じ寄り・同じ光源**で揃えること。選択画面に3×2で並ぶので、
+  1枚だけ引き構図や逆光だと浮く
+- **年齢と髪色で見分けがつく**ようにしてほしい。装束の細部は16pxでは消える
+- コード側は `AVATAR_DEFS`（[S02]）に配置済み。**未納品でも絵文字で完全に動く**ので、
+  6枚まとめてでも1枚ずつでも構わない

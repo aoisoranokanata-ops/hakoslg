@@ -86,6 +86,21 @@ select{font:inherit;color:var(--fg);background:var(--bg3);border:1px solid var(-
   padding:6px 8px;margin-bottom:8px;display:flex;flex-direction:column;gap:4px;overscroll-behavior:contain}
 .chat-msg{font-size:12px;line-height:1.4;word-break:break-word}
 .chat-msg .chat-name{font-weight:700;margin-right:6px}
+/* 盟主の容姿（[S02] AVATAR_DEFS）。アート未配置でも絵文字で成立する寸法にする */
+.avatar-mini{display:inline-block;width:16px;height:16px;border-radius:50%;overflow:hidden;
+  vertical-align:-3px;margin-right:4px;background:var(--bg3);text-align:center;line-height:16px;font-size:11px}
+.avatar-mini img{width:100%;height:100%;object-fit:cover;display:block}
+.avatar-row{display:block;width:38px;height:38px;border-radius:50%;overflow:hidden;margin-right:8px;
+  background:var(--bg3);text-align:center;line-height:38px;font-size:22px;flex:0 0 auto}
+.avatar-row img{width:100%;height:100%;object-fit:cover;display:block}
+.avatar-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-top:6px}
+.avatar-cell{display:flex;flex-direction:column;align-items:center;gap:4px;padding:8px 4px;
+  border-radius:10px;background:var(--bg2);border:1px solid var(--line);color:var(--fg)}
+.avatar-cell.on{border-color:var(--accent);box-shadow:0 0 0 1px var(--accent) inset}
+.avatar-art{display:flex;align-items:center;justify-content:center;width:100%;aspect-ratio:1;
+  border-radius:8px;overflow:hidden;background:var(--bg3);font-size:30px}
+.avatar-art img{width:100%;height:100%;object-fit:cover}
+.link-btn{background:none;border:0;color:var(--accent);padding:2px 0;font-size:11px;text-decoration:underline}
 .chat-input-row{display:flex;gap:6px}
 .chat-input-row input{flex:1;min-width:0;padding:7px 8px;background:var(--bg3);border:1px solid var(--line);
   border-radius:6px;color:var(--fg);font:inherit}
@@ -446,7 +461,7 @@ const CONFIG = {
   DEV_MODE: false,                      // trueで開発用UI（ガチャタブの画像取り込み等）を表示
   SAVE_KEY: "hakoslg_save_v1",          // localStorageキー（名前空間 hakoslg_）
   ASSET_DB: "hakoslg_assets",           // IndexedDB名（画像アセット）
-  SAVE_VERSION: 24,                    // v24: 異民族の築城（world.tiles[].struct）
+  SAVE_VERSION: 25,                    // v25: 盟主の容姿（player.avatar）
   LOG_MAX: 30,                         // 保持する出来事ログの最大件数
 
   // --- 初陣指南（[S15A]。最初の約1分でコアループを1周させる導線） ---
@@ -1040,6 +1055,30 @@ const RESEARCH_BRANCHES = ["内政", "軍事", "開拓", "築城"];
 const LOWER_IS_BETTER_RESEARCH = ["casualty", "buildTime"];
 const ASSIGNABLE_ROLES = ["一般", "軍師", "将軍", "都督", "斥候"];
 
+/* 盟主の容姿（[S02]）。**名前は「盟主」で固定**で入力させない。
+ * 主役は実行部隊（武将）であって、プレイヤー自身はその采配者、という立て付け。
+ * アートが未配置でも emoji で完全に動く（artHTML のフォールバック）。 */
+const AVATAR_DEFS = [
+  { id: "m1", label: "青年武官", sex: "男", emoji: "🧑‍✈️", imageKey: "avatar_m1" },
+  { id: "m2", label: "壮年の将", sex: "男", emoji: "🧔", imageKey: "avatar_m2" },
+  { id: "m3", label: "白髪の軍師", sex: "男", emoji: "👴", imageKey: "avatar_m3" },
+  { id: "f1", label: "若き女将", sex: "女", emoji: "👧", imageKey: "avatar_f1" },
+  { id: "f2", label: "紅蓮の女傑", sex: "女", emoji: "👩", imageKey: "avatar_f2" },
+  { id: "f3", label: "静謐の女軍師", sex: "女", emoji: "👩‍🦳", imageKey: "avatar_f3" },
+];
+const AVATAR_BY_ID = Object.fromEntries(AVATAR_DEFS.map(a => [a.id, a]));
+/** 盟主の表示名。**入力させないので定数**（呼び出し側で文言を散らかさないため） */
+const PLAYER_NAME = "盟主";
+/** 選んだ容姿。未選択（旧セーブ）は null を返す */
+function getAvatar() {
+  return (S && S.player && S.player.avatar && AVATAR_BY_ID[S.player.avatar]) || null;
+}
+/** 盟主の顔アイコンHTML。未選択なら旗の絵文字で代用する */
+function avatarHTML(cls) {
+  const a = getAvatar();
+  return `<span class="${cls || "avatar-mini"}">${a ? artHTML(a.imageKey, a.emoji) : "🏳️"}</span>`;
+}
+
 /** AI城の名前・カラーパレット（生成時にindex順で使用） */
 /* AI勢力の名前と色。**難易度の最大勢力数（上級=14）まで用意すること**。
  * 足りないと "AI10" のような仮名と灰色 #888 が並び、勢力の見分けが付かなくなる。 */
@@ -1196,6 +1235,10 @@ function migrateSave(data) {
     const p = DEFAULT_BUILDING_LAYOUT.camp;
     data.player.buildings.push({ id: "b_camp", type: "camp", level: 1, upgradeEndsAt: null, x: p.x, y: p.y });
   }
+
+  // v24 → v25: 盟主の容姿。**旧セーブは未選択(null)のまま**にして押し付けない。
+  // 同盟タブの盟主の行からいつでも選べる（未選択なら旗の絵文字で代用される）
+  if (data.player && data.player.avatar === undefined) data.player.avatar = null;
 
   // v23 → v24: 異民族の築城。**未築城＝フィールドが無い**状態で始まるので補完は要らない
   // （1,600タイル全部に null を書くとセーブが無駄に膨らむ）。ここは意図的に何もしない。
@@ -1769,6 +1812,7 @@ function generateAIUsers(world, difficulty) {
  *   alliance: { id, name, members:[{id,role}], vault:{...}, order:{targetIdx,issuedAt,siege}|null },
  *                               // vault=同盟倉庫 / order=盟主の攻撃指示と包囲の進み具合([S24])
  *   difficulty: "normal" | "hard",  // 難易度([S01] CONFIG.DIFFICULTY)。開始時に決め、以降不変
+ *   player.avatar: "m1"…"f3",   // 盟主の容姿([S02] AVATAR_DEFS)。見た目だけ・後から変更可
  *   stage: 1 | 2,               // 進行段階。2=第二ステージ（皇都制圧＋本城Lv10で解放）
  *   tribe: { wave, startedAt, clearedAt, offeredAt },  // 異民族の進行([S27])。wave=0は未開始
  *                               // offeredAt=宣戦を打診した時刻。1度だけ自動で出す
@@ -1798,6 +1842,7 @@ function newGameState(difficulty) {
     createdAt: t, lastSavedAt: t, lastTickAt: t,
     world,
     player: {
+      avatar: null,            // 盟主の容姿（[S02]）。boot で選ばせてから入る
       castleLevel: 1,
       buildings: Object.keys(BUILDING_DEFS).map(type => {
         const p = DEFAULT_BUILDING_LAYOUT[type] || { x: 0, y: 0 };
@@ -5988,7 +6033,7 @@ function renderAlliance() {
   const memberRows = S.alliance.members.map(m => {
     const isPlayer = m.id === "player";
     const ai = S.aiUsers.find(a => a.id === m.id);
-    const name = isPlayer ? "あなた" : (ai ? ai.name : m.id);
+    const name = isPlayer ? PLAYER_NAME : (ai ? ai.name : m.id);
     const lv = isPlayer ? S.player.castleLevel : (ai ? ai.castleLevel : "?");
     const roleUI = isPlayer ? `<b>盟主</b>` :
       `<select onchange="UIA.setRole('${m.id}', this.value)">
@@ -6000,7 +6045,9 @@ function renderAlliance() {
       return `<div class="loyalty"><div class="loyalty-bar"><i style="width:${v}%;background:${col}"></i></div>
         <span class="dim small">忠誠 ${v}</span></div>`;
     })();
-    return `<div class="panel row"><div class="grow"><b>${name}</b> <span class="dim">城Lv${lv}</span>${loyalUI}</div>${roleUI}</div>`;
+    return `<div class="panel row">${isPlayer ? avatarHTML("avatar-row") : ""}
+      <div class="grow"><b>${name}</b> <span class="dim">城Lv${lv}</span>${loyalUI}
+      ${isPlayer ? `<div><button class="link-btn" onclick="UIA.changeAvatar()">🏳️ 姿を変える</button></div>` : ""}</div>${roleUI}</div>`;
   }).join("");
   const buffs = getAllianceBuffs();
   const buffText = [
@@ -6033,7 +6080,7 @@ function renderAlliance() {
 /** チャットログ本体だけを再描画（メンバーselect/入力欄は温存。tickからも呼ぶ）。
  *  forceBottom=true か、既に最下部付近にいる時のみ自動で最新へスクロール。 */
 function chatSenderName(senderId) {
-  if (senderId === "player") return "あなた";
+  if (senderId === "player") return PLAYER_NAME;
   const ai = S.aiUsers.find(a => a.id === senderId);
   return ai ? ai.name : "";
 }
@@ -6047,7 +6094,7 @@ function renderChatLog(forceBottom) {
   const near = box.scrollHeight - box.scrollTop - box.clientHeight < 40;
   const msgs = (S.chat && S.chat.messages) || [];
   box.innerHTML = msgs.length
-    ? msgs.map(m => `<div class="chat-msg"><span class="chat-name" style="color:${chatSenderColor(m.senderId)}">${chatSenderName(m.senderId)}</span>${escapeHtml(m.text)}</div>`).join("")
+    ? msgs.map(m => `<div class="chat-msg">${m.senderId === "player" ? avatarHTML() : ""}<span class="chat-name" style="color:${chatSenderColor(m.senderId)}">${chatSenderName(m.senderId)}</span>${escapeHtml(m.text)}</div>`).join("")
     : `<div class="dim small" style="padding:8px 2px">同盟員を勧誘すると、ここで会話が始まります。</div>`;
   if (forceBottom || near) box.scrollTop = box.scrollHeight;
 }
@@ -7061,6 +7108,7 @@ function closeSheet() {
   openTileIndex = null;
   tileSheetActionMode = null;     // 出撃/駐留の選択ドロワーも畳む
   openCardSheetTarget = null;
+  _avatarPick = null;
   _confirmOk = null;              // 確認ダイアログを閉じた＝「やめておく」
   _feedPick.clear(); _lvFeedPick.clear(); _trainMode = null;   // 育成の選択状態もリセット
 }
@@ -7083,6 +7131,16 @@ const UIA = {
     renderCity(); renderHeader();
     if ($("sheet").classList.contains("open")) closeSheet();
   },
+  /** 盟主の容姿を選ぶ（[S02]）。新規時は chooseAvatar の Promise を解決する */
+  pickAvatar(id) {
+    const f = _avatarPick;
+    _avatarPick = null;
+    closeSheet();
+    if (S && S.player) { S.player.avatar = id; renderAlliance(); renderHeader(); }
+    if (f) f(id);
+  },
+  /** 後から容姿を変える（同盟タブの盟主の行から） */
+  changeAvatar() { openAvatarSheet(null); },
   /** 確認ダイアログのOK（[S14] openConfirmSheet） */
   confirmOk() {
     const f = _confirmOk;
@@ -7819,6 +7877,33 @@ function tick() {
  * generateAIUsers は S がまだ無い段階で走るため（difficulty を引数で受ける）。
  * そのため boot() 側で await し、選び終わってから newGameState に渡す。
  * 途中変更はできない — 積み上げた防御の意味が壊れるため。 */
+/* --- 盟主の容姿を選ぶ（[S02] AVATAR_DEFS）------------------------------
+ * 難易度より先に、いちばん最初に訊く。名前は入力させない（PLAYER_NAME 固定）。
+ * onPick を渡すと「後から変える」用途にも使える（新規時は Promise で待つ）。 */
+function avatarPickerHTML() {
+  const cur = S && S.player ? S.player.avatar : null;
+  const cell = a => `<button class="avatar-cell${a.id === cur ? " on" : ""}" onclick="UIA.pickAvatar('${a.id}')">
+      <span class="avatar-art">${artHTML(a.imageKey, a.emoji)}</span>
+      <span class="small">${a.label}</span>
+    </button>`;
+  const row = sex => `<div class="dim small" style="margin-top:8px">${sex}</div>
+    <div class="avatar-grid">${AVATAR_DEFS.filter(a => a.sex === sex).map(cell).join("")}</div>`;
+  return row("男") + row("女");
+}
+let _avatarPick = null;      // 選ばれた時に呼ぶ（UI状態・保存しない）
+function openAvatarSheet(onPick) {
+  _avatarPick = onPick;
+  // 新規ゲーム時（onPick あり）は必ず選ばせる。あとから変える時だけ閉じる口を出す
+  // ── このシートには背景タップで閉じる仕組みが無いので、無いと選ぶまで抜けられない
+  const closer = onPick ? "" : `<div class="actions"><button onclick="closeSheet()">閉じる</button></div>`;
+  showSheet(`<h3>🏳️ 盟主の姿を選ぶ</h3>
+    <div class="dim small">名は<b>${PLAYER_NAME}</b>で通します。戦場の主役は、あなたが率いる武将たちです。</div>
+    ${avatarPickerHTML()}${closer}`);
+}
+function chooseAvatar() {
+  return new Promise(resolve => openAvatarSheet(id => resolve(id)));
+}
+
 function chooseDifficulty() {
   return new Promise(resolve => {
     const card = (id) => {
@@ -7851,7 +7936,12 @@ async function boot() {
   await AssetDB.open();
   await AssetDB.loadAll();
   S = loadGame();
-  if (!S) S = newGameState(await chooseDifficulty());   // 生成前に難易度を決める
+  if (!S) {
+    // いちばん最初に容姿、次に難易度。**難易度は世界の生成前に確定させる必要がある**
+    const avatar = await chooseAvatar();
+    S = newGameState(await chooseDifficulty());
+    S.player.avatar = avatar;
+  }
   if (S.flags.holyWon || S.flags.capitalWon) showWinBanner();
   // 地形を迂回した行軍距離。1600マスのBFSを起動時に1回だけ（描画中には絶対に呼ばない）
   buildTerrainDistanceMap();
