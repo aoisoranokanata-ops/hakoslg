@@ -201,6 +201,21 @@ select{font:inherit;color:var(--fg);background:var(--bg3);border:1px solid var(-
 .lv-max{color:var(--danger);font-weight:700}
 .feed-box{margin-top:10px;padding:8px 10px;border-radius:8px;background:var(--bg2);border:1px solid var(--line)}
 /* 難易度の選択カード（[S01] CONFIG.DIFFICULTY） */
+/* 編成の帯（[S09]・DESIGN_S3.md §5）。先頭が主将＝部隊の兵種を決める */
+.lineup{display:flex;gap:5px;margin-top:10px;touch-action:none;user-select:none}
+.lineup-slot{flex:1;min-width:0;padding:5px 3px;border-radius:8px;background:var(--bg3);
+  border:1px solid var(--line);text-align:center;transition:transform .06s ease}
+.lineup-slot.empty{opacity:.45;border-style:dashed}
+.lineup-slot.sel{border-color:var(--accent);box-shadow:0 0 0 1px var(--accent) inset}
+.lineup-slot.over{border-color:var(--accent);background:#3a3320}
+.lineup-slot.dragging{opacity:.85;z-index:5;position:relative;box-shadow:0 6px 16px #0008}
+.lineup-label{font-size:9px;color:var(--fg-dim);letter-spacing:1px}
+.lineup-slot:first-child .lineup-label{color:var(--accent);font-weight:700}
+.lineup-art{width:100%;aspect-ratio:1;margin:2px 0;border-radius:5px;overflow:hidden}
+.lineup-art img{width:100%;height:100%;object-fit:cover}
+.lineup-name{font-size:10px;line-height:1.2;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.lineup-sub{font-size:10px}
+.lineup-empty{font-size:10px;color:var(--fg-dim);padding:14px 0}
 /* 施設の建設メニュー（[S23]）。未解禁は薄く出して「何を研究すれば増えるか」を見せる */
 .build-row{padding:7px 0;border-top:1px solid var(--line)}
 .build-row:first-child{border-top:0}
@@ -2620,18 +2635,37 @@ function materializeAutoSquad(squadId) {
   const sq = getSquad(squadId); if (!sq) return;
   if (sq.cardUids.length === 0) sq.cardUids = getSquadCards(squadId).map(c => c.uid);
 }
-/** 部隊の主兵種（最も多い兵種。同数なら戦力が高い方）。カード無しなら null */
+/**
+ * 部隊の主兵種。**主将（編成の先頭）が決める**（DESIGN_S3.md §5-2）。
+ * 以前は多数決だったため、知将を混ぜると狙っていない兵種に化けることがあった。
+ * 先頭が決めるなら「騎兵の主将＋知将の副将」のような意図した編成が組める。
+ * 主将が兵種を持たない場合だけ後続で埋める（カード無しなら null）。
+ */
 function getSquadTroop(squadId) {
-  const cards = getSquadCards(squadId);
-  if (!cards.length) return null;
-  const score = {};
-  for (const c of cards) {
-    const d = CARD_BY_ID[c.defId]; if (!d || !d.troop) continue;
-    score[d.troop] = (score[d.troop] || 0) + 1 + cardPower(c.defId) / 10000; // 同数は戦力で決着
+  for (const c of getSquadCards(squadId)) {
+    const d = CARD_BY_ID[c.defId];
+    if (d && d.troop) return d.troop;
   }
-  let best = null;
-  for (const [k, v] of Object.entries(score)) if (!best || v > score[best]) best = k;
-  return best;
+  return null;
+}
+/** 編成の枠名。先頭2つだけ役割名を持つ */
+const LINEUP_LABELS = ["主将", "副将", "兵一", "兵二", "兵三"];
+/**
+ * 編成の並びを入れ替える（from と to を交換）。
+ * 統率の合計は変わらないので最大兵力も動かない＝withTroopRatioPreserved は不要。
+ * 変わるのは主将＝兵種だけ。失敗理由 or null
+ */
+function swapLineup(squadId, from, to) {
+  const sq = getSquad(squadId); if (!sq) return "部隊が見つかりません";
+  if (S.player.marches.some(m => m.squadId === sq.id)) return "行軍中の部隊は編成を変えられません";
+  materializeAutoSquad(squadId);   // 自動編成のままだと並びを保存できない
+  const n = sq.cardUids.length;
+  if (from === to) return null;
+  if (from < 0 || to < 0 || from >= n) return null;
+  if (to >= n) return "そこは空き枠です";
+  const a = sq.cardUids;
+  [a[from], a[to]] = [a[to], a[from]];
+  return null;
 }
 /**
  * 部隊の戦力。カード戦力 + 兵舎 + 本城 に将軍バフを掛ける。
@@ -5465,6 +5499,96 @@ function renderCity() {
 
 /* 編成中の部隊（UI状態なのでセーブしない） */
 let editingSquadId = null;
+/* 編成の帯（DESIGN_S3.md §5）。
+ * sq.cardUids は元から順序付き配列なので、データモデルは変えていない。
+ * 枠に名前を付けて並べ替えられるようにしただけ。
+ * 選択中の枠（タップ操作用）。保存しないUI状態 */
+let _lineupPick = null;
+function lineupHTML(sq) {
+  const cards = getSquadCards(sq.id);
+  const auto = sq.cardUids.length === 0;
+  let slots = "";
+  for (let i = 0; i < CONFIG.SQUAD_SIZE; i++) {
+    const c = cards[i];
+    const d = c ? CARD_BY_ID[c.defId] : null;
+    const trd = d && TROOP_DEFS[d.troop];
+    slots += `<div class="lineup-slot${c ? "" : " empty"}${_lineupPick === i ? " sel" : ""}" data-slot="${i}">
+      <div class="lineup-label">${LINEUP_LABELS[i] || "兵"}</div>
+      ${c ? `<div class="lineup-art">${artHTML(d.imageKey, d.emoji)}</div>
+        <div class="lineup-name">${d.name}</div>
+        <div class="lineup-sub">${trd ? `<span style="color:${trd.color}">${trd.emoji}</span>` : ""}${
+          isStrategist(d.id) ? '<span class="chi-badge">知</span>' : ""}</div>`
+        : `<div class="lineup-empty">空き</div>`}
+    </div>`;
+  }
+  return `<div class="lineup" id="lineup">${slots}</div>
+    <div class="dim small">${auto ? "自動編成中。並べ替えると手動編成になります。" : ""}
+      <b>主将</b>が部隊の兵種を決めます。<b>副将</b>には知将を置くと分かりやすくなります。<br>
+      枠を<b>ドラッグ</b>、または<b>2つタップ</b>で入れ替えられます。</div>`;
+}
+/**
+ * 編成の帯の並べ替え。城タブの cityAttachDrag と同じ作法（Pointer Events）。
+ * **タップだけでも完結する**ようにしてある — iPhoneで指が滑った時に
+ * 並べ替え不能になるのを避けるため、1枠タップ→もう1枠タップでも交換できる。
+ */
+function lineupAttachDrag() {
+  const wrap = $("lineup"); if (!wrap) return;
+  const sqId = editingSquadId;
+  wrap.querySelectorAll(".lineup-slot").forEach(node => {
+    const from = Number(node.dataset.slot);
+    let sx = 0, sy = 0, moved = false, capId = null;
+    const clearOver = () => wrap.querySelectorAll(".over").forEach(n => n.classList.remove("over"));
+    const slotUnder = (x, y) => {
+      const el = document.elementFromPoint(x, y);
+      const t = el && el.closest(".lineup-slot");
+      return t && wrap.contains(t) ? t : null;
+    };
+    node.addEventListener("pointerdown", e => {
+      e.preventDefault();
+      moved = false; sx = e.clientX; sy = e.clientY; capId = e.pointerId;
+      node.setPointerCapture(capId);
+    });
+    node.addEventListener("pointermove", e => {
+      if (capId === null) return;
+      if (!moved && Math.hypot(e.clientX - sx, e.clientY - sy) > 8) { moved = true; node.classList.add("dragging"); }
+      if (!moved) return;
+      node.style.transform = `translate(${e.clientX - sx}px, ${e.clientY - sy}px)`;
+      clearOver();
+      const t = slotUnder(e.clientX, e.clientY);
+      if (t && t !== node) t.classList.add("over");
+    });
+    const end = e => {
+      if (capId === null) return;
+      try { node.releasePointerCapture(capId); } catch (_) {}
+      capId = null;
+      const wasMoved = moved;
+      node.classList.remove("dragging");
+      node.style.transform = "";
+      const t = wasMoved ? slotUnder(e.clientX, e.clientY) : null;
+      clearOver();
+      if (wasMoved) {
+        if (!t || t === node) { renderCards(); return; }   // 枠の外に落としたら何もしない
+        const err = swapLineup(sqId, from, Number(t.dataset.slot));
+        if (err) toast("⚠️ " + err);
+        _lineupPick = null;
+        renderCards();
+        return;
+      }
+      // タップ: 1枠目を選ぶ → 2枠目で交換
+      if (_lineupPick === null) _lineupPick = from;
+      else if (_lineupPick === from) _lineupPick = null;
+      else {
+        const err = swapLineup(sqId, _lineupPick, from);
+        if (err) toast("⚠️ " + err);
+        _lineupPick = null;
+      }
+      renderCards();
+    };
+    node.addEventListener("pointerup", end);
+    node.addEventListener("pointercancel", end);
+  });
+}
+
 function renderCards() {
   ensureSquads();
   const slots = getSquadSlots();
@@ -5560,7 +5684,7 @@ function renderCards() {
     <div class="panel">
       <div class="row"><div class="grow">
         <b>${sq.name}</b> <span class="dim small">${sq.cardUids.length || getSquadCards(sq.id).length}/${CONFIG.SQUAD_SIZE}枚</span>
-        <div class="dim small">主兵種 ${trd ? `<span style="color:${trd.color}">${trd.emoji}${trd.name}</span>` : "—"}
+        <div class="dim small">主兵種 ${trd ? `<span style="color:${trd.color}">${trd.emoji}${trd.name}</span>` : "—"}<span class="dim">（主将）</span>
           ｜ 戦力 ${fmt(getSquadPower(sq.id, null))}${auto ? "（自動編成）" : ""}${rangeTxt}</div>
       </div>
       ${auto ? "" : `<button onclick="UIA.autoSquad('${sq.id}')">自動編成に戻す</button>`}</div>
@@ -5576,12 +5700,14 @@ function renderCards() {
         <button class="primary" ${canFill <= 0 ? "disabled" : ""} onclick="UIA.reinforce('${sq.id}')">
           ⛺ 補充${canFill > 0 ? `（+${fmt(canFill)}）` : ""}</button>
       </div>
+      ${lineupHTML(sq)}
       <div class="dim small" style="margin-top:8px">兵種の輪: 🛡️歩兵 → 🔱槍兵 → 🐎騎兵 → 🏹弓兵 → 🛡楯兵 → 🛡️歩兵
         （有利×${CONFIG.TROOP_ADVANTAGE} / 不利×${CONFIG.TROOP_DISADVANTAGE}）<br>
         🏗️兵器は輪の外: 要塞に×${CONFIG.TROOP_SIEGE_VS_FORTRESS}・野戦×${CONFIG.TROOP_SIEGE_VS_FIELD}、射程2だが損耗×1.6</div>
     </div>
     <div class="panel dim small">カードを<b>タップ</b>で編成に出し入れ／<b>ダブルタップ</b>で詳細と戦法強化</div>
     <div class="card-grid">${cards || '<div class="dim">カードなし</div>'}</div>`;
+  lineupAttachDrag();     // innerHTML を作り直すたびに貼り直す（cityAttachDrag と同じ）
 }
 
 let lastGachaResults = [];
@@ -6955,7 +7081,7 @@ const UIA = {
     renderCards();
   },
   /** 編成中の部隊を切り替える（表示のみ。保存不要なのでUI状態として持つ） */
-  selectSquad(squadId) { editingSquadId = squadId; renderCards(); },
+  selectSquad(squadId) { editingSquadId = squadId; _lineupPick = null; renderCards(); },
   /** 予備兵から負傷兵を補充する（食料を消費） */
   reinforce(squadId) {
     const err = reinforceSquad(squadId);
