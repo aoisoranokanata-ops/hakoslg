@@ -573,6 +573,7 @@ const CONFIG = {
       AI_REGION_COUNTS: { nw: 4, ne: 4, south: 2 },
       AI_ATTACK_CHANCE: { expander: 0.45, balanced: 0.2, turtle: 0.05 },
       AI_MAX_CONCURRENT_MARCHES: 3,
+      AI_ATTACK_MIN_CASTLE_LV: 0,         // 0＝追加の保護なし（実装前と同一の挙動）
       TRIBE_WAVES: [
         { count: 3, castleLv: 12, edges: ["n"] },
         { count: 3, castleLv: 14, edges: ["n"] },
@@ -589,6 +590,10 @@ const CONFIG = {
       AI_REGION_COUNTS: { nw: 5, ne: 5, south: 4 },
       AI_ATTACK_CHANCE: { expander: 0.60, balanced: 0.32, turtle: 0.10 },
       AI_MAX_CONCURRENT_MARCHES: 4,
+      // 上級は拡張型AIの攻撃確率が0.60と高く、実機で「序盤に確保した土地をすぐ奪われて
+      // 足場が作れない」状態になった。**本城がこのレベルに届くまでは領地を奪われない**。
+      // 猶予であって免除ではない（Lv5以降は通常どおり狙われる）
+      AI_ATTACK_MIN_CASTLE_LV: 5,
       TRIBE_WAVES: [
         { count: 3, castleLv: 14, edges: ["n"] },
         { count: 4, castleLv: 16, edges: ["n", "e"] },
@@ -4124,6 +4129,8 @@ function canAIAttack(ai) {
   if (!CONFIG.AI_ATTACK_ENABLED || ai.defeated) return false;
   if (ai.allianceId === S.alliance.id) return false;                 // 同盟員は攻めてこない
   if (S.player.ownedTiles.length < CONFIG.AI_ATTACK_MIN_PLAYER_TILES) return false; // 序盤は保護
+  // 上級だけの追加猶予。本城が育つまでは領地を奪われない（DESIGN_S3.md §14）
+  if (S.player.castleLevel < diff("AI_ATTACK_MIN_CASTLE_LV")) return false;
   // 異民族が居る間は同時侵攻の枠を広げる（波で押し寄せる圧を出すため）
   const cap = livingTribes().length ? diff("TRIBE_MAX_CONCURRENT_MARCHES") : diff("AI_MAX_CONCURRENT_MARCHES");
   if ((S.aiMarches || []).length >= cap) return false;
@@ -7929,6 +7936,8 @@ function chooseDifficulty() {
           <span>最終波の攻撃戦力 <b>${atk(last).toLocaleString("en-US")}</b></span>
           <span>同時侵攻 <b>${D.AI_MAX_CONCURRENT_MARCHES}</b>〜<b>${D.TRIBE_MAX_CONCURRENT_MARCHES}</b></span>
         </div>
+        ${D.AI_ATTACK_MIN_CASTLE_LV ? `<div class="dim small" style="margin-top:4px">
+          🛡 本城Lv${D.AI_ATTACK_MIN_CASTLE_LV}までは領地を奪われません（序盤の猶予）</div>` : ""}
       </button>`;
     };
     UIA.pickDifficulty = (id) => { closeSheet(); resolve(id); };
