@@ -355,3 +355,45 @@ Character: {下記}
 - **年齢と髪色で見分けがつく**ようにしてほしい。装束の細部は16pxでは消える
 - コード側は `AVATAR_DEFS`（[S02]）に配置済み。**未納品でも絵文字で完全に動く**ので、
   6枚まとめてでも1枚ずつでも構わない
+
+---
+
+## 6. 期間限定イベントのバナー（imageKey: `event_banner`）★発注中・1枚
+
+ガチャタブの最上部に出る、**全イベント共通の1枚**。
+名前と口上（英傑降臨祭／群雄集結／星辰の宴）はコード側で切り替えるので、
+**特定のイベント名に寄せず「祭・非日常・出現」の空気だけ**を作ってほしい。
+
+### 技術前提
+
+- **1:1 の正方形**。表示は **72px の角丸**（`object-fit: cover`）。バナーの左側に置く小さな絵
+- **72pxで読めること**が絶対条件。カード（140px）よりさらに小さい。
+  細かい人物や文字は完全に潰れる。**大きな形と強い色のコントラスト**で作る
+- **顔・キャラクターは描かない**。特定の武将に見えると「その武将のピックアップ」と誤読される
+  （今回のイベントは**排出率アップのみ**でピックアップではない）
+- 背景パネルは紫〜赤紫のグラデーション（`#3a1030`→`#4a1840`）。**そこに載るので、
+  紫背景から浮く明るい暖色**（金・橙・白）を主役に
+- 文字は描かない（名前はコード側で出す）
+- 納品は 512×512 PNG。Claude 側で 192px JPEG q82 に落として同梱する
+
+### プロンプト
+
+```
+512x512 px, 1:1 square. Japanese sengoku-fantasy festival emblem, NO people,
+NO faces, NO characters, NO text.
+Subject: a burst of golden light erupting from an ornate ceremonial gate,
+with red-and-gold festival banners and streamers, scattered golden sparks
+and falling cherry petals, a few floating paper lanterns.
+Bold simple shapes readable at very small size, strong contrast, warm gold
+and vermilion against a deep violet night sky.
+Stylized mobile game art, clean bold shapes, warm painterly shading, rich
+saturated colors. Centered composition, 1:1 aspect.
+NO watermark, NO border, NO frame.
+```
+
+### 注意
+
+- コード側は `EVENT_IMAGE_KEY = "event_banner"`（[S28]）に配置済み。
+  **未納品でも 🎏 の絵文字で完全に動く**ので、急ぎではない
+- 将来ピックアップ（特定武将の排出率だけ上げる）を足す時は、
+  **その武将のカードアートを流用する**のが素直（バナーを増やさない）

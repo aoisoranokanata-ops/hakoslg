@@ -215,6 +215,13 @@ select{font:inherit;color:var(--fg);background:var(--bg3);border:1px solid var(-
 .lv-badge.max{background:var(--danger);color:#2a0f0f}
 .lv-max{color:var(--danger);font-weight:700}
 .feed-box{margin-top:10px;padding:8px 10px;border-radius:8px;background:var(--bg2);border:1px solid var(--line)}
+/* 期間限定イベントのバナー（[S28]）。アート未配置でも絵文字で成立する寸法 */
+.event-banner{display:flex;gap:10px;align-items:center;
+  background:linear-gradient(90deg,#3a1030,#4a1840);border-color:#a04880}
+.event-art{flex:0 0 72px;width:72px;height:72px;border-radius:8px;overflow:hidden;
+  background:var(--bg3);display:flex;align-items:center;justify-content:center;font-size:34px}
+.event-art img{width:100%;height:100%;object-fit:cover;display:block}
+.event-body{min-width:0}
 /* 難易度の選択カード（[S01] CONFIG.DIFFICULTY） */
 /* 編成の帯（[S09]・DESIGN_S3.md §5）。先頭が主将＝部隊の兵種を決める */
 .lineup{display:flex;gap:5px;margin-top:10px;touch-action:none;user-select:none}
@@ -412,7 +419,7 @@ select{font:inherit;color:var(--fg);background:var(--bg3);border:1px solid var(-
   <button data-tab="map" class="active"><span class="ico">🗺️</span>マップ<span class="badge" id="mapBadge" style="display:none"></span></button>
   <button data-tab="city"><span class="ico">🏯</span>城<span class="badge hint" id="cityBadge" style="display:none"></span></button>
   <button data-tab="cards"><span class="ico">🎴</span>カード<span class="badge hint" id="cardsBadge" style="display:none"></span></button>
-  <button data-tab="gacha"><span class="ico">💎</span>ガチャ</button>
+  <button data-tab="gacha"><span class="ico">💎</span>ガチャ<span class="badge hint" id="gachaBadge" style="display:none"></span></button>
   <button data-tab="alliance"><span class="ico">🤝</span>同盟<span class="badge" id="chatBadge" style="display:none"></span></button>
 </nav>
 
@@ -461,7 +468,7 @@ const CONFIG = {
   DEV_MODE: false,                      // trueで開発用UI（ガチャタブの画像取り込み等）を表示
   SAVE_KEY: "hakoslg_save_v1",          // localStorageキー（名前空間 hakoslg_）
   ASSET_DB: "hakoslg_assets",           // IndexedDB名（画像アセット）
-  SAVE_VERSION: 25,                    // v25: 盟主の容姿（player.avatar）
+  SAVE_VERSION: 26,                    // v26: 期間限定イベント（event）
   LOG_MAX: 30,                         // 保持する出来事ログの最大件数
 
   // --- 初陣指南（[S15A]。最初の約1分でコアループを1周させる導線） ---
@@ -804,6 +811,18 @@ const CONFIG = {
   GACHA_RATES: { UR: 0.01, SSR: 0.04, SR: 0.15, R: 0.35, N: 0.45 },
   GACHA_PITY_SSR: 50,                   // 50連でSSR確定
   GACHA_TEN_GUARANTEE: "SR",            // 10連でSR以上1枚保証
+
+  // --- 期間限定イベント（[S28]）--------------------------------------
+  // **時刻はすべて絶対epoch msで持ち、shiftTimersForOffline で離席ぶんずらす**。
+  // つまり実時刻ではなく「プレイ時間」で進む。オフライン進行を止めている
+  // （OFFLINE_PROGRESS:false）ので、実時刻基準だと遊んでいない間に開催が
+  // 終わってしまい「期間限定」が機能しないため。
+  EVENT: {
+    FIRST_AT_MIN: 20,                   // 初回イベントまで（プレイ時間・分）
+    CYCLE_MIN: 90,                      // 前回の終了から次の開始まで（同）
+    DURATION_MIN: 25,                   // 開催時間（同）
+    RATE_BONUS: { UR: 0.01, SSR: 0.01 },// 期間中は普段より +1pt（UR 1%→2% / SSR 4%→5%）
+  },
 
   // --- 勧誘 ---
   RECRUIT_FOOD_COST: 500,
@@ -1239,6 +1258,12 @@ function migrateSave(data) {
   if (!data.player.buildings.some(b => b.type === "camp")) {
     const p = DEFAULT_BUILDING_LAYOUT.camp;
     data.player.buildings.push({ id: "b_camp", type: "camp", level: 1, upgradeEndsAt: null, x: p.x, y: p.y });
+  }
+
+  // v25 → v26: 期間限定イベント。**既存セーブも初回までの猶予から始める**
+  // （読み込んだ瞬間に開催が始まると、何が起きたのか分からない）
+  if (!data.event) {
+    data.event = { idx: 0, nextAt: Date.now() + CONFIG.EVENT.FIRST_AT_MIN * 60000, endsAt: null };
   }
 
   // v24 → v25: 盟主の容姿。**旧セーブは未選択(null)のまま**にして押し付けない。
@@ -1826,6 +1851,7 @@ function generateAIUsers(world, difficulty) {
  *   player.avatar: "m1"…"f3",   // 盟主の容姿([S02] AVATAR_DEFS)。見た目だけ・後から変更可
  *   stage: 1 | 2,               // 進行段階。2=第二ステージ（皇都制圧＋本城Lv10で解放）
  *   tribe: { wave, startedAt, clearedAt, offeredAt },  // 異民族の進行([S27])。wave=0は未開始
+ *   event: { idx, nextAt, endsAt },  // 期間限定イベント([S28])。endsAt!=null なら開催中
  *                               // offeredAt=宣戦を打診した時刻。1度だけ自動で出す
  *   aiUsers[].tribe: bool,      // 異民族フラグ。既存のAI戦闘の仕組みに相乗りする
  *   world.tiles[].struct: "palisade"|"tower",  // 異民族が築いた施設([S27])。無い＝未築城
@@ -1882,6 +1908,7 @@ function newGameState(difficulty) {
       order: null },                                      // 盟主の攻撃指示（[S24]）
     stage: 1,                  // 進行段階（[S09]）。2で建物レベル上限が20に解放される
     tribe: { wave: 0, startedAt: null, clearedAt: null, offeredAt: null },  // 異民族の進行（[S27]）
+    event: { idx: 0, nextAt: t + CONFIG.EVENT.FIRST_AT_MIN * 60000, endsAt: null },  // イベント（[S28]）
     aiUsers,
     aiMarches: [],             // AIからプレイヤー領への攻撃部隊（[S12]）。到着で解決される
     flags: { holyWon: false, capitalWon: false, unifiedAt: null },  // unifiedAt=天下統一した時刻（[S09]）
@@ -2024,6 +2051,8 @@ function shiftTimersForOffline() {
   }
   if (S.chat && S.chat.nextAmbientAt) S.chat.nextAmbientAt += gap;
   if (S.hints && S.hints.nextAt) S.hints.nextAt += gap;
+  // イベントは**プレイ時間で進む**（実時刻だと離席中に開催が終わってしまう）
+  if (S.event) { if (S.event.nextAt) S.event.nextAt += gap; if (S.event.endsAt) S.event.endsAt += gap; }
   if (S.nextIncidentCheckAt) S.nextIncidentCheckAt += gap;
   if (S.incident) { S.incident.createdAt += gap; S.incident.expiresAt += gap; }
   return gap;
@@ -3192,7 +3221,7 @@ function rollRarity() {
   S.player.gacha.sinceSSR++;
   if (S.player.gacha.sinceSSR >= CONFIG.GACHA_PITY_SSR) { S.player.gacha.sinceSSR = 0; return "SSR"; }
   let r = Math.random();
-  for (const [rar, p] of Object.entries(CONFIG.GACHA_RATES)) {
+  for (const [rar, p] of Object.entries(getGachaRates())) {   // イベント中は上がる（[S28]）
     if (r < p) {
       if (rar === "SSR" || rar === "UR") S.player.gacha.sinceSSR = 0; // URはSSR以上なので天井もリセット
       return rar;
@@ -3375,6 +3404,77 @@ function hintTick() {
     toast(`${h.icon} ${h.name} が使えます — ${h.desc}`, "hint");
     break;                     // 一度に1件だけ
   }
+}
+
+/* =====================================================================
+ * [S28] EVENT — 期間限定イベント（排出率アップ）
+ *
+ * 一定のプレイ時間ごとに開催され、期間中だけ UR/SSR の排出率が上がる。
+ * **時刻は絶対epoch msで持ち shiftTimersForOffline でずらす**ので、
+ * 進むのは実時刻ではなく**プレイ時間**。オフライン進行を止めている本作で
+ * 実時刻基準にすると、遊んでいない間に開催が終わって気付けないため。
+ *
+ * 画像は**全イベント共通の1枚**（EVENT_IMAGE_KEY）。名前と口上だけ切り替えて
+ * 手触りを変える。未配置でも絵文字で成立する（artHTML のフォールバック）。
+ * ===================================================================*/
+const EVENT_IMAGE_KEY = "event_banner";
+const EVENT_DEFS = [
+  { id: "kourin", name: "英傑降臨祭", lead: "時空の裂け目が開き、名だたる英傑が次々と大陸へ降り立つ。" },
+  { id: "gunyu",  name: "群雄集結",   lead: "各地の豪傑が旗の下へ集う。今なら名将を招きやすい。" },
+  { id: "seiten", name: "星辰の宴",   lead: "夜空に星が連なる夜。稀なる者が現れやすいと伝わる。" },
+];
+/** 開催中のイベント定義。開催していなければ null */
+function getActiveEvent() {
+  if (!S || !S.event || !S.event.endsAt) return null;
+  if (now() >= S.event.endsAt) return null;
+  return EVENT_DEFS[(S.event.idx || 0) % EVENT_DEFS.length];
+}
+/** 開催中なら残り秒、していなければ次の開催までの秒 */
+function getEventLeftSec() {
+  if (!S || !S.event) return 0;
+  const t = now();
+  return Math.max(0, ((S.event.endsAt || S.event.nextAt || t) - t) / 1000);
+}
+/**
+ * 現在の排出率。イベント中は UR/SSR を上げ、**増やしたぶんを下位レア度から
+ * 比例で引く**（合計を1に保つ。引かないと Object.entries の累積判定が狂う）。
+ * 静的な CONFIG.GACHA_RATES は書き換えない（規約2）。
+ */
+function getGachaRates() {
+  const base = CONFIG.GACHA_RATES;
+  if (!getActiveEvent()) return base;
+  const out = { ...base };
+  const bonus = CONFIG.EVENT.RATE_BONUS;
+  let add = 0;
+  for (const [k, v] of Object.entries(bonus)) {
+    if (out[k] == null) continue;
+    out[k] += v; add += v;
+  }
+  const lower = Object.keys(out).filter(k => bonus[k] == null);
+  const sum = lower.reduce((a, k) => a + out[k], 0);
+  if (sum > 0) for (const k of lower) out[k] = Math.max(0, out[k] - add * (out[k] / sum));
+  return out;
+}
+/** tickから呼ばれる。開催の開始と終了を見る */
+function eventTick(t) {
+  if (!S || !S.event) return;
+  const e = S.event;
+  if (e.endsAt) {
+    if (t < e.endsAt) return;
+    const d = EVENT_DEFS[(e.idx || 0) % EVENT_DEFS.length];
+    e.endsAt = null;
+    e.idx = (e.idx || 0) + 1;
+    e.nextAt = t + CONFIG.EVENT.CYCLE_MIN * 60000;
+    toast(`🎏 ${d.name} が終了しました — 排出率は通常に戻ります`, "event");
+    return;
+  }
+  if (!e.nextAt || t < e.nextAt) return;
+  e.endsAt = t + CONFIG.EVENT.DURATION_MIN * 60000;
+  const d = EVENT_DEFS[(e.idx || 0) % EVENT_DEFS.length];
+  const r = getGachaRates();
+  toast(`🎏 ${d.name} 開催！ ${CONFIG.EVENT.DURATION_MIN}分のあいだ ` +
+    `UR ${(r.UR * 100).toFixed(0)}% ／ SSR ${(r.SSR * 100).toFixed(0)}% に上がります`, "event");
+  logEvent("event", `🎏 ${d.name} が始まった — ${d.lead}`);
 }
 
 /* =====================================================================
@@ -5585,6 +5685,7 @@ const LOG_KINDS = {
   skill:    { color: "#e0c060" },  // 必殺技のレベルアップ
   grow:     { color: "#8fd0a0" },  // 武将のレベルアップ
   tribe:    { color: "#d89060" },  // 異民族の流入・波の切替
+  event:    { color: "#f0a0c0" },  // 期間限定イベントの開始・終了
   hint:     { color: "#7fd4c0" },  // 新しく使えるようになった機能の告知
   win:      { color: "#e8b84a" },  // 聖地制圧＝勝利
   build:    { color: "#9ab6e0" },  // 建物の強化完了
@@ -5893,8 +5994,27 @@ function renderCards() {
 let lastGachaResults = [];
 function renderGacha() {
   const g = S.player.gacha;
-  const rates = Object.entries(CONFIG.GACHA_RATES)
-    .map(([r, p]) => `<tr><td>${r}</td><td>${(p * 100).toFixed(0)}%</td></tr>`).join("");
+  // 確率表は**実効値**を出す（[S28] イベント中は上がっている）。上がっている行は色を変える
+  const ev = getActiveEvent();
+  const cur = getGachaRates();
+  const rates = Object.entries(cur).map(([r, p]) => {
+    const up = ev && cur[r] > CONFIG.GACHA_RATES[r];
+    return `<tr><td${up ? ' style="color:var(--accent)"' : ""}>${r}${up ? "▲" : ""}</td>
+      <td${up ? ' style="color:var(--accent);font-weight:700"' : ""}>${(p * 100).toFixed(0)}%</td></tr>`;
+  }).join("");
+  const banner = ev ? `<div class="panel event-banner">
+      <div class="event-art">${artHTML(EVENT_IMAGE_KEY, "🎏")}</div>
+      <div class="event-body">
+        <b>🎏 ${ev.name} 開催中</b>
+        <div class="dim small">${ev.lead}</div>
+        <div class="small" style="margin-top:4px;color:var(--accent)">
+          UR ${(cur.UR * 100).toFixed(0)}% ／ SSR ${(cur.SSR * 100).toFixed(0)}%
+          <span class="dim">（通常 ${(CONFIG.GACHA_RATES.UR * 100).toFixed(0)}% ／ ${(CONFIG.GACHA_RATES.SSR * 100).toFixed(0)}%）</span>
+        </div>
+        <div class="small">残り <b>${fmtSec(getEventLeftSec())}</b></div>
+      </div>
+    </div>` : `<div class="panel dim small">🎏 次の期間限定イベントまで ${fmtSec(getEventLeftSec())}
+      <br>開催中は UR・SSR の排出率が上がります（離席中は進みません）</div>`;
   const results = lastGachaResults.map(d => {
     const trd = TROOP_DEFS[d.troop];
     return `<div class="unit-card rar-${d.rarity}">
@@ -5904,6 +6024,7 @@ function renderGacha() {
       ${trd ? `<div class="dim small"><span style="color:${trd.color}">${trd.emoji}${trd.name}</span></div>` : ""}</div>`;
   }).join("");
   $("page-gacha").innerHTML = `
+    ${banner}
     <div class="panel"><h3>💎 ガチャ（所持 ${fmt(S.player.diamonds)}）</h3>
       <div class="row" style="margin:8px 0">
         <button class="primary grow" onclick="UIA.gacha(1)">単発 💎${CONFIG.GACHA_COST_SINGLE}</button>
@@ -6132,6 +6253,9 @@ function updateChatBadge() {
  */
 function updateHintBadges() {
   const guiding = CONFIG.TUTORIAL_HIDE_ADVANCED_UI && isGuiding();
+  // 期間限定イベント（[S28]）は時間で終わるので、開催中だけガチャタブに●を出す
+  const gb = $("gachaBadge");
+  if (gb) { gb.textContent = "●"; gb.style.display = (!guiding && getActiveEvent()) ? "" : "none"; }
   for (const [id, tab] of [["cityBadge", "city"], ["cardsBadge", "cards"]]) {
     const el = $(id); if (!el) continue;
     const n = guiding ? 0 : getHintCount(tab);
@@ -7862,6 +7986,7 @@ function tick() {
   checkTutorialProgress();
   renderHeader();
   renderGuideBar();
+  eventTick(t);
   stageTick();
   tribeTick();
   rulingTick();
