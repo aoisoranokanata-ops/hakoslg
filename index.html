@@ -536,9 +536,13 @@ const CONFIG = {
   PORT_LEVEL: 4, PORT_DEF: 700,         // 埠頭: 川を渡る唯一の地点
   GATE_LEVEL: 6, GATE_DEF: 1500,        // 関所: 皇都州への3つの入口。中盤の壁
   CAPITAL_LEVEL: 10, CAPITAL_DEF: 4000, // 皇都: 制圧で勝利
-  CAPITAL_RESOURCE_MIN_LV: 8,           // 皇都州の資源レベル下限
-  CAPITAL_RESOURCE_MAX_LV: 10,          // 同上限（通常地域はLv5まで）
-  CAPITAL_RESOURCE_COUNT: 12,           // 皇都州に配置する高レベル資源の枚数
+  // 皇都州は**大陸で唯一の高レベル資源地帯**。ここを平定した者が資源で圧倒する、
+  // という形にするため内部6×6(35枠)をほぼ資源で埋める。通常地域はLv5までなので、
+  // Lv10タイル1枚で通常地域の2倍の生産になる。
+  CAPITAL_RESOURCE_MIN_LV: 9,           // 皇都州の資源レベル下限（通常地域はLv5まで）
+  CAPITAL_RESOURCE_MAX_LV: 10,          // 同上限
+  CAPITAL_RESOURCE_COUNT: 30,           // 配置枚数（内部は皇都を除き35枠）
+  CAPITAL_RESOURCE_LV10_MIN: 20,        // うち最低この枚数はLv10を保証する
   // --- AI同士の戦争（[S12]・DESIGN_S4.md §2）---
   // 非同盟のAI同士が隣接する資源タイルを奪い合う。**城は落とさせない**
   // （落とし合うと勢力が勝手に消え、攻略対象と制覇率の分母が動いて混乱する）。
@@ -1775,14 +1779,21 @@ function generateWorld() {
     if (!(x === CX && y === CY)) inner.push([x, y]);
   }
   const picks = [];
-  for (const k of RES_KEYS) picks.push(k, k);              // 各種2枚を保証
-  while (picks.length < CONFIG.CAPITAL_RESOURCE_COUNT) picks.push(pick(RES_KEYS));
+  // 4種を均等に配る（1種だけ大量に出ると「取っても偏る」ので価値が読めなくなる）
+  while (picks.length < CONFIG.CAPITAL_RESOURCE_COUNT) {
+    for (const k of RES_KEYS) if (picks.length < CONFIG.CAPITAL_RESOURCE_COUNT) picks.push(k);
+  }
   for (let i = inner.length - 1; i > 0; i--) {             // シャッフルして配置先を決める
     const j = randInt(0, i); const t = inner[i]; inner[i] = inner[j]; inner[j] = t;
   }
+  // Lv10を先頭から CAPITAL_RESOURCE_LV10_MIN 枚だけ確実に置く。
+  // 全部を randInt に任せると、運次第で「思ったほど旨くない皇都州」が生まれる
   picks.forEach((k, i) => {
     const cell = inner[i]; if (!cell) return;
-    put(cell[0], cell[1], k, randInt(CONFIG.CAPITAL_RESOURCE_MIN_LV, CONFIG.CAPITAL_RESOURCE_MAX_LV));
+    const lv = i < CONFIG.CAPITAL_RESOURCE_LV10_MIN
+      ? CONFIG.CAPITAL_RESOURCE_MAX_LV
+      : randInt(CONFIG.CAPITAL_RESOURCE_MIN_LV, CONFIG.CAPITAL_RESOURCE_MAX_LV);
+    put(cell[0], cell[1], k, lv);
   });
   put(CX, CY, "capital", CONFIG.CAPITAL_LEVEL);
 
