@@ -4301,7 +4301,9 @@ function requestAid(ti) {
     power: getAidPower(ai),
   };
   toast(`🤝 ${ai.name} が援軍を出した！ ${TILE_DEFS[t.type].name}(${t.x}, ${t.y}) へ ${fmtSec(sec)}`, "ally");
-  warChat("onAidSend", { enemy: ai.name });
+  // 応じた本人に喋らせる（warChat は話し手をランダムに選ぶので使わない）。
+  // 話し手＝援軍を出した当人なので、セリフは一人称で書ける
+  chatEvent("onAidSend", { ai, sub: ai.personality, ctx: { tile: TILE_DEFS[t.type].name } });
   invalidateMarchable();
   return null;
 }
@@ -4326,7 +4328,7 @@ function aidTick(t) {
   if (!a.arrived && t >= a.arriveAt) {
     a.arrived = true;    // 到着の告知を1度だけにするためのフラグ
     toast(`🤝 ${ai.name} の援軍が到着！ 守り +${fmt(a.power)}（${CONFIG.AID_STAY_SEC}秒）`, "defend");
-    warChat("onAidArrive", { enemy: ai.name });
+    chatEvent("onAidArrive", { ai, sub: ai.personality });   // 到着も本人が喋る
   }
   if (t >= a.expiresAt) {
     S.alliance.aid = null;
@@ -5528,7 +5530,6 @@ const CHAT_LINES = {
       "勝ちに慢心するな。次の備えを急げ。",
     ],
   },
-  onOrder: [],                                            // 盟主が攻撃目標を下知した（[S24]・未執筆）
   onAidSend: [],                                          // 援軍を出した（DESIGN_S4.md §1・未執筆）
   onAidArrive: [],                                        // 援軍が到着した（同上・未執筆）
   onMissionDone: [],                                      // 同盟の目標を達成した（§3・未執筆）
