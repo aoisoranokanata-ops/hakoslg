@@ -478,7 +478,7 @@ const CONFIG = {
   DEV_MODE: false,                      // trueで開発用UI（ガチャタブの画像取り込み等）を表示
   SAVE_KEY: "hakoslg_save_v1",          // localStorageキー（名前空間 hakoslg_）
   ASSET_DB: "hakoslg_assets",           // IndexedDB名（画像アセット）
-  SAVE_VERSION: 29,                    // v29: 同盟の援軍（alliance.aid）
+  SAVE_VERSION: 30,                    // v30: 同盟の目標（alliance.mission）
   LOG_MAX: 30,                         // 保持する出来事ログの最大件数
 
   // --- 初陣指南（[S15A]。最初の約1分でコアループを1周させる導線） ---
@@ -744,6 +744,9 @@ const CONFIG = {
   ORDER_TARGET_TYPES: ["castle", "gate", "port", "capital"],  // 指示できる目標の種別
   ORDER_SIEGE_PER_AI_PER_MIN: 1.4,      // 包囲の進行 = 加入AI数 × この値 × (忠誠/100) ／分（%）
   ORDER_SIEGE_MAX: 45,                  // 包囲で下げられる防御の上限（%）
+
+  // --- 同盟ミッション（[S24]・DESIGN_S4.md §3）---
+  ALLY_MISSION_INTERVAL_SEC: 120,       // 達成から次の目標が出るまで（間を置かないと作業になる）
 
   // --- 同盟の援軍（[S24]・DESIGN_S4.md §1）---
   // 加入AIが自領を守りに来る。**要請した時だけ**動く（勝手に守られると何が起きたか分からない）
@@ -1338,6 +1341,11 @@ function migrateSave(data) {
   if (!data.player.buildings.some(b => b.type === "camp")) {
     const p = DEFAULT_BUILDING_LAYOUT.camp;
     data.player.buildings.push({ id: "b_camp", type: "camp", level: 1, upgradeEndsAt: null, x: p.x, y: p.y });
+  }
+
+  // v29 → v30: 同盟の目標。**すぐ最初の目標が出る**（既存セーブにも目的を渡したいため）
+  if (data.alliance && !data.alliance.mission) {
+    data.alliance.mission = { id: null, progress: 0, nextAt: Date.now(), prevId: null };
   }
 
   // v28 → v29: 同盟の援軍。要請なしの状態から始まるだけで既存の進行に影響しない
@@ -1942,6 +1950,7 @@ function generateAIUsers(world, difficulty) {
  *   alliance: { id, name, members:[{id,role}], vault:{...}, order:{targetIdx,issuedAt,siege}|null },
  *                               // vault=同盟倉庫 / order=盟主の攻撃指示と包囲の進み具合([S24])
  *                               // aid=同盟の援軍([S24]・DESIGN_S4.md §1)。null なら要請なし
+ *                               // mission=同盟の目標(§3)。id=null は次の目標を待っている状態
  *   difficulty: "normal" | "hard",  // 難易度([S01] CONFIG.DIFFICULTY)。開始時に決め、以降不変
  *   player.avatar: "m1"…"f3",   // 盟主の容姿([S02] AVATAR_DEFS)。見た目だけ・後から変更可
  *   stage: 1 | 2,               // 進行段階。2=第二ステージ（皇都制圧＋本城Lv10で解放）
@@ -2003,7 +2012,8 @@ function newGameState(difficulty) {
     alliance: { id: "ally_player", name: CONFIG.ALLIANCE_NAME_DEFAULT, members: [{ id: "player", role: "盟主" }],
       vault: { food: 0, wood: 0, stone: 0, iron: 0 },     // 同盟倉庫（[S24]）
       order: null,                                        // 盟主の攻撃指示（[S24]）
-      aid: null, aidCooldownUntil: 0 },                   // 同盟の援軍（DESIGN_S4.md §1）
+      aid: null, aidCooldownUntil: 0,                     // 同盟の援軍（DESIGN_S4.md §1）
+      mission: { id: null, progress: 0, nextAt: t, prevId: null } },  // 同盟の目標（§3）
     stage: 1,                  // 進行段階（[S09]）。2で建物レベル上限が20に解放される
     tribe: { wave: 0, startedAt: null, clearedAt: null, offeredAt: null },  // 異民族の進行（[S27]）
     event: { idx: 0, nextAt: t + CONFIG.EVENT.FIRST_AT_MIN * 60000, endsAt: null, pickup: null },  // イベント（[S28]）
@@ -2158,6 +2168,7 @@ function shiftTimersForOffline() {
     a.departAt += gap; a.arriveAt += gap; a.expiresAt += gap;
   }
   if (S.alliance && S.alliance.aidCooldownUntil) S.alliance.aidCooldownUntil += gap;
+  if (S.alliance && S.alliance.mission && S.alliance.mission.nextAt) S.alliance.mission.nextAt += gap;
   if (S.nextIncidentCheckAt) S.nextIncidentCheckAt += gap;
   if (S.incident) { S.incident.createdAt += gap; S.incident.expiresAt += gap; }
   return gap;
@@ -3252,6 +3263,7 @@ function resolveMarches(t) {
       tile.ownerId = "player";
       S.player.ownedTiles.push(m.targetIdx);
       spawnMapFx(m.targetIdx, m.targetAiId ? "castle" : "capture");   // [S14] 制圧の演出
+      bumpMission(m.targetAiId ? "castle" : "capture");               // 同盟の目標（§3）
       invalidateMarchable(); // 自領が広がると出兵可能範囲も変わる
       const bonus = CONFIG.DIAMOND_CAPTURE_BONUS_PER_LEVEL * tile.level;
       S.player.diamonds += bonus;
@@ -4092,6 +4104,126 @@ function tribeTick() {
  * 納入量は忠誠に比例するので、忠誠を保つ意味がバフ以外にも生まれる。
  * 引き出すと自分の資源になる（自分の倉庫容量を超えるぶんは受け取れない）。
  * ===================================================================*/
+/* --- 同盟ミッション（DESIGN_S4.md §3）---------------------------------
+ * 同盟に共通の目標を1件ずつ出し、達成すると同盟倉庫へ報酬が入る。
+ * 中盤に「次に何をするか」が切れる問題への手当て。
+ *
+ * 進捗は**取れるものは状態から算出する**（規約2）。
+ *   recruit … 加入AI数そのもの。カウンタは要らない
+ *   それ以外 … 「開始してから何回やったか」は状態から復元できないのでカウンタを持つ
+ *              （領地数の差分で測ると、奪われた時に進捗が巻き戻って理不尽になる）
+ * ===================================================================*/
+const ALLY_MISSIONS = [
+  { id: "capture",  text: "領地を{n}枚 制圧せよ",     n: 5, reward: { food: 20000, wood: 20000 } },
+  { id: "castle",   text: "敵の城を{n}つ 落とせ",      n: 1, reward: { iron: 30000 } },
+  { id: "recruit",  text: "同盟員を{n}人まで 増やせ",  n: 3, reward: { food: 30000, stone: 30000 } },
+  { id: "defend",   text: "敵の侵攻を{n}回 退けよ",    n: 3, reward: { stone: 25000 } },
+  { id: "research", text: "研究を{n}件 完了させよ",    n: 2, reward: { wood: 40000 } },
+];
+const MISSION_BY_ID = Object.fromEntries(ALLY_MISSIONS.map(m => [m.id, m]));
+
+/** 進行中のミッション定義（無ければ null） */
+function getMission() {
+  const m = S.alliance && S.alliance.mission;
+  return m && m.id ? MISSION_BY_ID[m.id] || null : null;
+}
+/** 現在の進捗。recruit だけは状態から算出する */
+function getMissionProgress() {
+  const st = S.alliance && S.alliance.mission;
+  const def = getMission();
+  if (!st || !def) return 0;
+  if (def.id === "recruit") return allianceAIs().length;
+  return st.progress || 0;
+}
+/**
+ * ミッションの進捗を進める。**進行中の種別に一致した時だけ**数える。
+ * 各所から呼ぶが、ここで種別を見るので呼び出し側は何も判断しなくてよい。
+ */
+function bumpMission(id, n) {
+  const st = S.alliance && S.alliance.mission;
+  if (!st || st.id !== id) return;
+  st.progress = (st.progress || 0) + (n || 1);
+}
+/** 次のミッションを選ぶ。**前回と同じものは避ける** */
+function rollMission(prevId) {
+  const fresh = ALLY_MISSIONS.filter(m => m.id !== prevId);
+  return pick(fresh.length ? fresh : ALLY_MISSIONS).id;
+}
+/**
+ * 報酬を渡す。同盟倉庫が無い（加入者ゼロ）時は自分の倉庫へ入れる。
+ * **容量で頭打ちになることがある**（倉庫の既存挙動と同じ）ので、
+ * 表示は名目値ではなく**実際に入った量**を返す。嘘の数字を出さないため。
+ */
+function grantMissionReward(reward) {
+  const cap = getVaultCap();
+  const got = [], full = [];
+  for (const [k, v] of Object.entries(reward)) {
+    let before, after;
+    if (cap > 0) {
+      before = S.alliance.vault[k] || 0;
+      S.alliance.vault[k] = Math.min(cap, before + v);
+      after = S.alliance.vault[k];
+    } else {
+      // 加入者が居ないと同盟倉庫の容量は0。そのままだと報酬が消えるので自分の倉庫へ
+      before = S.player.resources[k];
+      S.player.resources[k] = Math.min(getStorageCap(), before + v);
+      after = S.player.resources[k];
+    }
+    const gain = Math.floor(after - before);
+    got.push(RES_DEFS[k].emoji + fmt(gain));
+    if (gain < v) full.push(k);
+  }
+  return { text: got.join(" "), toVault: cap > 0, capped: full.length > 0 };
+}
+/** tickから呼ばれる。開始・達成を見る */
+function missionTick(t) {
+  if (!S.alliance) return;
+  if (CONFIG.TUTORIAL_HIDE_ADVANCED_UI && isGuiding()) return;   // 指南中は出さない
+  if (!S.alliance.mission) S.alliance.mission = { id: null, progress: 0, nextAt: t, prevId: null };
+  const st = S.alliance.mission;
+  if (!st.id) {
+    if (t < (st.nextAt || 0)) return;
+    st.id = rollMission(st.prevId);
+    st.progress = 0;
+    const def = MISSION_BY_ID[st.id];
+    toast(`📜 同盟の目標: ${missionText(def)}`, "ally");
+    return;
+  }
+  const def = MISSION_BY_ID[st.id];
+  if (!def) { st.id = null; return; }                            // 定義から消えたら捨てる
+  if (getMissionProgress() < def.n) return;
+  const r = grantMissionReward(def.reward);
+  toast(`📜 目標達成! ${missionText(def)} — ${r.text} を${r.toVault ? "同盟倉庫" : "倉庫"}へ`
+    + (r.capped ? "（容量いっぱいで一部は入りませんでした）" : ""), "ally");
+  logEvent("ally", `📜 同盟の目標を達成した — ${missionText(def)}`);
+  warChat("onMissionDone");
+  st.prevId = st.id;
+  st.id = null;
+  st.progress = 0;
+  st.nextAt = t + CONFIG.ALLY_MISSION_INTERVAL_SEC * 1000;
+}
+/** 目標文（{n} を埋める） */
+function missionText(def) { return def.text.replace("{n}", def.n); }
+
+/** 同盟タブの目標パネル */
+function missionPanelHTML() {
+  const st = S.alliance && S.alliance.mission;
+  if (!st) return "";
+  const def = getMission();
+  if (!def) {
+    const left = Math.max(0, ((st.nextAt || 0) - now()) / 1000);
+    return `<div class="panel dim small">📜 次の同盟の目標まで ${fmtSec(left)}</div>`;
+  }
+  const p = getMissionProgress(), pct = clamp(p / def.n * 100, 0, 100);
+  const rw = Object.entries(def.reward).map(([k, v]) => RES_DEFS[k].emoji + fmt(v)).join(" ");
+  return `<div class="panel">
+    <h3>📜 同盟の目標</h3>
+    <div><b>${missionText(def)}</b></div>
+    <div class="vault-bar" style="margin-top:6px"><i style="width:${pct}%"></i></div>
+    <div class="dim small">${p} / ${def.n} ｜ 達成報酬 ${rw}（同盟倉庫へ）</div>
+  </div>`;
+}
+
 /* --- 同盟の援軍（DESIGN_S4.md §1）--------------------------------------
  * 加入AIが**自領を守りに来る**。同盟が「数値の供給源」だけでなく
  * 戦場に姿を見せる相手になる、というのが狙い。
@@ -4627,6 +4759,7 @@ function finishResearch(t) {
   withTroopRatioPreserved(S.player.squads.map(sq => sq.id), () => {
     if (!S.player.research.done.includes(a.id)) S.player.research.done.push(a.id);
   });
+  bumpMission("research");                                          // 同盟の目標（§3）
   const def = RESEARCH_BY_ID[a.id];
   if (def) toast(`🔬 研究完了: ${def.icon} ${def.name} — ${def.desc}`, "research");
 }
@@ -4787,6 +4920,7 @@ function resolveAIMarches(t) {
     } else {
       toast(`🛡️ ${ai.name} の攻撃を撃退！ ${name} を守り抜いた（守り${fmt(def)} > 敵${fmt(m.power)}）`, "defend");
       warChat("onDefend", { enemy: ai.name, tile: TILE_DEFS[tile.type].name });
+      bumpMission("defend");                                          // 同盟の目標（§3）
       gainAllianceLoyalty();
     }
   }
@@ -5337,6 +5471,7 @@ const CHAT_LINES = {
   onOrder: [],                                            // 盟主が攻撃目標を下知した（[S24]・未執筆）
   onAidSend: [],                                          // 援軍を出した（DESIGN_S4.md §1・未執筆）
   onAidArrive: [],                                        // 援軍が到着した（同上・未執筆）
+  onMissionDone: [],                                      // 同盟の目標を達成した（§3・未執筆）
   onTribeWave: {
     expander: [
       "第{wave}波か……望むところだ！　正面から叩き潰すぞ！",
@@ -6571,7 +6706,12 @@ function allianceSignature() {
   const v = S.alliance.vault || {};
   const vault = RES_KEYS.map(k => Math.floor((v[k] || 0) / 10000)).join(".");
   const ord = S.alliance.order ? S.alliance.order.targetIdx + "@" + Math.floor(S.alliance.order.siege || 0) : "-";
-  return [S.alliance.name, inc, mem, rec, poor, vault, ord].join("|");
+  // 目標は「進捗が動いた時」だけ再描画する（残り時間は毎秒変わるが、パネルは数字だけなので
+  // 全再構築せず 10秒刻みに丸めて拾う）
+  const ms = S.alliance.mission || {};
+  const mis = (ms.id || "-") + ":" + getMissionProgress()
+    + ":" + (ms.id ? "-" : Math.floor(Math.max(0, (ms.nextAt || 0) - t) / 10000));
+  return [S.alliance.name, inc, mem, rec, poor, vault, ord, mis].join("|");
 }
 /** 軽量更新: 事件パネルと勧誘クールダウンの残り時間だけ書き換える（全再描画を避ける） */
 function updateIncidentCountdown() {
@@ -6709,6 +6849,7 @@ function renderAlliance() {
     <div class="panel"><h3>🤝 <button class="name-btn" onclick="UIA.openAllianceName()"
       >${escapeHtml(S.alliance.name)} ✏️</button>（${S.alliance.members.length}名）</h3>
       <div class="dim small">発動中バフ: ${buffText}</div>${roleHelp}</div>
+    ${missionPanelHTML()}
     ${incidentPanelHTML()}
     ${orderPanelHTML()}
     ${vaultPanelHTML()}
@@ -8656,6 +8797,7 @@ function tick() {
   renderHeader();
   renderGuideBar();
   aidTick(t);
+  missionTick(t);
   eventTick(t);
   stageTick();
   tribeTick();
