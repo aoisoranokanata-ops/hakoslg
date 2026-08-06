@@ -478,7 +478,7 @@ const CONFIG = {
   DEV_MODE: false,                      // trueで開発用UI（ガチャタブの画像取り込み等）を表示
   SAVE_KEY: "hakoslg_save_v1",          // localStorageキー（名前空間 hakoslg_）
   ASSET_DB: "hakoslg_assets",           // IndexedDB名（画像アセット）
-  SAVE_VERSION: 31,                    // v31: 盗賊（bandits / banditNextAt）
+  SAVE_VERSION: 32,                    // v32: 諸侯連合（capitalRushAt）
   LOG_MAX: 30,                         // 保持する出来事ログの最大件数
 
   // --- 初陣指南（[S15A]。最初の約1分でコアループを1周させる導線） ---
@@ -612,6 +612,7 @@ const CONFIG = {
       TRIBE_MAX_CONCURRENT_MARCHES: 5,
       TRIBE_FORTIFY: false,               // 異民族が施設を建てるか（7-5で使う）
       BANDIT_EVENT: false,                // 盗賊の突発イベント（[S31]）
+      AI_CAPITAL_RUSH: false,             // 諸侯連合の皇都争奪（[S32]）
     },
     hard: {
       label: "上級", icon: "🔥",
@@ -633,6 +634,7 @@ const CONFIG = {
       TRIBE_MAX_CONCURRENT_MARCHES: 7,
       TRIBE_FORTIFY: true,
       BANDIT_EVENT: true,                 // 盗賊は上級だけの手応え（[S31]）
+      AI_CAPITAL_RUSH: true,              // 天下を取った盟主へ諸侯が挑む（[S32]）
     },
   },
 
@@ -851,6 +853,11 @@ const CONFIG = {
   GACHA_RATES: { UR: 0.01, SSR: 0.04, SR: 0.15, R: 0.35, N: 0.45 },
   GACHA_PITY_SSR: 50,                   // 50連でSSR確定
   GACHA_TEN_GUARANTEE: "SR",            // 10連でSR以上1枚保証
+
+  // --- 諸侯連合（[S32]・DESIGN_S5.md §1）---------------------------------
+  // 皇都を平定した盟主へ、残る勢力が束になって挑む。上級のみ・平定後のみ。
+  AI_CAPITAL_RUSH_SHARE: 0.35,          // 連合戦力 = 非同盟の生存勢力の攻撃戦力合計 × これ
+  AI_CAPITAL_RUSH_CD_MIN: 12,           // 連合が動ける間隔（分）。連続させると作業になる
 
   // --- 盗賊（[S31]・DESIGN_S5.md §2）------------------------------------
   // 上級だけの突発イベント。倒すと報酬が出る「的」で、領地は奪わない。
@@ -1371,6 +1378,12 @@ function migrateSave(data) {
     data.player.buildings.push({ id: "b_camp", type: "camp", level: 1, upgradeEndsAt: null, x: p.x, y: p.y });
   }
 
+  // v31 → v32: 諸侯連合。**既に皇都を平定しているセーブも一呼吸置いてから**動かす
+  // （読み込んだ瞬間に連合軍が出ると何が起きたのか分からない）
+  if (data.capitalRushAt == null) {
+    data.capitalRushAt = Date.now() + CONFIG.AI_CAPITAL_RUSH_CD_MIN * 60000;
+  }
+
   // v30 → v31: 盗賊。**既存セーブも初回までの猶予から始める**
   // （読み込んだ瞬間に湧くと何が起きたのか分からない）
   if (!data.bandits) data.bandits = [];
@@ -1757,6 +1770,10 @@ function lineCells(x0, y0, x1, y1) {
  *   北東 ←(埠頭)→ 南方   … 南東へ走る大河で分断
  *   中央の皇都州へは 北西関/北東関/南関 の3つの入口のみ
  */
+// 皇都州の内部範囲（6×6）。外郭の山はこの1マス外側に立つ。
+// generateWorld と [S32] の両方が見るので、数値を2箇所に散らさない
+const CAPITAL_ZONE = { x0: 17, y0: 17, x1: 22, y1: 22 };
+
 function generateWorld() {
   const PS = { x: CONFIG.PLAYER_START_X, y: CONFIG.PLAYER_START_Y };
   const CX = CONFIG.CAPITAL_X, CY = CONFIG.CAPITAL_Y;
@@ -1786,16 +1803,21 @@ function generateWorld() {
   for (let y = 0; y <= 15; y++) { put(20, y, "river"); put(21, y, "river"); }
   put(20, 8, "port", CONFIG.PORT_LEVEL); put(21, 8, "port", CONFIG.PORT_LEVEL);
 
-  // 3) 皇都州の外郭（x16..23 / y16..23 の枠）を山にし、入口を3つの関所だけにする
-  for (let x = 16; x <= 23; x++) { put(x, 16, "mountain"); put(x, 23, "mountain"); }
-  for (let y = 16; y <= 23; y++) { put(16, y, "mountain"); put(23, y, "mountain"); }
+  // 3) 皇都州の外郭（枠）を山にし、入口を3つの関所だけにする
+  for (let x = CAPITAL_ZONE.x0 - 1; x <= CAPITAL_ZONE.x1 + 1; x++) {
+    put(x, CAPITAL_ZONE.y0 - 1, "mountain"); put(x, CAPITAL_ZONE.y1 + 1, "mountain");
+  }
+  for (let y = CAPITAL_ZONE.y0 - 1; y <= CAPITAL_ZONE.y1 + 1; y++) {
+    put(CAPITAL_ZONE.x0 - 1, y, "mountain"); put(CAPITAL_ZONE.x1 + 1, y, "mountain");
+  }
   put(16, 19, "gate", CONFIG.GATE_LEVEL);  // 北西関
   put(23, 19, "gate", CONFIG.GATE_LEVEL);  // 北東関
   put(20, 23, "gate", CONFIG.GATE_LEVEL);  // 南関
 
   // 4) 皇都州の内部（6×6）。中心が皇都、Lv8〜10の資源を12枚（4種を最低2枚ずつ）
   const inner = [];
-  for (let y = 17; y <= 22; y++) for (let x = 17; x <= 22; x++) {
+  for (let y = CAPITAL_ZONE.y0; y <= CAPITAL_ZONE.y1; y++)
+  for (let x = CAPITAL_ZONE.x0; x <= CAPITAL_ZONE.x1; x++) {
     put(x, y, "empty", CONFIG.CAPITAL_RESOURCE_MIN_LV);
     if (!(x === CX && y === CY)) inner.push([x, y]);
   }
@@ -2000,6 +2022,7 @@ function generateAIUsers(world, difficulty) {
  *   settings: { bgm, se },      // 音の設定([S29])。false のみを「オフ」として扱う
  *   bandits: [{ ti, level, expiresAt }],  // 盗賊([S31])。上級のみ。倒すと報酬
  *   banditNextAt: number,       // 次に盗賊が湧く時刻（同）
+ *   capitalRushAt: number,      // 諸侯連合が次に動ける時刻（[S32]）
  *                               // offeredAt=宣戦を打診した時刻。1度だけ自動で出す
  *   aiUsers[].tribe: bool,      // 異民族フラグ。既存のAI戦闘の仕組みに相乗りする
  *   world.tiles[].struct: "palisade"|"tower",  // 異民族が築いた施設([S27])。無い＝未築城
@@ -2062,6 +2085,7 @@ function newGameState(difficulty) {
     settings: { bgm: true, se: true },   // 音（[S29]）
     bandits: [],                                              // 盗賊（[S31]）
     banditNextAt: t + CONFIG.BANDIT_FIRST_AT_MIN * 60000,     // 同・初回の出現
+    capitalRushAt: 0,                                         // 諸侯連合（[S32]）
     aiUsers,
     aiMarches: [],             // AIからプレイヤー領への攻撃部隊（[S12]）。到着で解決される
     flags: { holyWon: false, capitalWon: false, unifiedAt: null },  // unifiedAt=天下統一した時刻（[S09]）
@@ -2216,6 +2240,7 @@ function shiftTimersForOffline() {
   // 盗賊（[S31]）。出現の予約と滞在期限の**両方**をずらす。
   // 片方だけだと離席明けに湧いた瞬間に消える
   if (S.banditNextAt) S.banditNextAt += gap;
+  if (S.capitalRushAt) S.capitalRushAt += gap;   // 諸侯連合の待機（[S32]）
   for (const b of (S.bandits || [])) b.expiresAt += gap;
   if (S.nextIncidentCheckAt) S.nextIncidentCheckAt += gap;
   if (S.incident) { S.incident.createdAt += gap; S.incident.expiresAt += gap; }
@@ -2394,6 +2419,14 @@ function isFullyUnified() {
 function showWinBanner() {
   const el = $("winBanner"); if (!el) return;
   el.classList.remove("danger");
+  // 諸侯連合に皇都を奪われている間は**何より先に**出す（[S32]）。
+  // 討伐編の案内より後ろに置くと、宣戦前は案内に食われて赤バナーが出ない
+  if (isCapitalRushOn() && !holdsCapital()) {
+    el.textContent = "🔥 諸侯連合に皇都を奪われた！ 取り返して覇権を保て";
+    el.classList.add("danger");
+    el.classList.add("show");
+    return;
+  }
   // まだ宣戦していない＝いつでも始められることを常設で見せる（断っても導線が残る）
   if (canStartTribes()) {
     el.innerHTML = `⚔️ 建物レベル上限20を解放。準備が整ったら討伐編へ
@@ -3604,6 +3637,85 @@ function hintTick() {
     toast(`${h.icon} ${h.name} が使えます — ${h.desc}`, "hint");
     break;                     // 一度に1件だけ
   }
+}
+
+
+/* =====================================================================
+ * [S32] CAPITAL RUSH — 諸侯連合の皇都争奪（上級限定・DESIGN_S5.md §1）
+ *
+ * 皇都州は大陸で唯一の高レベル資源地帯で、平定した盟主は資源で圧倒する。
+ * その盟主へ、**残る勢力が束になって**挑みに来るのがこの仕組み。
+ *
+ * **なぜ連合なのか**: 単独のAIでは届かない。実測で皇都州のタイルは
+ * 守り5,520〜7,360に対しAI1勢力の攻撃戦力は最大1,849しかなく、
+ * 通行制限を開放しても**600手で1枚も動かなかった**。壁は地域の縛りではなく
+ * 純粋な戦力差だったので、力の側を変えないと何も起きない。
+ *
+ * **連合戦力は非同盟の生存勢力の合計**にした。これで
+ * 「勧誘するか滅ぼすかで脅威が確実に減る」という手触りが生まれ、
+ * 統治フェーズの目標（残る反乱軍の掃討）とそのまま噛み合う。
+ * ===================================================================*/
+/** 皇都州（内側＋関所）のタイルか。連合が狙うのはここだけ */
+function isCapitalZoneTile(ti) {
+  const t = S.world.tiles[ti]; if (!t) return false;
+  if (t.type === "capital" || t.type === "gate") return true;
+  return t.x >= CAPITAL_ZONE.x0 && t.x <= CAPITAL_ZONE.x1
+      && t.y >= CAPITAL_ZONE.y0 && t.y <= CAPITAL_ZONE.y1;
+}
+/** 連合が動く条件。上級かつ**皇都を平定した後**だけ（それまでの調整には触れない） */
+function isCapitalRushOn() {
+  return !!(diff("AI_CAPITAL_RUSH") && S.flags && S.flags.capitalWon && S.world.ruleset !== "legacy_v1");
+}
+/** 連合に加わる勢力。同盟員・滅亡・異民族は入らない */
+function getCapitalRushMembers() {
+  return S.aiUsers.filter(a => !a.defeated && !isTribe(a) && a.allianceId !== S.alliance.id);
+}
+/** 連合戦力。合計に比例するので、勧誘・討伐で確実に下がる */
+function getCapitalRushPower() {
+  const sum = getCapitalRushMembers().reduce((a, x) => a + getAIAttackPower(x), 0);
+  return Math.round(sum * CONFIG.AI_CAPITAL_RUSH_SHARE);
+}
+/**
+ * 連合の進軍を1件つくる。tickから**勢力ごとではなく1回だけ**呼ぶ。
+ * 標的は連合の誰かの領土に隣接する、盟主の皇都州タイルのうち最も守りの薄いもの。
+ */
+function aiCapitalRush(t) {
+  if (!isCapitalRushOn()) return false;
+  if (t < (S.capitalRushAt || 0)) return false;
+  const members = getCapitalRushMembers();
+  if (!members.length) return false;
+  // **隣接は条件にしない**。これは国境の小競り合いではなく遠征なので、
+  // 州の周囲を自領で固めた時点で連合が永久に来られなくなるのは筋が通らない。
+  // 代わりに**関所を優先する**ことで地理の意味を残す＝関所を保つ限り内側は突かれない。
+  const targeted = new Set((S.aiMarches || []).map(m => m.targetIdx));
+  const zone = S.player.ownedTiles.filter(ti => {
+    const tile = S.world.tiles[ti];
+    return tile && tile.type !== "castle" && isCapitalZoneTile(ti) && !targeted.has(ti);
+  });
+  if (!zone.length) return false;
+  // 関所 → 皇都 → 内側 の順に狙う。
+  // 守りの薄い順だけで選ぶと、最も硬い皇都が最後に回って**内側を1枚ずつ削るだけ**になり、
+  // 一発逆転の山場がいつまでも来ない（実測で12回連続して資源タイルを削り続けた）
+  const gates = zone.filter(ti => S.world.tiles[ti].type === "gate");
+  const capital = zone.filter(ti => S.world.tiles[ti].type === "capital");
+  const list = (gates.length ? gates : capital.length ? capital : zone).sort(
+    (a, b) => getPlayerTileDefense(a) - getPlayerTileDefense(b));
+  const ti = list[0];
+  // 旗頭は最も強い勢力。進軍の色・名前・撃退時の処理をすべて既存の経路に乗せる
+  const leader = members.reduce((a, b) => rivalStrength(b) > rivalStrength(a) ? b : a);
+  const tile = S.world.tiles[ti];
+  const dist = chebyshev(tile.x, tile.y, leader.x, leader.y);
+  const sec = Math.max(CONFIG.AI_MARCH_MIN_SEC, dist / CONFIG.AI_MARCH_TILES_PER_SEC);
+  S.capitalRushAt = t + CONFIG.AI_CAPITAL_RUSH_CD_MIN * 60000;
+  S.aiMarches.push({
+    id: uid("am"), aiId: leader.id, targetIdx: ti, power: getCapitalRushPower(),
+    departAt: t, arriveAt: t + sec * 1000, coalition: members.length,
+  });
+  toast(`⚔️ ${leader.name} を旗頭に ${members.length}勢力の連合軍が `
+    + `${TILE_DEFS[tile.type].name}(${tile.x}, ${tile.y}) へ！ 到着まで ${fmtSec(sec)}`, "raid");
+  logEvent("raid", `⚔️ ${members.length}勢力の連合軍が皇都州へ進軍`);
+  warChat("onCapitalRush", { enemy: leader.name });
+  return true;
 }
 
 /* =====================================================================
@@ -4959,8 +5071,11 @@ function isAIExpandableTile(ti, ai) {
   // 異民族は地域の壁を越えて皇都を目指す（通常AIは自地方に閉じこもる）
   if (isTribe(ai)) return true;
   if (t.type === "port") return !!CONFIG.AI_CAN_CAPTURE_PORT;
-  if (t.type === "gate") return !!CONFIG.AI_CAN_CAPTURE_GATE;
-  if (t.type === "capital") return !!CONFIG.AI_CAN_CAPTURE_CAPITAL;
+  // 皇都を平定した後だけ、諸侯は関所と皇都へ手を伸ばせる（[S32]）。
+  // 平定前に開放すると序盤〜中盤の調整が総取り替えになる
+  const rush = isCapitalRushOn();
+  if (t.type === "gate") return !!CONFIG.AI_CAN_CAPTURE_GATE || rush;
+  if (t.type === "capital") return !!CONFIG.AI_CAN_CAPTURE_CAPITAL || rush;
   return true;
 }
 function aiExpand(ai) {
@@ -5132,9 +5247,11 @@ function resolveAIMarches(t) {
       invalidateMarchable();
       toast(`🔥 ${ai.name} に ${name} を奪われた… 敵戦力${fmt(m.power)} > 守り${fmt(def)}`, "raid");
       warChat("onTileLost", { enemy: ai.name, tile: TILE_DEFS[tile.type].name });
-      // 皇都を奪われると第二ステージの勝利条件が崩れる。強く知らせる
-      if (isStage2() && m.targetIdx === getCapitalIdx()) {
-        toast("🔥 皇都が陥落した！ 取り返さねば異民族の討伐は成らぬ", "raid");
+      // 皇都を奪われるのは最も重い出来事なので、必ず強く知らせる。
+      // **第二ステージ限定にしないこと** — [S32]の諸侯連合は討伐編の前にも起こりうる
+      if (m.targetIdx === getCapitalIdx()) {
+        toast(isStage2() ? "🔥 皇都が陥落した！ 取り返さねば異民族の討伐は成らぬ"
+                         : "🔥 皇都が陥落した！ 天下の覇権を奪い返せ", "raid");
         warChat("onCapitalLost", { enemy: ai.name });
         showWinBanner();
       }
@@ -5768,6 +5885,7 @@ const CHAT_LINES = {
       "間に合いました。この場を、守り抜きます。",
     ],
   },
+  onCapitalRush: [],                                      // 諸侯連合が皇都州へ（[S32]・未執筆）
   onBanditAppear: [],                                     // 盗賊が現れた（[S31]・未執筆）
   onBanditDown: [],                                       // 盗賊を討伐した（同上・未執筆）
   onMissionDone: {
@@ -9157,6 +9275,7 @@ function tick() {
   checkTutorialProgress();
   renderHeader();
   renderGuideBar();
+  aiCapitalRush(t);
   banditTick(t);
   aidTick(t);
   missionTick(t);
