@@ -717,6 +717,7 @@ const CONFIG = {
   // --- マップの視覚的誘導（UX検品の指摘を受けて追加） ---
   MAP_HIGHLIGHT_MARCHABLE: true,        // 出兵可能なタイルを枠で強調（隣接ルールの可視化）
   MAP_HOLY_COMPASS: true,               // 画面外の聖地の方向を画面端に表示（目標の提示）
+  MAP_MARCH_ICON_MIN_TILE: 14,          // タイルがこれより小さい時は行軍を点で描く（絵文字が潰れるため）
   MAP_ANIM_FPS: 15,                     // マップの脈動アニメのfps（0で静止）
 
   // --- 幕舎・駐留（[S23]。前線を維持する仕組み） ---
@@ -6793,6 +6794,33 @@ const MapView = {
     this.offsetX = this.vw / 2 - (x + 0.5) * this.tilePx;
     this.offsetY = this.vh / 2 - (y + 0.5) * this.tilePx;
   },
+  /**
+   * 行軍中の部隊トークン。**縁取りの円＋兵種の絵文字**で描く。
+   * 赤丸だけだと「何が来ているのか」が読めないため（実機フィードバック 2026-08-06）。
+   * 縮小時は絵文字が潰れて色の塊になるので、その帯では従来どおり点で描く。
+   */
+  drawMarchToken(ctx, x, y, ts, emoji, color, t) {
+    const bob = Math.sin(t / 260 + x * 0.05) * 1.2;      // わずかに上下して「進んでいる」感じを出す
+    const y2 = y + bob;
+    if (ts < CONFIG.MAP_MARCH_ICON_MIN_TILE) {           // 引きの絵では点のまま
+      ctx.fillStyle = color;
+      ctx.beginPath(); ctx.arc(x, y2, 5, 0, Math.PI * 2); ctx.fill();
+      return;
+    }
+    const r = Math.max(9, ts * 0.40);
+    ctx.save();
+    // 地形の上に重なるので、暗い下地を敷かないと絵文字が読めない
+    ctx.fillStyle = "rgba(12,16,24,.82)";
+    ctx.beginPath(); ctx.arc(x, y2, r, 0, Math.PI * 2); ctx.fill();
+    ctx.strokeStyle = color; ctx.lineWidth = 2;
+    ctx.stroke();
+    const prev = ctx.font;
+    ctx.font = `${Math.floor(r * 1.25)}px sans-serif`;
+    fillEmojiCentered(ctx, emoji, x, y2);                // 送り幅ではなくインクの中心で揃える
+    ctx.font = prev;
+    ctx.restore();
+  },
+
   /* 脈動アニメ用の低頻度ループ。マップタブを見ている時だけ描画するので
    * 他タブ・バックグラウンドでは一切コストがかからない。 */
   startAnim() {
@@ -6994,7 +7022,7 @@ const MapView = {
     }
     if (CONFIG.MAP_HOLY_COMPASS && !guiding) this.drawHolyCompass(ctx, ts, pulse);
     else if (guiding) this._compassHits = []; // 指南中はコンパスのタップ判定も消す
-    // 出兵ラインと部隊ドット
+    // 出兵ラインと部隊アイコン
     const t0 = now();
     for (const m of S.player.marches) {
       const tt = S.world.tiles[m.targetIdx];
@@ -7010,8 +7038,10 @@ const MapView = {
       ctx.setLineDash([6, 4]);
       ctx.beginPath(); ctx.moveTo(sx, sy); ctx.lineTo(ex, ey); ctx.stroke();
       ctx.setLineDash([]);
-      ctx.fillStyle = dot;
-      ctx.beginPath(); ctx.arc(sx + (ex - sx) * p, sy + (ey - sy) * p, 5, 0, Math.PI * 2); ctx.fill();
+      // 部隊は**兵種のアイコン**で描く。何が向かっているのか一目で分かる
+      const trd = TROOP_DEFS[m.troop];
+      this.drawMarchToken(ctx, sx + (ex - sx) * p, sy + (ey - sy) * p, ts,
+                          trd ? trd.emoji : "⚔️", dot, t0);
       // 目標地点に着弾マーカー
       ctx.strokeStyle = line; ctx.lineWidth = 2;
       ctx.beginPath(); ctx.arc(ex, ey, 7 + Math.sin(now() / 200) * 1.5, 0, Math.PI * 2); ctx.stroke();
@@ -7028,8 +7058,9 @@ const MapView = {
       // 狙われたタイルを脈動リングで囲む（どこが危ないかを一目で分かるようにする）
       ctx.strokeStyle = `rgba(255,60,60,${0.5 + pulse * 0.5})`; ctx.lineWidth = 3;
       ctx.strokeRect(this.offsetX + tt.x * ts + 1, this.offsetY + tt.y * ts + 1, ts - 2, ts - 2);
-      ctx.fillStyle = "#ff3c3c";
-      ctx.beginPath(); ctx.arc(sx + (ex - sx) * p, sy + (ey - sy) * p, 6, 0, Math.PI * 2); ctx.fill();
+      // 敵は誰が来ているのかを見せる。異民族は狼で、通常AIの侵攻と区別できるようにする
+      this.drawMarchToken(ctx, sx + (ex - sx) * p, sy + (ey - sy) * p, ts,
+                          isTribe(ai) ? "🐺" : "⚔️", "#ff3c3c", t0);
     }
     // 情報バー。侵攻は自分の行軍より優先して知らせる
     const ms = S.player.marches, am = S.aiMarches || [];
