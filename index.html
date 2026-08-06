@@ -399,6 +399,7 @@ select{font:inherit;color:var(--fg);background:var(--bg3);border:1px solid var(-
       <div id="mapInfo">読み込み中…</div>
       <div id="mapCtrl">
         <button id="logBtn">📜<span class="badge" id="mapCtrlBadge" style="display:none"></span></button>
+        <button id="soundBtn" onclick="UIA.openSound()">🔊</button>
         <button id="zoomIn">＋</button>
         <button id="zoomOut">－</button>
         <button id="zoomHome">🏯</button>
@@ -468,7 +469,7 @@ const CONFIG = {
   DEV_MODE: false,                      // trueで開発用UI（ガチャタブの画像取り込み等）を表示
   SAVE_KEY: "hakoslg_save_v1",          // localStorageキー（名前空間 hakoslg_）
   ASSET_DB: "hakoslg_assets",           // IndexedDB名（画像アセット）
-  SAVE_VERSION: 26,                    // v26: 期間限定イベント（event）
+  SAVE_VERSION: 27,                    // v27: 音の設定（settings）
   LOG_MAX: 30,                         // 保持する出来事ログの最大件数
 
   // --- 初陣指南（[S15A]。最初の約1分でコアループを1周させる導線） ---
@@ -812,6 +813,19 @@ const CONFIG = {
   GACHA_PITY_SSR: 50,                   // 50連でSSR確定
   GACHA_TEN_GUARANTEE: "SR",            // 10連でSR以上1枚保証
 
+  // --- 音（[S29]）------------------------------------------------------
+  // 音源ファイルは持たず WebAudio で合成する。単一HTML制約下で base64 の音源を
+  // 積むとファイルサイズに直結するため（現在 index.html は約1.7MB）。
+  AUDIO: {
+    MASTER: 0.5,                        // 全体音量
+    BGM: 0.18,                          // BGMは会話の邪魔をしない程度に抑える
+    SE: 0.35,
+    DELAY_SEC: 0.22,                    // 余韻。リバーブの代わり
+    DELAY_FEEDBACK: 0.25,
+    SCHED_MS: 60,                       // BGM先読みスケジューラの間隔
+    LOOKAHEAD_SEC: 0.35,                // どれだけ先まで音を予約するか
+  },
+
   // --- 期間限定イベント（[S28]）--------------------------------------
   // **時刻はすべて絶対epoch msで持ち、shiftTimersForOffline で離席ぶんずらす**。
   // つまり実時刻ではなく「プレイ時間」で進む。オフライン進行を止めている
@@ -1097,6 +1111,22 @@ const PLAYER_NAME = "盟主";
 function getAvatar() {
   return (S && S.player && S.player.avatar && AVATAR_BY_ID[S.player.avatar]) || null;
 }
+/** 音の設定シート（[S29]）。トグルは押した瞬間に反映して確かめられるようにする */
+function openSoundSheet() {
+  const st = (S && S.settings) || {};
+  const row = (key, label, desc) => `<div class="row" style="margin-top:10px">
+    <div class="grow"><b>${label}</b><div class="dim small">${desc}</div></div>
+    <button class="${st[key] !== false ? "primary" : ""}" onclick="UIA.toggleSound('${key}')">
+      ${st[key] !== false ? "オン" : "オフ"}</button></div>`;
+  showSheet(`<h3>🔊 音の設定</h3>
+    <div class="dim small">音源ファイルは持たず、その場で合成しています（読み込みも通信もありません）。</div>
+    ${row("bgm", "🎵 BGM", "戦況で曲想が変わります（平時／交戦中／皇都を奪われている間）")}
+    ${row("se", "🔔 効果音", "制圧・撃退・侵攻・普請の完了など")}
+    <div class="dim small" style="margin-top:10px">端末がマナーモードでも鳴ることがあります。
+      音量は端末側で調節してください。</div>
+    <div class="actions"><button onclick="closeSheet()">閉じる</button></div>`);
+}
+
 /** 盟主の顔アイコンHTML。未選択なら旗の絵文字で代用する */
 function avatarHTML(cls) {
   const a = getAvatar();
@@ -1178,7 +1208,9 @@ function toast(msg, kind) {
   el.textContent = msg;
   $("toast").appendChild(el);
   setTimeout(() => el.remove(), 3200);
-  if (kind) logEvent(kind, msg);
+  if (kind) logEvent(kind, msg);  // 効果音は**ここに集約する**（[S29]）。kind ごとの鳴らし分けは SE_BY_LOG_KIND。
+  // 各所に AUDIO.se() を撒くと、鳴る場面と鳴らない場面が散らかって管理できなくなる
+  if (kind && SE_BY_LOG_KIND[kind]) AUDIO.se(SE_BY_LOG_KIND[kind]);
 }
 /** innerHTML に差し込む前のHTMLエスケープ（プレイヤー入力の混入対策） */
 function escapeHtml(s) {
@@ -1259,6 +1291,9 @@ function migrateSave(data) {
     const p = DEFAULT_BUILDING_LAYOUT.camp;
     data.player.buildings.push({ id: "b_camp", type: "camp", level: 1, upgradeEndsAt: null, x: p.x, y: p.y });
   }
+
+  // v26 → v27: 音の設定。既定はオン（鳴らしたくない人はマップの🔊から切れる）
+  if (!data.settings) data.settings = { bgm: true, se: true };
 
   // v25 → v26: 期間限定イベント。**既存セーブも初回までの猶予から始める**
   // （読み込んだ瞬間に開催が始まると、何が起きたのか分からない）
@@ -1853,6 +1888,7 @@ function generateAIUsers(world, difficulty) {
  *   stage: 1 | 2,               // 進行段階。2=第二ステージ（皇都制圧＋本城Lv10で解放）
  *   tribe: { wave, startedAt, clearedAt, offeredAt },  // 異民族の進行([S27])。wave=0は未開始
  *   event: { idx, nextAt, endsAt },  // 期間限定イベント([S28])。endsAt!=null なら開催中
+ *   settings: { bgm, se },      // 音の設定([S29])。false のみを「オフ」として扱う
  *                               // offeredAt=宣戦を打診した時刻。1度だけ自動で出す
  *   aiUsers[].tribe: bool,      // 異民族フラグ。既存のAI戦闘の仕組みに相乗りする
  *   world.tiles[].struct: "palisade"|"tower",  // 異民族が築いた施設([S27])。無い＝未築城
@@ -1910,6 +1946,7 @@ function newGameState(difficulty) {
     stage: 1,                  // 進行段階（[S09]）。2で建物レベル上限が20に解放される
     tribe: { wave: 0, startedAt: null, clearedAt: null, offeredAt: null },  // 異民族の進行（[S27]）
     event: { idx: 0, nextAt: t + CONFIG.EVENT.FIRST_AT_MIN * 60000, endsAt: null },  // イベント（[S28]）
+    settings: { bgm: true, se: true },   // 音（[S29]）
     aiUsers,
     aiMarches: [],             // AIからプレイヤー領への攻撃部隊（[S12]）。到着で解決される
     flags: { holyWon: false, capitalWon: false, unifiedAt: null },  // unifiedAt=天下統一した時刻（[S09]）
@@ -3250,6 +3287,9 @@ function doGacha(count) {
   }
   const t = now();
   for (const def of results) S.player.cards.push({ uid: uid("c"), defId: def.id, obtainedAt: t, rank: 0, skillLv: 1, skillExp: 0, level: 1, exp: 0 });
+  // 排出音は**最高レア度で1回だけ**鳴らす（10連で10回鳴ると音が潰れる）
+  const best = results.reduce((a, c) => RARITY_ORDER[c.rarity] < RARITY_ORDER[a] ? c.rarity : a, "N");
+  AUDIO.se(best === "UR" || best === "SSR" ? "gachaUR" : best === "SR" ? "gachaSR" : "gachaN");
   // 初陣指南④は「10連を引いた」ことが条件（単発では達成しない）
   if (count === CONFIG.TUTORIAL_GACHA_COUNT && S.tutorial) S.tutorial.didTenPull = true;
   return results;
@@ -3406,6 +3446,217 @@ function hintTick() {
     break;                     // 一度に1件だけ
   }
 }
+
+/* =====================================================================
+ * [S29] AUDIO — BGMと効果音（WebAudioの生成音）
+ *
+ * **音源ファイルを一切持たない**。単一HTML制約下で base64 の音源を同梱すると
+ * ファイルサイズに直結するため、すべて WebAudio のオシレータで合成する
+ * （現在 index.html は約1.7MB。数十秒のBGMを積むだけで倍近くなる）。
+ *
+ * 自動再生ポリシー: iOS/Safari は **ユーザー操作の中でしか AudioContext を
+ * 走らせない**。そのため生成は最初のタップまで遅延させ、そこで resume する。
+ * 起動直後に鳴らそうとしても失敗するだけなので、鳴らす条件を1箇所に集約する。
+ *
+ * 音階は**ヨナ抜き五音音階**（4度と7度を抜く）。どの音を重ねても濁らないので、
+ * ランダムに音を選ぶ生成BGMでも不協和にならない。
+ * ===================================================================*/
+const AUDIO = {
+  ctx: null, master: null, bgmGain: null, seGain: null, delay: null,
+  started: false,          // 最初のユーザー操作で true
+  bgmTimer: null,          // 先読みスケジューラ
+  nextNoteAt: 0,           // 次の音を鳴らす時刻（ctx.currentTime 基準）
+  step: 0,                 // 何音目か
+  mood: null,              // 今かかっている曲想
+
+  /** 設定値。S.settings が無い間（起動直後）は既定で鳴らす */
+  get on() { return !S || !S.settings || S.settings.se !== false; },
+  get bgmOn() { return !S || !S.settings || S.settings.bgm !== false; },
+
+  /**
+   * ユーザー操作の中から呼ぶ。ここでしか AudioContext を作らない。
+   * 何度呼んでも安全（2回目以降は resume だけ）。
+   */
+  unlock() {
+    if (!this.ctx) {
+      const AC = window.AudioContext || window.webkitAudioContext;
+      if (!AC) return;                       // 非対応環境では黙って何もしない
+      this.ctx = new AC();
+      this.master = this.ctx.createGain();
+      this.master.gain.value = CONFIG.AUDIO.MASTER;
+      this.master.connect(this.ctx.destination);
+      // 余韻用の短いディレイ。リバーブの代わりで、これがあるだけで生成音が痩せない
+      this.delay = this.ctx.createDelay(1.0);
+      this.delay.delayTime.value = CONFIG.AUDIO.DELAY_SEC;
+      const fb = this.ctx.createGain();
+      fb.gain.value = CONFIG.AUDIO.DELAY_FEEDBACK;
+      this.delay.connect(fb); fb.connect(this.delay);
+      this.delay.connect(this.master);
+      this.bgmGain = this.ctx.createGain(); this.bgmGain.gain.value = CONFIG.AUDIO.BGM;
+      this.seGain = this.ctx.createGain();  this.seGain.gain.value = CONFIG.AUDIO.SE;
+      this.bgmGain.connect(this.master); this.bgmGain.connect(this.delay);
+      this.seGain.connect(this.master);  this.seGain.connect(this.delay);
+    }
+    if (this.ctx.state === "suspended") this.ctx.resume();
+    this.started = true;
+    this.syncBGM();
+  },
+
+  /** 1音を鳴らす基本形。SEもBGMもこれを組み合わせて作る */
+  note(opt) {
+    if (!this.ctx) return;
+    const t = opt.at != null ? opt.at : this.ctx.currentTime;
+    const o = this.ctx.createOscillator();
+    o.type = opt.type || "sine";
+    o.frequency.setValueAtTime(opt.freq, t);
+    if (opt.toFreq) o.frequency.exponentialRampToValueAtTime(Math.max(1, opt.toFreq), t + opt.dur);
+    const g = this.ctx.createGain();
+    const peak = opt.gain != null ? opt.gain : 0.5;
+    const atk = opt.attack != null ? opt.attack : 0.005;
+    // exponentialRamp は 0 に落とせないので必ず微小値で止める
+    g.gain.setValueAtTime(0.0001, t);
+    g.gain.exponentialRampToValueAtTime(peak, t + atk);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + opt.dur);
+    let node = o;
+    if (opt.cutoff) {
+      const f = this.ctx.createBiquadFilter();
+      f.type = "lowpass"; f.frequency.value = opt.cutoff;
+      o.connect(f); node = f;
+    }
+    node.connect(g);
+    g.connect(opt.bus || this.seGain);
+    o.start(t); o.stop(t + opt.dur + 0.05);
+  },
+
+  /** ノイズ系（打撃音・崩落音）。短いバッファをそのまま鳴らす */
+  noise(opt) {
+    if (!this.ctx) return;
+    const t = opt.at != null ? opt.at : this.ctx.currentTime;
+    const len = Math.floor(this.ctx.sampleRate * opt.dur);
+    const buf = this.ctx.createBuffer(1, len, this.ctx.sampleRate);
+    const d = buf.getChannelData(0);
+    for (let i = 0; i < len; i++) d[i] = (Math.random() * 2 - 1) * (1 - i / len);
+    const src = this.ctx.createBufferSource(); src.buffer = buf;
+    const f = this.ctx.createBiquadFilter();
+    f.type = opt.filter || "bandpass";
+    f.frequency.value = opt.freq || 800;
+    f.Q.value = opt.q != null ? opt.q : 1;
+    const g = this.ctx.createGain(); g.gain.value = opt.gain != null ? opt.gain : 0.4;
+    src.connect(f); f.connect(g); g.connect(this.seGain);
+    src.start(t); src.stop(t + opt.dur);
+  },
+
+  /** 効果音を鳴らす。名前は SE_DEFS のキー */
+  se(name) {
+    if (!this.started || !this.on || !this.ctx) return;
+    const f = SE_DEFS[name];
+    if (f) f(this);
+  },
+
+  /* --- BGM ------------------------------------------------------------
+   * 先読みスケジューラ。setInterval で「少し先の音」を予約していく。
+   * setTimeout で1音ずつ鳴らすとタイミングが揺れるため、WebAudio では
+   * ctx.currentTime を基準に前もって予約するのが定石。 */
+  syncBGM() {
+    const want = this.started && this.bgmOn && !document.hidden;
+    if (want && !this.bgmTimer) {
+      this.nextNoteAt = this.ctx.currentTime + 0.1;
+      this.step = 0;
+      this.bgmTimer = setInterval(() => this.scheduleBGM(), CONFIG.AUDIO.SCHED_MS);
+    } else if (!want && this.bgmTimer) {
+      clearInterval(this.bgmTimer); this.bgmTimer = null;
+    }
+  },
+  /** 今の戦況から曲想を決める。切り替わりは次の小節から自然に効く */
+  currentMood() {
+    if (!S) return "peace";
+    if (S.tribe && S.tribe.wave > 0 && !S.tribe.clearedAt) return holdsCapital() ? "war" : "crisis";
+    if ((S.aiMarches || []).length > 0) return "war";
+    return "peace";
+  },
+  scheduleBGM() {
+    if (!this.ctx || !this.bgmOn) return;
+    const mood = this.currentMood();
+    if (mood !== this.mood) { this.mood = mood; this.step = 0; }
+    const M = BGM_MOODS[mood] || BGM_MOODS.peace;
+    const beat = 60 / M.bpm;
+    while (this.nextNoteAt < this.ctx.currentTime + CONFIG.AUDIO.LOOKAHEAD_SEC) {
+      const at = this.nextNoteAt;
+      const bar = Math.floor(this.step / 8);
+      // 小節頭にドローン（低音の持続）。曲の土台になる
+      if (this.step % 8 === 0) {
+        const root = M.roots[bar % M.roots.length];
+        this.note({ at, freq: root, type: "triangle", dur: beat * 8,
+                    gain: 0.22, attack: 0.6, cutoff: 500, bus: this.bgmGain });
+        this.note({ at, freq: root * 1.5, type: "sine", dur: beat * 8,
+                    gain: 0.10, attack: 0.9, cutoff: 700, bus: this.bgmGain });
+      }
+      // 旋律は休符を多くする。詰めると生成音は途端に安っぽくなる
+      if (Math.random() < M.density) {
+        const oct = Math.random() < 0.25 ? 2 : 1;
+        const f = pick(M.scale) * oct;
+        this.note({ at, freq: f, type: "sine", dur: beat * (Math.random() < 0.3 ? 1.6 : 0.9),
+                    gain: 0.16, attack: 0.02, cutoff: 2200, bus: this.bgmGain });
+      }
+      this.nextNoteAt += beat;
+      this.step++;
+    }
+  },
+};
+
+/* 効果音の定義。**toast(msg, kind) の kind から自動で選ばれる**ので、
+ * 新しい種別を足す時はここに1行足せば鳴るようになる。 */
+const SE_DEFS = {
+  tap:      a => a.note({ freq: 880, toFreq: 660, type: "sine", dur: 0.06, gain: 0.18 }),
+  capture:  a => { a.note({ freq: 523, type: "triangle", dur: 0.16, gain: 0.35 });
+                   a.note({ freq: 784, type: "triangle", dur: 0.28, gain: 0.30, at: a.ctx.currentTime + 0.09 }); },
+  defend:   a => { a.note({ freq: 392, type: "square", dur: 0.12, gain: 0.18, cutoff: 1200 });
+                   a.note({ freq: 587, type: "triangle", dur: 0.22, gain: 0.26, at: a.ctx.currentTime + 0.08 }); },
+  raid:     a => { a.noise({ freq: 300, dur: 0.35, gain: 0.30, filter: "lowpass", q: 0.7 });
+                   a.note({ freq: 220, toFreq: 110, type: "sawtooth", dur: 0.5, gain: 0.20, cutoff: 700 }); },
+  defeat:   a => a.note({ freq: 330, toFreq: 110, type: "sawtooth", dur: 0.6, gain: 0.24, cutoff: 800 }),
+  build:    a => { a.note({ freq: 659, type: "sine", dur: 0.12, gain: 0.26 });
+                   a.note({ freq: 988, type: "sine", dur: 0.24, gain: 0.22, at: a.ctx.currentTime + 0.1 }); },
+  research: a => { a.note({ freq: 587, type: "sine", dur: 0.14, gain: 0.24 });
+                   a.note({ freq: 880, type: "sine", dur: 0.3, gain: 0.20, at: a.ctx.currentTime + 0.11 }); },
+  win:      a => [0, 0.13, 0.26, 0.42].forEach((d, i) =>
+                   a.note({ freq: [523, 659, 784, 1047][i], type: "triangle",
+                            dur: i === 3 ? 0.7 : 0.2, gain: 0.32, at: a.ctx.currentTime + d })),
+  tribe:    a => { a.noise({ freq: 180, dur: 0.6, gain: 0.28, filter: "lowpass", q: 0.6 });
+                   a.note({ freq: 98, type: "sawtooth", dur: 0.9, gain: 0.24, cutoff: 400 }); },
+  event:    a => [0, 0.1, 0.2].forEach((d, i) =>
+                   a.note({ freq: [784, 988, 1319][i], type: "sine", dur: 0.3, gain: 0.26,
+                            at: a.ctx.currentTime + d })),
+  ally:     a => { a.note({ freq: 440, type: "sine", dur: 0.14, gain: 0.22 });
+                   a.note({ freq: 660, type: "sine", dur: 0.22, gain: 0.20, at: a.ctx.currentTime + 0.1 }); },
+  incident: a => a.note({ freq: 466, toFreq: 349, type: "square", dur: 0.3, gain: 0.16, cutoff: 900 }),
+  // ガチャの排出はレア度で鳴らし分ける（[S10] から明示的に呼ぶ）
+  gachaN:   a => a.note({ freq: 523, type: "sine", dur: 0.12, gain: 0.20 }),
+  gachaSR:  a => [0, 0.09].forEach((d, i) =>
+                   a.note({ freq: [659, 988][i], type: "triangle", dur: 0.25, gain: 0.28, at: a.ctx.currentTime + d })),
+  gachaUR:  a => { [0, 0.1, 0.2, 0.3].forEach((d, i) =>
+                     a.note({ freq: [784, 1047, 1319, 1568][i], type: "triangle",
+                              dur: 0.35, gain: 0.30, at: a.ctx.currentTime + d }));
+                   a.noise({ freq: 6000, dur: 0.9, gain: 0.10, filter: "highpass", q: 0.5 }); },
+};
+/** ログ種別（[S20] LOG_KINDS）→ 効果音。載っていない種別は鳴らさない */
+const SE_BY_LOG_KIND = {
+  capture: "capture", defend: "defend", raid: "raid", defeat: "defeat",
+  build: "build", research: "research", win: "win", tribe: "tribe",
+  event: "event", ally: "ally", incident: "incident", hint: "event",
+  fuse: "build", skill: "research", grow: "research",
+};
+
+/* 曲想。ヨナ抜き五音音階なので、どの音を選んでも濁らない。
+ * peace=長調で穏やか／war=短調で速く／crisis=皇都を奪われている間の低く重い曲 */
+const BGM_MOODS = {
+  peace:  { bpm: 68, density: 0.42, roots: [130.81, 146.83, 174.61, 130.81],   // C3 D3 F3 C3
+            scale: [261.63, 293.66, 329.63, 392.00, 440.00] },                 // C D E G A
+  war:    { bpm: 96, density: 0.55, roots: [110.00, 110.00, 123.47, 98.00],    // A2 A2 B2 G2
+            scale: [220.00, 261.63, 293.66, 329.63, 392.00] },                 // A C D E G
+  crisis: { bpm: 84, density: 0.48, roots: [87.31, 92.50, 87.31, 82.41],       // F2 F#2 F2 E2
+            scale: [174.61, 207.65, 233.08, 261.63, 311.13] },
+};
 
 /* =====================================================================
  * [S28] EVENT — 期間限定イベント（排出率アップ）
@@ -7279,6 +7530,17 @@ const UIA = {
   },
   /** 後から容姿を変える（同盟タブの盟主の行から） */
   changeAvatar() { openAvatarSheet(null); },
+  /** 音の設定（[S29]） */
+  openSound() { openSoundSheet(); },
+  toggleSound(key) {
+    if (!S.settings) S.settings = { bgm: true, se: true };
+    S.settings[key] = S.settings[key] === false;      // false のみを「オフ」として扱う
+    AUDIO.unlock();                                    // 操作の中なので、ここで解禁もできる
+    AUDIO.syncBGM();
+    if (key === "se" && S.settings.se) AUDIO.se("tap");
+    openSoundSheet();
+    saveGame();
+  },
   /** 確認ダイアログのOK（[S14] openConfirmSheet） */
   confirmOk() {
     const f = _confirmOk;
@@ -7965,6 +8227,9 @@ function switchTab(tab) {
  * ポインタが押されている間は再描画をスキップする（clickはpointerupの直後に
  * 発火し、次のtickまでDOMは無傷なので取りこぼさない） */
 let pointerHeld = false;
+// iOS/Safari は**ユーザー操作の中でしか AudioContext を走らせない**。
+// 最初のタップで解禁する（何度呼んでも安全）
+window.addEventListener("pointerdown", () => { AUDIO.unlock(); }, true);
 window.addEventListener("pointerdown", () => { pointerHeld = true; }, true);
 window.addEventListener("pointerup", () => { pointerHeld = false; }, true);
 window.addEventListener("pointercancel", () => { pointerHeld = false; }, true);
@@ -8108,7 +8373,10 @@ async function boot() {
   // ループ＆自動保存
   setInterval(tick, CONFIG.TICK_MS);
   setInterval(saveGame, CONFIG.AUTOSAVE_MS);
-  document.addEventListener("visibilitychange", () => { if (document.hidden) saveGame(); });
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden) saveGame();
+    AUDIO.syncBGM();      // 裏に回っている間はBGMを止める（電池と、戻った時の唐突さ対策）
+  });
   // Service Worker（http(s)配信時のみ。file://ではスキップ）
   if ("serviceWorker" in navigator && location.protocol.startsWith("http")) {
     navigator.serviceWorker.register("./sw.js", { updateViaCache: "none" })
