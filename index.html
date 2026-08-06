@@ -101,6 +101,9 @@ select{font:inherit;color:var(--fg);background:var(--bg3);border:1px solid var(-
   border-radius:8px;overflow:hidden;background:var(--bg3);font-size:30px}
 .avatar-art img{width:100%;height:100%;object-fit:cover}
 .link-btn{background:none;border:0;color:var(--accent);padding:2px 0;font-size:11px;text-decoration:underline}
+/* 同盟名（タップで変更）。見出しの中に置くので文字サイズは h3 に合わせる */
+.name-btn{background:none;border:0;color:var(--fg);font-size:inherit;font-weight:inherit;
+  padding:0;text-decoration:underline;text-underline-offset:3px;text-decoration-style:dotted}
 .chat-input-row{display:flex;gap:6px}
 .chat-input-row input{flex:1;min-width:0;padding:7px 8px;background:var(--bg3);border:1px solid var(--line);
   border-radius:6px;color:var(--fg);font:inherit}
@@ -854,6 +857,8 @@ const CONFIG = {
   },
 
   // --- 勧誘 ---
+  ALLIANCE_NAME_MAX: 12,                // 同盟名の文字数上限（見出しが折り返さない長さ）
+  ALLIANCE_NAME_DEFAULT: "無名同盟",
   RECRUIT_FOOD_COST: 500,
   RECRUIT_BASE_CHANCE: 0.5,
   RECRUIT_CHANCE_PER_LV_DIFF: 0.06,     // (自城Lv−AI城Lv)×この値を加算
@@ -1126,6 +1131,26 @@ const PLAYER_NAME = "盟主";
 function getAvatar() {
   return (S && S.player && S.player.avatar && AVATAR_BY_ID[S.player.avatar]) || null;
 }
+/**
+ * 同盟名の変更（DESIGN_S4.md §4）。`S.alliance.name` は最初からあるのでスキーマ変更なし。
+ * **チャットの `{ally}` にそのまま流れる**ので、付けた名前を同盟員が呼ぶようになる。
+ */
+function openAllianceNameSheet() {
+  const cur = S.alliance.name || "";
+  showSheet(`<h3>✏️ 同盟の名を改める</h3>
+    <div class="dim small">同盟員はこの名で呼びます。${CONFIG.ALLIANCE_NAME_MAX}文字まで。</div>
+    <input id="allyNameInp" maxlength="${CONFIG.ALLIANCE_NAME_MAX}" value="${escapeHtml(cur)}"
+      style="width:100%;margin-top:10px;padding:9px;background:var(--bg3);
+             border:1px solid var(--line);border-radius:8px;color:var(--fg);font-size:15px">
+    <div class="actions">
+      <button class="primary" onclick="UIA.setAllianceName()">改める</button>
+      <button onclick="UIA.setAllianceName(true)">既定に戻す</button>
+      <button onclick="closeSheet()">やめる</button>
+    </div>`);
+  const el = $("allyNameInp");
+  if (el) { el.focus(); el.select(); }
+}
+
 /** 音の設定シート（[S29]）。トグルは押した瞬間に反映して確かめられるようにする */
 function openSoundSheet() {
   const st = (S && S.settings) || {};
@@ -1960,7 +1985,7 @@ function newGameState(difficulty) {
       // 研究ツリー([S21])。done は完了した研究id、active は進行中の1件
       research: { done: [], active: null },
     },
-    alliance: { id: "ally_player", name: "無名同盟", members: [{ id: "player", role: "盟主" }],
+    alliance: { id: "ally_player", name: CONFIG.ALLIANCE_NAME_DEFAULT, members: [{ id: "player", role: "盟主" }],
       vault: { food: 0, wood: 0, stone: 0, iron: 0 },     // 同盟倉庫（[S24]）
       order: null },                                      // 盟主の攻撃指示（[S24]）
     stage: 1,                  // 進行段階（[S09]）。2で建物レベル上限が20に解放される
@@ -6418,7 +6443,7 @@ function allianceSignature() {
   const v = S.alliance.vault || {};
   const vault = RES_KEYS.map(k => Math.floor((v[k] || 0) / 10000)).join(".");
   const ord = S.alliance.order ? S.alliance.order.targetIdx + "@" + Math.floor(S.alliance.order.siege || 0) : "-";
-  return inc + "|" + mem + "|" + rec + "|" + poor + "|" + vault + "|" + ord;
+  return [S.alliance.name, inc, mem, rec, poor, vault, ord].join("|");
 }
 /** 軽量更新: 事件パネルと勧誘クールダウンの残り時間だけ書き換える（全再描画を避ける） */
 function updateIncidentCountdown() {
@@ -6553,7 +6578,8 @@ function renderAlliance() {
   const roleHelp = ASSIGNABLE_ROLES.filter(r => r !== "一般")
     .map(r => `<div class="small dim">${r}: ${ROLE_DEFS[r].desc}</div>`).join("");
   $("page-alliance").innerHTML = `
-    <div class="panel"><h3>🤝 ${S.alliance.name}（${S.alliance.members.length}名）</h3>
+    <div class="panel"><h3>🤝 <button class="name-btn" onclick="UIA.openAllianceName()"
+      >${escapeHtml(S.alliance.name)} ✏️</button>（${S.alliance.members.length}名）</h3>
       <div class="dim small">発動中バフ: ${buffText}</div>${roleHelp}</div>
     ${incidentPanelHTML()}
     ${orderPanelHTML()}
@@ -7711,6 +7737,20 @@ const UIA = {
   },
   /** 後から容姿を変える（同盟タブの盟主の行から） */
   changeAvatar() { openAvatarSheet(null); },
+  /** 同盟名の変更（DESIGN_S4.md §4） */
+  openAllianceName() { openAllianceNameSheet(); },
+  setAllianceName(reset) {
+    const el = $("allyNameInp");
+    let v = reset ? CONFIG.ALLIANCE_NAME_DEFAULT : (el ? el.value : "").trim();
+    if (!v) { toast("⚠️ 同盟名を入力してください"); return; }   // 空は拒否（見出しが消える）
+    v = v.slice(0, CONFIG.ALLIANCE_NAME_MAX);
+    if (v === S.alliance.name) { closeSheet(); return; }
+    S.alliance.name = v;
+    closeSheet();
+    toast(`✏️ 同盟の名を「${v}」に改めた`, "ally");
+    renderAlliance();
+    saveGame();
+  },
   /** 音の設定（[S29]） */
   openSound() { openSoundSheet(); },
   toggleSound(key) {
