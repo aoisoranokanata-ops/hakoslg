@@ -711,6 +711,10 @@ const CONFIG = {
   // --- マップの視覚的誘導（UX検品の指摘を受けて追加） ---
   MAP_HIGHLIGHT_MARCHABLE: true,        // 出兵可能なタイルを枠で強調（隣接ルールの可視化）
   MAP_HOLY_COMPASS: true,               // 画面外の聖地の方向を画面端に表示（目標の提示）
+  // 制圧エフェクト（[S14]）。マップのcanvasに描くだけなのでDOMは触らない
+  // （毎tick再描画されるパネルにアニメを載せると点滅する。2026-08-06 の教訓）
+  MAP_FX_MS: 900,                       // 1つのエフェクトが消えるまで
+  MAP_FX_MAX: 12,                       // 同時に保持する上限（連続制圧で溜め込まない）
   MAP_MARCH_ICON_MIN_TILE: 14,          // タイルがこれより小さい時は行軍を点で描く（絵文字が潰れるため）
   MAP_ANIM_FPS: 15,                     // マップの脈動アニメのfps（0で静止）
 
@@ -3040,7 +3044,20 @@ function getMarchableTiles(range, originIdx) {
 /* 本城からの地形距離（山・川を迂回した実距離）。行軍時間の算出に使う。
  * 1600マスのBFSを起動時とワールド生成時に1回だけ実行し、RAM上にだけ保持する
  * （派生値なのでセーブには入れない）。draw() から呼んではいけない。 */
-const RUNTIME = { terrainDistance: null, conquestTotal: null };  // conquestTotal=制覇率の母数（[S09]）
+const RUNTIME = { terrainDistance: null, conquestTotal: null, mapFx: [] };
+// conquestTotal=制覇率の母数（[S09]）／mapFx=制圧エフェクト（[S14]・保存しない一時的な演出）
+
+/**
+ * マップに一時的な演出を出す（[S14]）。**セーブには入れない**ので、
+ * 途中で閉じても復元されない＝古いエフェクトが後から再生されることがない。
+ * マップを見ていない間に起きたぶんは、戻った頃には期限切れで消えている（それでよい）。
+ */
+function spawnMapFx(ti, kind) {
+  if (!CONFIG.MAP_FX_MS) return;
+  const fx = RUNTIME.mapFx;
+  fx.push({ ti, kind, at: Date.now() });
+  if (fx.length > CONFIG.MAP_FX_MAX) fx.splice(0, fx.length - CONFIG.MAP_FX_MAX);
+}
 function buildTerrainDistanceMap() {
   const dist = new Array(SIZE * SIZE).fill(Infinity);
   const start = playerStartIdx();
@@ -3186,6 +3203,7 @@ function resolveMarches(t) {
       const razed = razeTribeStruct(m.targetIdx);
       tile.ownerId = "player";
       S.player.ownedTiles.push(m.targetIdx);
+      spawnMapFx(m.targetIdx, m.targetAiId ? "castle" : "capture");   // [S14] 制圧の演出
       invalidateMarchable(); // 自領が広がると出兵可能範囲も変わる
       const bonus = CONFIG.DIAMOND_CAPTURE_BONUS_PER_LEVEL * tile.level;
       S.player.diamonds += bonus;
@@ -6722,6 +6740,48 @@ const MapView = {
     this.offsetY = this.vh / 2 - (y + 0.5) * this.tilePx;
   },
   /**
+   * 制圧エフェクト（[S14]）。広がる輪＋弾ける粒で「ここを取った」を伝える。
+   * canvasに描くだけなのでDOMは触らない。期限切れはここで捨てる。
+   */
+  drawMapFx(ctx, ts) {
+    const fx = RUNTIME.mapFx;
+    if (!fx.length) return;
+    const t = Date.now();
+    // 期限切れを落とす。描画のたびに掃除するので溜まらない
+    for (let i = fx.length - 1; i >= 0; i--) if (t - fx[i].at >= CONFIG.MAP_FX_MS) fx.splice(i, 1);
+    for (const f of fx) {
+      const tile = S.world.tiles[f.ti]; if (!tile) continue;
+      const k = (t - f.at) / CONFIG.MAP_FX_MS;          // 0→1
+      const cx = this.offsetX + (tile.x + 0.5) * ts;
+      const cy = this.offsetY + (tile.y + 0.5) * ts;
+      if (cx < -ts || cy < -ts || cx > this.vw + ts || cy > this.vh + ts) continue;  // 画面外は描かない
+      const big = f.kind === "castle";                  // 城を落とした時は大きく
+      const fade = 1 - k;
+      ctx.save();
+      ctx.globalCompositeOperation = "lighter";
+      // マスを一瞬だけ明るく染める
+      ctx.fillStyle = big ? `rgba(255,190,90,${0.42 * fade})` : `rgba(232,184,74,${0.30 * fade})`;
+      ctx.fillRect(this.offsetX + tile.x * ts, this.offsetY + tile.y * ts, ts, ts);
+      // 広がる輪。**線を細くしながら広げる**と、消える方向が読めて散らかって見えない
+      const r = ts * (0.35 + (big ? 2.2 : 1.4) * k);
+      ctx.strokeStyle = big ? `rgba(255,210,120,${fade})` : `rgba(232,184,74,${fade})`;
+      ctx.lineWidth = Math.max(1, (big ? 4 : 3) * fade);
+      ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI * 2); ctx.stroke();
+      // 弾ける粒。少数でよい（15fpsなので多くしても粒として見えない）
+      const n = big ? 10 : 6;
+      ctx.fillStyle = `rgba(255,240,200,${fade})`;
+      for (let i = 0; i < n; i++) {
+        const a = (i / n) * Math.PI * 2 + f.at * 0.001;   // 発生ごとに向きを変える
+        const d = ts * (0.3 + (big ? 1.9 : 1.2) * k);
+        ctx.beginPath();
+        ctx.arc(cx + Math.cos(a) * d, cy + Math.sin(a) * d, Math.max(1, ts * 0.07 * fade), 0, Math.PI * 2);
+        ctx.fill();
+      }
+      ctx.restore();
+    }
+  },
+
+  /**
    * 行軍中の部隊トークン。**縁取りの円＋兵種の絵文字**で描く。
    * 赤丸だけだと「何が来ているのか」が読めないため（実機フィードバック 2026-08-06）。
    * 縮小時は絵文字が潰れて色の塊になるので、その帯では従来どおり点で描く。
@@ -6947,6 +7007,7 @@ const MapView = {
         }
       }
     }
+    this.drawMapFx(ctx, ts);
     if (CONFIG.MAP_HOLY_COMPASS && !guiding) this.drawHolyCompass(ctx, ts, pulse);
     else if (guiding) this._compassHits = []; // 指南中はコンパスのタップ判定も消す
     // 出兵ラインと部隊アイコン
