@@ -222,6 +222,12 @@ select{font:inherit;color:var(--fg);background:var(--bg3);border:1px solid var(-
   background:var(--bg3);display:flex;align-items:center;justify-content:center;font-size:34px}
 .event-art img{width:100%;height:100%;object-fit:cover;display:block}
 .event-body{min-width:0}
+/* ピックアップ（[S28]）。**アニメーションは付けない** —
+   このパネルは構成が変わった時だけ組み直すが、点滅の再発を避けるため静止で作る */
+.pickup-row{display:flex;gap:10px;align-items:center;border-color:var(--ur)}
+.pickup-art{flex:0 0 64px;width:64px;height:64px;border-radius:8px;overflow:hidden;
+  background:var(--bg3);display:flex;align-items:center;justify-content:center;font-size:30px}
+.pickup-art img{width:100%;height:100%;object-fit:cover;display:block}
 /* 難易度の選択カード（[S01] CONFIG.DIFFICULTY） */
 /* 編成の帯（[S09]・DESIGN_S3.md §5）。先頭が主将＝部隊の兵種を決める */
 .lineup{display:flex;gap:5px;margin-top:10px;touch-action:none;user-select:none}
@@ -469,7 +475,7 @@ const CONFIG = {
   DEV_MODE: false,                      // trueで開発用UI（ガチャタブの画像取り込み等）を表示
   SAVE_KEY: "hakoslg_save_v1",          // localStorageキー（名前空間 hakoslg_）
   ASSET_DB: "hakoslg_assets",           // IndexedDB名（画像アセット）
-  SAVE_VERSION: 27,                    // v27: 音の設定（settings）
+  SAVE_VERSION: 28,                    // v28: ピックアップ武将（event.pickup）
   LOG_MAX: 30,                         // 保持する出来事ログの最大件数
 
   // --- 初陣指南（[S15A]。最初の約1分でコアループを1周させる導線） ---
@@ -837,6 +843,10 @@ const CONFIG = {
     CYCLE_MIN: 90,                      // 前回の終了から次の開始まで（同）
     DURATION_MIN: 25,                   // 開催時間（同）
     RATE_BONUS: { UR: 0.01, SSR: 0.01 },// 期間中は普段より +1pt（UR 1%→2% / SSR 4%→5%）
+    // ピックアップ: **レア度の中の内訳だけを変える**。レア度そのものの確率は動かさない
+    // （動かすと RATE_BONUS と二重に効いて排出設計が読めなくなる）
+    PICKUP_RARITY: "UR",                // ピックアップ対象のレア度
+    PICKUP_SHARE: 0.5,                  // そのレア度が出た時、この確率でピックアップ武将になる
   },
 
   // --- 勧誘 ---
@@ -1292,6 +1302,10 @@ function migrateSave(data) {
     const p = DEFAULT_BUILDING_LAYOUT.camp;
     data.player.buildings.push({ id: "b_camp", type: "camp", level: 1, upgradeEndsAt: null, x: p.x, y: p.y });
   }
+
+  // v27 → v28: ピックアップ。**開催中のセーブは pickup 無しのまま**にする
+  // （途中から急にピックアップが生えると、それまでの排出と辻褄が合わない）。次の開催から付く
+  if (data.event && data.event.pickup === undefined) data.event.pickup = null;
 
   // v26 → v27: 音の設定。既定はオン（鳴らしたくない人はマップの🔊から切れる）
   if (!data.settings) data.settings = { bgm: true, se: true };
@@ -1888,7 +1902,8 @@ function generateAIUsers(world, difficulty) {
  *   player.avatar: "m1"…"f3",   // 盟主の容姿([S02] AVATAR_DEFS)。見た目だけ・後から変更可
  *   stage: 1 | 2,               // 進行段階。2=第二ステージ（皇都制圧＋本城Lv10で解放）
  *   tribe: { wave, startedAt, clearedAt, offeredAt },  // 異民族の進行([S27])。wave=0は未開始
- *   event: { idx, nextAt, endsAt },  // 期間限定イベント([S28])。endsAt!=null なら開催中
+ *   event: { idx, nextAt, endsAt, pickup },  // 期間限定イベント([S28])。endsAt!=null なら開催中
+ *                               // pickup=ピックアップ武将のdefId（開催中のみ有効）
  *   settings: { bgm, se },      // 音の設定([S29])。false のみを「オフ」として扱う
  *                               // offeredAt=宣戦を打診した時刻。1度だけ自動で出す
  *   aiUsers[].tribe: bool,      // 異民族フラグ。既存のAI戦闘の仕組みに相乗りする
@@ -1946,7 +1961,7 @@ function newGameState(difficulty) {
       order: null },                                      // 盟主の攻撃指示（[S24]）
     stage: 1,                  // 進行段階（[S09]）。2で建物レベル上限が20に解放される
     tribe: { wave: 0, startedAt: null, clearedAt: null, offeredAt: null },  // 異民族の進行（[S27]）
-    event: { idx: 0, nextAt: t + CONFIG.EVENT.FIRST_AT_MIN * 60000, endsAt: null },  // イベント（[S28]）
+    event: { idx: 0, nextAt: t + CONFIG.EVENT.FIRST_AT_MIN * 60000, endsAt: null, pickup: null },  // イベント（[S28]）
     settings: { bgm: true, se: true },   // 音（[S29]）
     aiUsers,
     aiMarches: [],             // AIからプレイヤー領への攻撃部隊（[S12]）。到着で解決される
@@ -3280,7 +3295,7 @@ function doGacha(count) {
   const results = [];
   for (let i = 0; i < count; i++) {
     const rar = rollRarity();
-    results.push(pick(CARD_POOL.filter(c => c.rarity === rar)));
+    results.push(rollCardOfRarity(rar));      // ピックアップ中は内訳が偏る（[S28]）
   }
   // 10連保証: SR以上が1枚もなければ最後の1枚をSRに差し替え
   if (count === 10 && !results.some(c => c.rarity === "SR" || c.rarity === "SSR")) {
@@ -3676,6 +3691,47 @@ const EVENT_DEFS = [
   { id: "gunyu",  name: "群雄集結",   lead: "各地の豪傑が旗の下へ集う。今なら名将を招きやすい。" },
   { id: "seiten", name: "星辰の宴",   lead: "夜空に星が連なる夜。稀なる者が現れやすいと伝わる。" },
 ];
+/**
+ * 開催中のピックアップ武将（カード定義 or null）。
+ * **開催中でなければ常に null**なので、平常時の排出は一切変わらない。
+ */
+function getActivePickup() {
+  if (!getActiveEvent()) return null;
+  const id = S.event && S.event.pickup;
+  return id ? (CARD_BY_ID[id] || null) : null;
+}
+/** ピックアップ候補から1枚選ぶ。**前回と同じものは避ける**（毎回同じだと代わり映えしない） */
+function rollPickupCard(prevId) {
+  const pool = CARD_POOL.filter(c => c.rarity === CONFIG.EVENT.PICKUP_RARITY);
+  if (!pool.length) return null;
+  const fresh = pool.filter(c => c.id !== prevId);
+  return pick(fresh.length ? fresh : pool).id;
+}
+/** そのレア度から1枚引く。ピックアップ中は内訳が偏る */
+function rollCardOfRarity(rar) {
+  const pu = getActivePickup();
+  if (pu && pu.rarity === rar && Math.random() < CONFIG.EVENT.PICKUP_SHARE) return pu;
+  return pick(CARD_POOL.filter(c => c.rarity === rar));
+}
+/**
+ * ピックアップ武将“そのもの”を引く確率（%）。表示にだけ使う。
+ * **ピックアップ枠を外した残り半分でも、均等抽選で同じ武将が当たりうる**ので
+ * そのぶんを足す。`rate × SHARE` だけだと実測より低い数字を出してしまう
+ * （実測1.099%に対し 1.000% と表示していた）。
+ */
+function getPickupPct(pickup) {
+  if (!pickup) return 0;
+  const r = getGachaRates()[pickup.rarity] || 0;
+  const n = CARD_POOL.filter(c => c.rarity === pickup.rarity).length || 1;
+  const share = CONFIG.EVENT.PICKUP_SHARE;
+  return r * (share + (1 - share) / n) * 100;
+}
+/** 平常時に同じ武将を引く確率（%）。ピックアップの効きを比較で見せるために使う */
+function getBasePct(def) {
+  const n = CARD_POOL.filter(c => c.rarity === def.rarity).length || 1;
+  return (CONFIG.GACHA_RATES[def.rarity] || 0) / n * 100;
+}
+
 /** 開催中のイベント定義。開催していなければ null */
 function getActiveEvent() {
   if (!S || !S.event || !S.event.endsAt) return null;
@@ -3718,16 +3774,21 @@ function eventTick(t) {
     e.endsAt = null;
     e.idx = (e.idx || 0) + 1;
     e.nextAt = t + CONFIG.EVENT.CYCLE_MIN * 60000;
+    // pickup は次の開催まで残しておく（rollPickupCard が「前回と違う1枚」を選ぶのに使う）。
+    // getActivePickup は開催中しか返さないので、表示に漏れることはない
     toast(`🎏 ${d.name} が終了しました — 排出率は通常に戻ります`, "event");
     return;
   }
   if (!e.nextAt || t < e.nextAt) return;
   e.endsAt = t + CONFIG.EVENT.DURATION_MIN * 60000;
+  e.pickup = rollPickupCard(e.pickup);      // 開催ごとに1枚。endsAt を立てた後に決める
   const d = EVENT_DEFS[(e.idx || 0) % EVENT_DEFS.length];
   const r = getGachaRates();
+  const pu = getActivePickup();
   toast(`🎏 ${d.name} 開催！ ${CONFIG.EVENT.DURATION_MIN}分のあいだ ` +
     `UR ${(r.UR * 100).toFixed(0)}% ／ SSR ${(r.SSR * 100).toFixed(0)}% に上がります`, "event");
-  logEvent("event", `🎏 ${d.name} が始まった — ${d.lead}`);
+  logEvent("event", `🎏 ${d.name} が始まった — ${d.lead}`
+    + (pu ? `／ピックアップ: ${pu.name}` : ""));
 }
 
 /* =====================================================================
@@ -6245,7 +6306,24 @@ function renderCards() {
 }
 
 let lastGachaResults = [];
+/* ガチャタブは**毎tick全再構築しない**。イベントの残り時間と所持ダイヤだけが
+ * 毎秒変わるので、その2つは span を書き換えるに留める。
+ * ★ここを全再構築に戻すと、パネル内の img が毎秒作り直され、
+ *   CSSアニメーションを足した時に点滅する（2026-08-06 に実際に起きた）。 */
+let gachaSig = "";
+function gachaSignature() {
+  const g = S.player.gacha;
+  const ev = getActiveEvent();
+  return [ev ? ev.id : "-", (S.event && S.event.pickup) || "-", g.sinceSSR, g.total,
+          lastGachaResults.map(d => d.id).join(",")].join("|");
+}
+/** 毎tickの軽量更新（残り時間と所持ダイヤだけ） */
+function updateGachaLive() {
+  const l = $("eventLeft"); if (l) l.textContent = fmtSec(getEventLeftSec());
+  const d = $("gachaDia");  if (d) d.textContent = fmt(S.player.diamonds);
+}
 function renderGacha() {
+  gachaSig = gachaSignature();
   const g = S.player.gacha;
   // 確率表は**実効値**を出す（[S28] イベント中は上がっている）。上がっている行は色を変える
   const ev = getActiveEvent();
@@ -6255,6 +6333,7 @@ function renderGacha() {
     return `<tr><td${up ? ' style="color:var(--accent)"' : ""}>${r}${up ? "▲" : ""}</td>
       <td${up ? ' style="color:var(--accent);font-weight:700"' : ""}>${(p * 100).toFixed(0)}%</td></tr>`;
   }).join("");
+  const pu = getActivePickup();
   const banner = ev ? `<div class="panel event-banner">
       <div class="event-art">${artHTML(EVENT_IMAGE_KEY, "🎏")}</div>
       <div class="event-body">
@@ -6264,9 +6343,19 @@ function renderGacha() {
           UR ${(cur.UR * 100).toFixed(0)}% ／ SSR ${(cur.SSR * 100).toFixed(0)}%
           <span class="dim">（通常 ${(CONFIG.GACHA_RATES.UR * 100).toFixed(0)}% ／ ${(CONFIG.GACHA_RATES.SSR * 100).toFixed(0)}%）</span>
         </div>
-        <div class="small">残り <b>${fmtSec(getEventLeftSec())}</b></div>
+        <div class="small">残り <b><span id="eventLeft">${fmtSec(getEventLeftSec())}</span></b></div>
       </div>
-    </div>` : `<div class="panel dim small">🎏 次の期間限定イベントまで ${fmtSec(getEventLeftSec())}
+    </div>
+    ${pu ? `<div class="panel pickup-row">
+      <div class="pickup-art">${artHTML(pu.imageKey, pu.emoji)}</div>
+      <div class="grow">
+        <div class="small"><b style="color:var(--ur)">⭐ ピックアップ</b></div>
+        <b>${pu.name}</b> <span class="card-stars">${"★".repeat(RARITY_STARS[pu.rarity])}</span>
+        <div class="dim small">この武将だけ出やすくなっています</div>
+        <div class="small" style="color:var(--accent)">${getPickupPct(pu).toFixed(2)}%
+          <span class="dim">（通常 ${getBasePct(pu).toFixed(2)}% ／ 約${(getPickupPct(pu) / Math.max(0.0001, getBasePct(pu))).toFixed(0)}倍）</span></div>
+      </div>
+    </div>` : ""}` : `<div class="panel dim small">🎏 次の期間限定イベントまで <span id="eventLeft">${fmtSec(getEventLeftSec())}</span>
       <br>開催中は UR・SSR の排出率が上がります（離席中は進みません）</div>`;
   const results = lastGachaResults.map(d => {
     const trd = TROOP_DEFS[d.troop];
@@ -6278,7 +6367,7 @@ function renderGacha() {
   }).join("");
   $("page-gacha").innerHTML = `
     ${banner}
-    <div class="panel"><h3>💎 ガチャ（所持 ${fmt(S.player.diamonds)}）</h3>
+    <div class="panel"><h3>💎 ガチャ（所持 <span id="gachaDia">${fmt(S.player.diamonds)}</span>）</h3>
       <div class="row" style="margin:8px 0">
         <button class="primary grow" onclick="UIA.gacha(1)">単発 💎${CONFIG.GACHA_COST_SINGLE}</button>
         <button class="primary grow" onclick="UIA.gacha(10)">10連 💎${CONFIG.GACHA_COST_TEN}</button>
@@ -8303,6 +8392,10 @@ function tick() {
         renderChatLog();
         updateIncidentCountdown();
       }
+    } else if (activeTab === "gacha") {
+      // 構成が変わった時だけ組み直す。毎秒変わるのは残り時間と所持ダイヤだけ
+      if (gachaSignature() !== gachaSig) renderGacha();
+      else updateGachaLive();
     } else renderActiveTab();
   }
 }
