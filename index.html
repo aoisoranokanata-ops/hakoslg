@@ -539,6 +539,14 @@ const CONFIG = {
   CAPITAL_RESOURCE_MIN_LV: 8,           // 皇都州の資源レベル下限
   CAPITAL_RESOURCE_MAX_LV: 10,          // 同上限（通常地域はLv5まで）
   CAPITAL_RESOURCE_COUNT: 12,           // 皇都州に配置する高レベル資源の枚数
+  // --- AI同士の戦争（[S12]・DESIGN_S4.md §2）---
+  // 非同盟のAI同士が隣接する資源タイルを奪い合う。**城は落とさせない**
+  // （落とし合うと勢力が勝手に消え、攻略対象と制覇率の分母が動いて混乱する）。
+  AI_RIVAL_WAR_CHANCE: 0.12,            // 行動1回あたり（攻撃・築城が成立しなかった時）
+  // 強さは **城Lv×10＋領地数**。城Lvだけで比べると、aiGrow が Lv10 で頭打ちになるため
+  // 大半の勢力が同値に張り付き「格上でないと奪えない」が誰にも成立しなくなる（実測で確認）。
+  AI_RIVAL_WAR_MARGIN: 8,               // この差がないと動かない（拮抗した境界が毎回ばたつくのを防ぐ）
+  AI_RIVAL_WAR_MIN_TILES: 3,            // 守る側がこれ以下なら奪わない（足場は残す。勢力は消さない方針）
   AI_CAN_CAPTURE_PORT: false,           // V1ではAIは地域境界を越えない
   AI_CAN_CAPTURE_GATE: false,
   AI_CAN_CAPTURE_CAPITAL: false,
@@ -4825,6 +4833,55 @@ function aiExpand(ai) {
     ai.ownedTiles.push(ti);
   }
 }
+/**
+ * AI同士の戦争（DESIGN_S4.md §2）。隣接する**他のAIの資源タイル**を1枚奪う。
+ * 奪えたら true（その行動を戦争に充てた）。
+ *
+ * 奪わないもの: 城・聖地・要衝・プレイヤー領・**同盟員の領地**。
+ *   城まで落とし合うと勢力が勝手に消え、プレイヤーの攻略対象と制覇率の分母が動く。
+ *   同盟員が守られるので、**勧誘の価値がそのまま上がる**。
+ * 異民族は関与しない（攻める側にも守る側にもならない）。皇都へ向かう動きを
+ * 横に逸らすと、調整済みの第二ステージのバランスが崩れるため。
+ *
+ * **通知は出さない**（トーストもログも）。自分に関係ない戦闘が流れると邪魔になる。
+ * 境界線の色が変わることだけで表現する。
+ */
+/** 勢力の強さ。城Lvは10で頭打ちになるので、領地数を足して差が付くようにする */
+function rivalStrength(ai) { return ai.castleLevel * 10 + ai.ownedTiles.length; }
+
+function aiRaidRival(ai) {
+  if (!CONFIG.AI_RIVAL_WAR_CHANCE) return false;
+  if (isTribe(ai)) return false;
+  if (ai.allianceId === S.alliance.id) return false;        // 仲間は仕掛けない
+  const seeds = [idx(ai.x, ai.y), ...ai.ownedTiles];
+  const candidates = [];
+  for (const si of seeds) {
+    const st = S.world.tiles[si]; if (!st) continue;
+    for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+      if (!dx && !dy) continue;
+      const nx = st.x + dx, ny = st.y + dy;
+      if (!inBounds(nx, ny)) continue;
+      const ti = idx(nx, ny);
+      const t = S.world.tiles[ti];
+      if (!t.ownerId || t.ownerId === "player" || t.ownerId === ai.id) continue;
+      if (t.type === "castle" || t.type === "holy" || FORTRESS_TYPES.includes(t.type)) continue;
+      if (isBlockedType(t.type) || !canStepBetween(si, ti)) continue;
+      const owner = S.aiUsers.find(a => a.id === t.ownerId);
+      if (!owner || owner.defeated || isTribe(owner)) continue;
+      if (owner.allianceId === S.alliance.id) continue;      // 仲間は守られる
+      if (owner.ownedTiles.length <= CONFIG.AI_RIVAL_WAR_MIN_TILES) continue;  // 足場は残す
+      if (rivalStrength(ai) - rivalStrength(owner) < CONFIG.AI_RIVAL_WAR_MARGIN) continue;
+      candidates.push({ ti, owner });
+    }
+  }
+  if (!candidates.length) return false;
+  const c = pick(candidates);
+  c.owner.ownedTiles = c.owner.ownedTiles.filter(i => i !== c.ti);
+  S.world.tiles[c.ti].ownerId = ai.id;
+  ai.ownedTiles.push(c.ti);
+  return true;
+}
+
 function aiGrow(ai) {
   if (ai.castleLevel < 10) {
     ai.castleLevel++;
@@ -4936,6 +4993,9 @@ function aiTickAll(t) {
     if (Math.random() < atkChance && aiAttack(ai)) continue;
     // 異民族は進軍路に柵と櫓を残す（上級のみ）。攻撃が成立しなかった時の行動に充てる
     if (Math.random() < CONFIG.TRIBE_FORTIFY_CHANCE && aiFortify(ai)) continue;
+    // 隣の勢力から資源地を奪う（DESIGN_S4.md §2）。拡張より先に見て、
+    // 「取れる相手が居るなら取りに行く」形にする
+    if (Math.random() < CONFIG.AI_RIVAL_WAR_CHANCE && aiRaidRival(ai)) continue;
     if (ai.personality === "expander") aiExpand(ai);
     else if (ai.personality === "turtle") aiGrow(ai);
     else Math.random() < 0.5 ? aiExpand(ai) : aiGrow(ai);
