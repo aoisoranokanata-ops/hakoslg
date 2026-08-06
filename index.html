@@ -478,7 +478,7 @@ const CONFIG = {
   DEV_MODE: false,                      // trueで開発用UI（ガチャタブの画像取り込み等）を表示
   SAVE_KEY: "hakoslg_save_v1",          // localStorageキー（名前空間 hakoslg_）
   ASSET_DB: "hakoslg_assets",           // IndexedDB名（画像アセット）
-  SAVE_VERSION: 28,                    // v28: ピックアップ武将（event.pickup）
+  SAVE_VERSION: 29,                    // v29: 同盟の援軍（alliance.aid）
   LOG_MAX: 30,                         // 保持する出来事ログの最大件数
 
   // --- 初陣指南（[S15A]。最初の約1分でコアループを1周させる導線） ---
@@ -744,6 +744,14 @@ const CONFIG = {
   ORDER_TARGET_TYPES: ["castle", "gate", "port", "capital"],  // 指示できる目標の種別
   ORDER_SIEGE_PER_AI_PER_MIN: 1.4,      // 包囲の進行 = 加入AI数 × この値 × (忠誠/100) ／分（%）
   ORDER_SIEGE_MAX: 45,                  // 包囲で下げられる防御の上限（%）
+
+  // --- 同盟の援軍（[S24]・DESIGN_S4.md §1）---
+  // 加入AIが自領を守りに来る。**要請した時だけ**動く（勝手に守られると何が起きたか分からない）
+  AID_MIN_LOYALTY: 50,                  // これ以上の忠誠がある同盟員だけが応じる
+  AID_DEF_PER_CASTLE_LV: 220,           // 守り = AI城Lv × これ × (忠誠/100)。城Lv10忠誠80で1,760
+  AID_STAY_SEC: 180,                    // 到着後の駐留時間（侵攻1〜2波を受け止める長さ）
+  AID_COOLDOWN_SEC: 240,                // 次の要請まで（常時貼れると防衛が作業になる）
+  AID_COST_FOOD: 3000,                  // 同盟倉庫から支払う（倉庫に使い道を増やす）
 
   // --- 同盟倉庫（[S24]。加入AIから微量ずつ集まる共通の備蓄） ---
   // 同盟に人を入れておく理由を、バフだけでなく「資源が貯まる」形でも作る。
@@ -1330,6 +1338,12 @@ function migrateSave(data) {
   if (!data.player.buildings.some(b => b.type === "camp")) {
     const p = DEFAULT_BUILDING_LAYOUT.camp;
     data.player.buildings.push({ id: "b_camp", type: "camp", level: 1, upgradeEndsAt: null, x: p.x, y: p.y });
+  }
+
+  // v28 → v29: 同盟の援軍。要請なしの状態から始まるだけで既存の進行に影響しない
+  if (data.alliance) {
+    if (data.alliance.aid === undefined) data.alliance.aid = null;
+    if (data.alliance.aidCooldownUntil === undefined) data.alliance.aidCooldownUntil = 0;
   }
 
   // v27 → v28: ピックアップ。**開催中のセーブは pickup 無しのまま**にする
@@ -1927,6 +1941,7 @@ function generateAIUsers(world, difficulty) {
  *   },
  *   alliance: { id, name, members:[{id,role}], vault:{...}, order:{targetIdx,issuedAt,siege}|null },
  *                               // vault=同盟倉庫 / order=盟主の攻撃指示と包囲の進み具合([S24])
+ *                               // aid=同盟の援軍([S24]・DESIGN_S4.md §1)。null なら要請なし
  *   difficulty: "normal" | "hard",  // 難易度([S01] CONFIG.DIFFICULTY)。開始時に決め、以降不変
  *   player.avatar: "m1"…"f3",   // 盟主の容姿([S02] AVATAR_DEFS)。見た目だけ・後から変更可
  *   stage: 1 | 2,               // 進行段階。2=第二ステージ（皇都制圧＋本城Lv10で解放）
@@ -1987,7 +2002,8 @@ function newGameState(difficulty) {
     },
     alliance: { id: "ally_player", name: CONFIG.ALLIANCE_NAME_DEFAULT, members: [{ id: "player", role: "盟主" }],
       vault: { food: 0, wood: 0, stone: 0, iron: 0 },     // 同盟倉庫（[S24]）
-      order: null },                                      // 盟主の攻撃指示（[S24]）
+      order: null,                                        // 盟主の攻撃指示（[S24]）
+      aid: null, aidCooldownUntil: 0 },                   // 同盟の援軍（DESIGN_S4.md §1）
     stage: 1,                  // 進行段階（[S09]）。2で建物レベル上限が20に解放される
     tribe: { wave: 0, startedAt: null, clearedAt: null, offeredAt: null },  // 異民族の進行（[S27]）
     event: { idx: 0, nextAt: t + CONFIG.EVENT.FIRST_AT_MIN * 60000, endsAt: null, pickup: null },  // イベント（[S28]）
@@ -2136,6 +2152,12 @@ function shiftTimersForOffline() {
   if (S.hints && S.hints.nextAt) S.hints.nextAt += gap;
   // イベントは**プレイ時間で進む**（実時刻だと離席中に開催が終わってしまう）
   if (S.event) { if (S.event.nextAt) S.event.nextAt += gap; if (S.event.endsAt) S.event.endsAt += gap; }
+  // 援軍も離席で消えないようずらす（3つとも忘れると到着済み扱いで即引き揚げになる）
+  if (S.alliance && S.alliance.aid) {
+    const a = S.alliance.aid;
+    a.departAt += gap; a.arriveAt += gap; a.expiresAt += gap;
+  }
+  if (S.alliance && S.alliance.aidCooldownUntil) S.alliance.aidCooldownUntil += gap;
   if (S.nextIncidentCheckAt) S.nextIncidentCheckAt += gap;
   if (S.incident) { S.incident.createdAt += gap; S.incident.expiresAt += gap; }
   return gap;
@@ -2936,7 +2958,8 @@ function getPlayerTileDefense(ti) {
   return Math.round((getTileDefense(ti)
     + S.player.castleLevel * CONFIG.TILE_DEF_PLAYER_PER_CASTLE_LV
     + getBuilding("barracks").level * CONFIG.TILE_DEF_PLAYER_PER_BARRACKS_LV
-    + struct + garrison + getStructAuraDef(ti)) * researchMult("tileDef"));
+    + struct + garrison + getStructAuraDef(ti)
+    + getAidDefense(ti)) * researchMult("tileDef"));   // 同盟の援軍（DESIGN_S4.md §1）
 }
 
 /* --- 地形の通行判定 --------------------------------------------------
@@ -4069,6 +4092,109 @@ function tribeTick() {
  * 納入量は忠誠に比例するので、忠誠を保つ意味がバフ以外にも生まれる。
  * 引き出すと自分の資源になる（自分の倉庫容量を超えるぶんは受け取れない）。
  * ===================================================================*/
+/* --- 同盟の援軍（DESIGN_S4.md §1）--------------------------------------
+ * 加入AIが**自領を守りに来る**。同盟が「数値の供給源」だけでなく
+ * 戦場に姿を見せる相手になる、というのが狙い。
+ *
+ * 自動では来ない。**プレイヤーが要請した時だけ**動く（勝手に守られると
+ * 何が起きたのか分からない）。攻撃側の援護は下知([S24]の包囲)が既にあるので
+ * ここでは扱わない — 二重にすると同盟の役割が読めなくなる。
+ *
+ * 時刻は全て絶対epoch ms。shiftTimersForOffline に3つとも足すこと。 */
+
+/** 進行中の援軍（到着前も含む）。無ければ null */
+function getAid() { return (S.alliance && S.alliance.aid) || null; }
+/** 到着して駐留中の援軍。まだ道中／期限切れなら null */
+function getArrivedAid() {
+  const a = getAid();
+  if (!a) return null;
+  const t = now();
+  return (t >= a.arriveAt && t < a.expiresAt) ? a : null;
+}
+/** 援軍に応じてくれる同盟員（忠誠が最も高い者）。居なければ null */
+function getAidResponder() {
+  const ids = S.alliance.members.filter(m => m.id !== "player").map(m => m.id);
+  const cand = S.aiUsers.filter(a => ids.includes(a.id) && !a.defeated
+    && a.loyalty >= CONFIG.AID_MIN_LOYALTY);
+  if (!cand.length) return null;
+  return cand.reduce((a, b) => b.loyalty > a.loyalty ? b : a);
+}
+/** その援軍がもたらす守り。忠誠と城レベルに比例する */
+function getAidPower(ai) {
+  return Math.round(ai.castleLevel * CONFIG.AID_DEF_PER_CASTLE_LV * (ai.loyalty / 100));
+}
+/** そのタイルに乗っている援軍の守り（到着済みのみ） */
+function getAidDefense(ti) {
+  const a = getArrivedAid();
+  return a && a.targetIdx === ti ? a.power : 0;
+}
+/** 援軍を要請できない理由（できるなら null） */
+function getAidBlocker(ti) {
+  const t = S.world.tiles[ti];
+  if (!t || t.ownerId !== "player") return "自分の領地にしか呼べません";
+  if (getAid()) return "すでに援軍が向かっています（同時に1件まで）";
+  const cd = (S.alliance.aidCooldownUntil || 0) - now();
+  if (cd > 0) return `次の要請まで ${fmtSec(cd / 1000)}`;
+  if (!getAidResponder()) return `忠誠${CONFIG.AID_MIN_LOYALTY}以上の同盟員が必要です`;
+  const v = S.alliance.vault || {};
+  if ((v.food || 0) < CONFIG.AID_COST_FOOD) {
+    return `同盟倉庫の食料が足りません（🌾${fmt(CONFIG.AID_COST_FOOD)}）`;
+  }
+  return null;
+}
+/** 援軍を要請する。失敗理由 or null */
+function requestAid(ti) {
+  const err = getAidBlocker(ti);
+  if (err) return err;
+  const ai = getAidResponder();
+  S.alliance.vault.food -= CONFIG.AID_COST_FOOD;
+  const t = S.world.tiles[ti];
+  // 到着までの時間はAIの侵攻と同じ式（味方だけ速いと嘘っぽい）
+  const dist = chebyshev(ai.x, ai.y, t.x, t.y);
+  const sec = Math.max(CONFIG.AI_MARCH_MIN_SEC, dist / CONFIG.AI_MARCH_TILES_PER_SEC);
+  const at = now();
+  S.alliance.aid = {
+    aiId: ai.id, targetIdx: ti,
+    departAt: at, arriveAt: at + sec * 1000,
+    expiresAt: at + sec * 1000 + CONFIG.AID_STAY_SEC * 1000,
+    // 戦力は**要請時点で確定**させる（出兵と同じ作法。到着までに忠誠が動いても揺れない）
+    power: getAidPower(ai),
+  };
+  toast(`🤝 ${ai.name} が援軍を出した！ ${TILE_DEFS[t.type].name}(${t.x}, ${t.y}) へ ${fmtSec(sec)}`, "ally");
+  warChat("onAidSend", { enemy: ai.name });
+  invalidateMarchable();
+  return null;
+}
+/**
+ * tickから呼ばれる。到着・期限切れ・取り消しを見る。
+ * **奪われた土地には居座らせない**（味方が敵地を守っているのは筋が通らない）。
+ */
+function aidTick(t) {
+  const a = getAid();
+  if (!a) return;
+  const ai = S.aiUsers.find(x => x.id === a.aiId);
+  const tile = S.world.tiles[a.targetIdx];
+  const gone = !ai || ai.defeated || ai.allianceId !== S.alliance.id;   // 滅んだ・抜けた
+  const lost = !tile || tile.ownerId !== "player";                      // 奪われた／放棄した
+  if (gone || lost) {
+    S.alliance.aid = null;
+    S.alliance.aidCooldownUntil = t + CONFIG.AID_COOLDOWN_SEC * 1000;
+    toast(lost ? "🤝 援軍は引き返した（守るべき土地が失われた）"
+               : "🤝 援軍は引き返した（応じた勢力が同盟を離れた）", "ally");
+    return;
+  }
+  if (!a.arrived && t >= a.arriveAt) {
+    a.arrived = true;    // 到着の告知を1度だけにするためのフラグ
+    toast(`🤝 ${ai.name} の援軍が到着！ 守り +${fmt(a.power)}（${CONFIG.AID_STAY_SEC}秒）`, "defend");
+    warChat("onAidArrive", { enemy: ai.name });
+  }
+  if (t >= a.expiresAt) {
+    S.alliance.aid = null;
+    S.alliance.aidCooldownUntil = t + CONFIG.AID_COOLDOWN_SEC * 1000;
+    toast(`🤝 ${ai.name} の援軍が引き揚げた`, "ally");
+  }
+}
+
 /* --- 盟主の目標指示 -----------------------------------------------------
  * 硬い目標（敵城・関所・埠頭・皇都）を同盟AIに包囲させ、防御を削ってから落とす。
  * 包囲の進みは加入AIの数と忠誠に比例する＝同盟を育てる意味が攻略に直結する。 */
@@ -5209,6 +5335,8 @@ const CHAT_LINES = {
     ],
   },
   onOrder: [],                                            // 盟主が攻撃目標を下知した（[S24]・未執筆）
+  onAidSend: [],                                          // 援軍を出した（DESIGN_S4.md §1・未執筆）
+  onAidArrive: [],                                        // 援軍が到着した（同上・未執筆）
   onTribeWave: {
     expander: [
       "第{wave}波か……望むところだ！　正面から叩き潰すぞ！",
@@ -7060,6 +7188,27 @@ const MapView = {
       ctx.strokeStyle = line; ctx.lineWidth = 2;
       ctx.beginPath(); ctx.arc(ex, ey, 7 + Math.sin(now() / 200) * 1.5, 0, Math.PI * 2); ctx.stroke();
     }
+    // 同盟の援軍（DESIGN_S4.md §1）。**同盟員の色**で描くので、敵の赤とも自分の金とも混ざらない
+    {
+      const aid = getAid();
+      const aai = aid && S.aiUsers.find(a => a.id === aid.aiId);
+      const tt = aid && S.world.tiles[aid.targetIdx];
+      if (aid && aai && tt) {
+        const ex = this.offsetX + (tt.x + 0.5) * ts, ey = this.offsetY + (tt.y + 0.5) * ts;
+        if (t0 < aid.arriveAt) {
+          const sx = this.offsetX + (aai.x + 0.5) * ts, sy = this.offsetY + (aai.y + 0.5) * ts;
+          const p = clamp((t0 - aid.departAt) / (aid.arriveAt - aid.departAt), 0, 1);
+          ctx.strokeStyle = aai.color; ctx.lineWidth = 2.5;
+          ctx.setLineDash([2, 5]);        // 味方の援軍は点線。自分の出兵(破線)とも区別する
+          ctx.beginPath(); ctx.moveTo(sx, sy); ctx.lineTo(ex, ey); ctx.stroke();
+          ctx.setLineDash([]);
+          this.drawMarchToken(ctx, sx + (ex - sx) * p, sy + (ey - sy) * p, ts, "🤝", aai.color, t0);
+        } else {
+          // 駐留中はマスの上に留めて置く（部隊の駐留マークと重ならない位置）
+          this.drawMarchToken(ctx, ex, ey - ts * 0.34, ts, "🤝", aai.color, t0);
+        }
+      }
+    }
     // AIからの侵攻。自分の出兵と区別できるよう実線＋濃い赤、狙われたタイルは警告リングで囲む
     for (const m of (S.aiMarches || [])) {
       const ai = S.aiUsers.find(a => a.id === m.aiId); if (!ai) continue;
@@ -7418,6 +7567,15 @@ function renderTileSummary(ti) {
     const gar = getGarrisonSquads(ti);
     if (gar.length) marks.push(`🛡 ${gar.map(sq => sq.name).join("・")} 駐留中`);
     if (marks.length) rows.push(marks.join(" ｜ "));
+    // 同盟の援軍（DESIGN_S4.md §1）。道中と駐留中で書き分ける
+    const aid = getAid();
+    if (aid && aid.targetIdx === ti) {
+      const aai = S.aiUsers.find(a => a.id === aid.aiId);
+      const nm = aai ? escapeHtml(aai.name) : "同盟員";
+      rows.push(now() < aid.arriveAt
+        ? `<span style="color:var(--accent)">🤝 ${nm} の援軍が到着まで ${fmtSec((aid.arriveAt - now()) / 1000)}（守り +${fmt(aid.power)}）</span>`
+        : `<span style="color:var(--accent)">🤝 ${nm} の援軍 +${fmt(aid.power)} — 残り ${fmtSec((aid.expiresAt - now()) / 1000)}</span>`);
+    }
     const threat = (S.aiMarches || []).find(m => m.targetIdx === ti);
     if (threat) {
       const ta = S.aiUsers.find(a => a.id === threat.aiId);
@@ -7489,6 +7647,24 @@ function renderTileDetails(ti) {
     const aura = getStructAuraDef(ti);
     if (aura) g += `<br>🗼 周囲の施設 +${fmt(aura)}`;
     if (gar.length) g += `<br>🛡 駐留 +${fmt(Math.round(getGarrisonPower(ti) * getGarrisonDefRatio(ti)))}`;
+    const aidDef = getAidDefense(ti);
+    if (aidDef) {
+      const aai = S.aiUsers.find(a => a.id === getAid().aiId);
+      g += `<br>🤝 ${aai ? escapeHtml(aai.name) : "同盟"} の援軍 +${fmt(aidDef)}`;
+    }
+    // 援軍の要請。**押せない時もボタンを残して理由を出す**（他の導線と同じ作法）
+    {
+      const aidErr = getAidBlocker(ti);
+      const responder = getAidResponder();
+      g += `<div style="margin-top:8px">
+        <div class="dim small">🤝 <b>同盟の援軍</b> — 忠誠${CONFIG.AID_MIN_LOYALTY}以上の同盟員が
+          ${CONFIG.AID_STAY_SEC}秒このマスを守ります（同盟倉庫から 🌾${fmt(CONFIG.AID_COST_FOOD)}）</div>
+        ${responder ? `<div class="dim small">応じるのは <b>${escapeHtml(responder.name)}</b>
+          （忠誠${Math.round(responder.loyalty)}・城Lv${responder.castleLevel}） 守り +${fmt(getAidPower(responder))}</div>` : ""}
+        ${aidErr ? `<div class="small" style="color:var(--danger)">${aidErr}</div>` : ""}
+        <button class="train-btn" ${aidErr ? "disabled" : ""} onclick="UIA.requestAid(${ti})">🤝 援軍を要請</button>
+      </div>`;
+    }
     if (isGarrisonSite(ti)) {
       g += `<br><span class="dim">駐留すると 出撃起点になり／回復${CONFIG.GARRISON_HEAL_MULT}倍／補充が割引</span>`;
       if (isFortressSite(ti)) {
@@ -7737,6 +7913,12 @@ const UIA = {
   },
   /** 後から容姿を変える（同盟タブの盟主の行から） */
   changeAvatar() { openAvatarSheet(null); },
+  /** 同盟の援軍を要請（DESIGN_S4.md §1） */
+  requestAid(ti) {
+    const err = requestAid(ti);
+    if (err) { toast("⚠️ " + err); return; }
+    openTileSheet(ti); MapView.draw(); renderAlliance();
+  },
   /** 同盟名の変更（DESIGN_S4.md §4） */
   openAllianceName() { openAllianceNameSheet(); },
   setAllianceName(reset) {
@@ -8473,6 +8655,7 @@ function tick() {
   checkTutorialProgress();
   renderHeader();
   renderGuideBar();
+  aidTick(t);
   eventTick(t);
   stageTick();
   tribeTick();
