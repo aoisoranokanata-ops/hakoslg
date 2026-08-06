@@ -478,7 +478,7 @@ const CONFIG = {
   DEV_MODE: false,                      // trueで開発用UI（ガチャタブの画像取り込み等）を表示
   SAVE_KEY: "hakoslg_save_v1",          // localStorageキー（名前空間 hakoslg_）
   ASSET_DB: "hakoslg_assets",           // IndexedDB名（画像アセット）
-  SAVE_VERSION: 30,                    // v30: 同盟の目標（alliance.mission）
+  SAVE_VERSION: 31,                    // v31: 盗賊（bandits / banditNextAt）
   LOG_MAX: 30,                         // 保持する出来事ログの最大件数
 
   // --- 初陣指南（[S15A]。最初の約1分でコアループを1周させる導線） ---
@@ -611,6 +611,7 @@ const CONFIG = {
       TRIBE_ATTACK_MULT: 1.4,
       TRIBE_MAX_CONCURRENT_MARCHES: 5,
       TRIBE_FORTIFY: false,               // 異民族が施設を建てるか（7-5で使う）
+      BANDIT_EVENT: false,                // 盗賊の突発イベント（[S31]）
     },
     hard: {
       label: "上級", icon: "🔥",
@@ -631,6 +632,7 @@ const CONFIG = {
       TRIBE_ATTACK_MULT: 1.8,             // 城Lv14/16/18 で 10,012 / 11,910 / 13,880
       TRIBE_MAX_CONCURRENT_MARCHES: 7,
       TRIBE_FORTIFY: true,
+      BANDIT_EVENT: true,                 // 盗賊は上級だけの手応え（[S31]）
     },
   },
 
@@ -849,6 +851,20 @@ const CONFIG = {
   GACHA_RATES: { UR: 0.01, SSR: 0.04, SR: 0.15, R: 0.35, N: 0.45 },
   GACHA_PITY_SSR: 50,                   // 50連でSSR確定
   GACHA_TEN_GUARANTEE: "SR",            // 10連でSR以上1枚保証
+
+  // --- 盗賊（[S31]・DESIGN_S5.md §2）------------------------------------
+  // 上級だけの突発イベント。倒すと報酬が出る「的」で、領地は奪わない。
+  BANDIT_CYCLE_MIN: 40,                 // 出現の間隔（プレイ時間・分）
+  BANDIT_FIRST_AT_MIN: 15,              // 初回まで
+  BANDIT_COUNT: 3,                      // 1回に湧く組数
+  BANDIT_STAY_SEC: 600,                 // 滞在時間（10分）。過ぎると静かに去る
+  BANDIT_LEVEL_OVER_CASTLE: 3,          // 盗賊Lv = 本城Lv + これ（育つほど歯応えが保たれる）
+  BANDIT_DEF_BASE: 80,                  // 防御 = BASE × Lv^EXP（タイル防御と同じ作法）
+  BANDIT_DEF_EXP: 1.5,
+  BANDIT_MIN_DIST: 3,                   // 自領からこの距離以上（近すぎると自陣に埋もれる）
+  BANDIT_MAX_DIST: 8,                   // 同以下（遠すぎると出兵が届かない）
+  BANDIT_REWARD_PER_LEVEL: 800,         // 討伐報酬: 資源4種それぞれ Lv×これ
+  BANDIT_DIAMOND_PER_LEVEL: 15,         // 同・ダイヤ
 
   // --- 音（[S29]）------------------------------------------------------
   // 音源ファイルは持たず WebAudio で合成する。単一HTML制約下で base64 の音源を
@@ -1354,6 +1370,11 @@ function migrateSave(data) {
     const p = DEFAULT_BUILDING_LAYOUT.camp;
     data.player.buildings.push({ id: "b_camp", type: "camp", level: 1, upgradeEndsAt: null, x: p.x, y: p.y });
   }
+
+  // v30 → v31: 盗賊。**既存セーブも初回までの猶予から始める**
+  // （読み込んだ瞬間に湧くと何が起きたのか分からない）
+  if (!data.bandits) data.bandits = [];
+  if (!data.banditNextAt) data.banditNextAt = Date.now() + CONFIG.BANDIT_FIRST_AT_MIN * 60000;
 
   // v29 → v30: 同盟の目標。**すぐ最初の目標が出る**（既存セーブにも目的を渡したいため）
   if (data.alliance && !data.alliance.mission) {
@@ -1977,6 +1998,8 @@ function generateAIUsers(world, difficulty) {
  *   event: { idx, nextAt, endsAt, pickup },  // 期間限定イベント([S28])。endsAt!=null なら開催中
  *                               // pickup=ピックアップ武将のdefId（開催中のみ有効）
  *   settings: { bgm, se },      // 音の設定([S29])。false のみを「オフ」として扱う
+ *   bandits: [{ ti, level, expiresAt }],  // 盗賊([S31])。上級のみ。倒すと報酬
+ *   banditNextAt: number,       // 次に盗賊が湧く時刻（同）
  *                               // offeredAt=宣戦を打診した時刻。1度だけ自動で出す
  *   aiUsers[].tribe: bool,      // 異民族フラグ。既存のAI戦闘の仕組みに相乗りする
  *   world.tiles[].struct: "palisade"|"tower",  // 異民族が築いた施設([S27])。無い＝未築城
@@ -2037,6 +2060,8 @@ function newGameState(difficulty) {
     tribe: { wave: 0, startedAt: null, clearedAt: null, offeredAt: null },  // 異民族の進行（[S27]）
     event: { idx: 0, nextAt: t + CONFIG.EVENT.FIRST_AT_MIN * 60000, endsAt: null, pickup: null },  // イベント（[S28]）
     settings: { bgm: true, se: true },   // 音（[S29]）
+    bandits: [],                                              // 盗賊（[S31]）
+    banditNextAt: t + CONFIG.BANDIT_FIRST_AT_MIN * 60000,     // 同・初回の出現
     aiUsers,
     aiMarches: [],             // AIからプレイヤー領への攻撃部隊（[S12]）。到着で解決される
     flags: { holyWon: false, capitalWon: false, unifiedAt: null },  // unifiedAt=天下統一した時刻（[S09]）
@@ -2188,6 +2213,10 @@ function shiftTimersForOffline() {
   }
   if (S.alliance && S.alliance.aidCooldownUntil) S.alliance.aidCooldownUntil += gap;
   if (S.alliance && S.alliance.mission && S.alliance.mission.nextAt) S.alliance.mission.nextAt += gap;
+  // 盗賊（[S31]）。出現の予約と滞在期限の**両方**をずらす。
+  // 片方だけだと離席明けに湧いた瞬間に消える
+  if (S.banditNextAt) S.banditNextAt += gap;
+  for (const b of (S.bandits || [])) b.expiresAt += gap;
   if (S.nextIncidentCheckAt) S.nextIncidentCheckAt += gap;
   if (S.incident) { S.incident.createdAt += gap; S.incident.expiresAt += gap; }
   return gap;
@@ -2972,6 +3001,9 @@ function getTileDefense(ti) {
   // 異民族が築いた柵・櫓（[S27]）。プレイヤー側の施設と同じ値を使う
   const ts = getTribeStructAt(ti);
   if (ts) def += (STRUCT_DEFS[ts] || {}).def || 0;
+  // 盗賊（[S31]）。倒すべき的なので、素の地形防御より明らかに硬くする
+  const bd = getBanditAt(ti);
+  if (bd) def += getBanditDefense(bd);
   return Math.round(def * (1 - getSiegeReduction(ti)));
 }
 /**
@@ -3270,6 +3302,20 @@ function resolveMarches(t) {
     const tile = S.world.tiles[m.targetIdx];
     // 出撃時に確定した貫通率で敵防御を削る（包囲が進んでいれば素の防御も下がっている）
     const def = Math.round(getTileDefense(m.targetIdx) * (1 - (m.pierce || 0)));
+    // 盗賊が居るマスは**討伐だけ**して土地は取らない（[S31]）。
+    // 制圧の処理へ流すと無主地を占領してしまい「倒しただけ」にならない
+    const bandit = getBanditAt(m.targetIdx);
+    if (bandit) {
+      const lost = applyCasualties(m.squadId, def, m.power, m.power >= def);
+      if (m.power >= def) {
+        defeatBandit(m.targetIdx);
+        if (lost) toast(`⚔️ 討伐の損耗 -${fmt(lost)}兵`);
+      } else {
+        toast(`💥 盗賊Lv${bandit.level} に跳ね返された… 戦力${fmt(m.power)} < 守り${fmt(def)}`
+          + (lost ? ` ／ 損耗 -${fmt(lost)}兵` : ""), "defeat");
+      }
+      continue;
+    }
     if (m.power >= def) {
       // 前所有者（AI）から剥奪
       if (tile.ownerId && tile.ownerId !== "player") {
@@ -3558,6 +3604,111 @@ function hintTick() {
     toast(`${h.icon} ${h.name} が使えます — ${h.desc}`, "hint");
     break;                     // 一度に1件だけ
   }
+}
+
+/* =====================================================================
+ * [S31] BANDIT — 突発イベント: 盗賊の討伐（上級限定・DESIGN_S5.md §2）
+ *
+ * 一定のプレイ時間ごとに、プレイヤー領の近くへ高レベルの盗賊が湧く。
+ * 出兵して倒すと資源とダイヤが手に入り、一定時間で自然に去る。
+ *
+ * **盗賊は領地を奪わない**。攻めてくる敵は既にAI([S12])と異民族([S27])の
+ * 2種があり、3つ目を足すと守りの管理が煩雑になるため。
+ * **倒してもタイルは占領しない**（盗賊を討っただけ。土地は無主のまま）。
+ *
+ * 実装は既存の経路にそのまま乗せる:
+ *   防御 → getTileDefense に加算
+ *   討伐 → resolveMarches の制圧成功と同じ判定
+ * 時刻は絶対epoch ms。shiftTimersForOffline に2種とも足すこと。
+ * ===================================================================*/
+/** そのタイルに居る盗賊（無ければ null） */
+function getBanditAt(ti) {
+  if (!S.bandits || !S.bandits.length) return null;
+  return S.bandits.find(b => b.ti === ti) || null;
+}
+/** 盗賊の防御。レベルの累乗で伸びるのはタイル防御と同じ作法 */
+function getBanditDefense(b) {
+  return Math.round(CONFIG.BANDIT_DEF_BASE * Math.pow(Math.max(1, b.level), CONFIG.BANDIT_DEF_EXP));
+}
+/** 今回湧く盗賊のレベル。本城レベルを基準にするので、育つほど歯応えが保たれる */
+function getBanditLevel() {
+  return Math.max(1, S.player.castleLevel + CONFIG.BANDIT_LEVEL_OVER_CASTLE);
+}
+/** 討伐報酬。レベルに比例させ、倒すほど旨くなるようにする */
+function getBanditReward(b) {
+  const res = {};
+  for (const k of RES_KEYS) res[k] = b.level * CONFIG.BANDIT_REWARD_PER_LEVEL;
+  return { res, diamonds: b.level * CONFIG.BANDIT_DIAMOND_PER_LEVEL };
+}
+/**
+ * 盗賊を1組湧かせる。置くのは**プレイヤー領から一定の距離にある未所有マス**。
+ * 近すぎると的が自陣に埋もれ、遠すぎると出兵が届かない。
+ */
+function spawnBandit(level) {
+  if (!S.player.ownedTiles.length) return false;
+  const cand = [];
+  for (let i = 0; i < S.world.tiles.length; i++) {
+    const t = S.world.tiles[i];
+    if (t.ownerId || isBlockedType(t.type) || t.type === "castle") continue;
+    if (FORTRESS_TYPES.includes(t.type) || t.type === "holy") continue;   // 要衝には湧かせない
+    if (getBanditAt(i)) continue;
+    // 自領からの最短距離が範囲内か
+    let best = Infinity;
+    for (const oi of S.player.ownedTiles) {
+      const o = S.world.tiles[oi];
+      const d = chebyshev(o.x, o.y, t.x, t.y);
+      if (d < best) best = d;
+      if (best <= CONFIG.BANDIT_MIN_DIST) break;
+    }
+    if (best < CONFIG.BANDIT_MIN_DIST || best > CONFIG.BANDIT_MAX_DIST) continue;
+    cand.push(i);
+  }
+  if (!cand.length) return false;
+  const ti = pick(cand);
+  S.bandits.push({ ti, level, expiresAt: now() + CONFIG.BANDIT_STAY_SEC * 1000 });
+  return true;
+}
+/**
+ * 討伐が成立した時の処理。報酬を渡して盗賊を消す。
+ * **タイルは占領しない**ので、呼び出し側は所有権を触らないこと。
+ */
+function defeatBandit(ti) {
+  const b = getBanditAt(ti);
+  if (!b) return null;
+  S.bandits = S.bandits.filter(x => x !== b);
+  const r = getBanditReward(b);
+  const got = [];
+  const cap = getStorageCap();
+  for (const k of RES_KEYS) {
+    const before = S.player.resources[k];
+    S.player.resources[k] = Math.min(cap, before + r.res[k]);
+    got.push(RES_DEFS[k].emoji + fmt(Math.floor(S.player.resources[k] - before)));
+  }
+  S.player.diamonds += r.diamonds;
+  spawnMapFx(ti, "castle");       // 討伐は大きめの演出（[S14]）
+  toast(`💀 盗賊Lv${b.level} を討伐！ ${got.join(" ")} 💎+${fmt(r.diamonds)}`, "capture");
+  logEvent("capture", `💀 盗賊Lv${b.level} を討ち取った`);
+  warChat("onBanditDown");
+  return b;
+}
+/** tickから呼ばれる。出現と自然消滅を見る */
+function banditTick(t) {
+  if (!S.bandits) return;
+  if (!diff("BANDIT_EVENT")) return;                       // 上級のみ
+  if (CONFIG.TUTORIAL_HIDE_ADVANCED_UI && isGuiding()) return;
+  // 期限切れは静かに去る（討伐しなくても害はないので、去ったことは記録だけ）
+  const before = S.bandits.length;
+  S.bandits = S.bandits.filter(b => t < b.expiresAt);
+  if (S.bandits.length < before) toast("💀 盗賊は去っていった", "raid");
+  if (t < (S.banditNextAt || 0)) return;
+  S.banditNextAt = t + CONFIG.BANDIT_CYCLE_MIN * 60000;
+  const lv = getBanditLevel();
+  let n = 0;
+  for (let i = 0; i < CONFIG.BANDIT_COUNT; i++) if (spawnBandit(lv)) n++;
+  if (!n) return;                                          // 置ける場所が無ければ静かに見送る
+  toast(`💀 盗賊Lv${lv} が ${n}組 現れた！ 討伐すれば報酬が得られる（${CONFIG.BANDIT_STAY_SEC / 60}分で去る）`, "raid");
+  logEvent("raid", `💀 盗賊Lv${lv} が ${n}組 現れた`);
+  warChat("onBanditAppear");
 }
 
 /* =====================================================================
@@ -5617,6 +5768,8 @@ const CHAT_LINES = {
       "間に合いました。この場を、守り抜きます。",
     ],
   },
+  onBanditAppear: [],                                     // 盗賊が現れた（[S31]・未執筆）
+  onBanditDown: [],                                       // 盗賊を討伐した（同上・未執筆）
   onMissionDone: {
     expander: [
       "やったな！　同盟の目標、達成だ！",
@@ -7428,6 +7581,18 @@ const MapView = {
             ctx.font = `${Math.floor(ts * 0.62)}px sans-serif`; // 元に戻す
           }
         }
+        // 盗賊（[S31]）。無主マスに湧くので、所有者マークとは別に必ず描く
+        if (ts >= 13) {
+          const bd = getBanditAt(ti);
+          if (bd) {
+            ctx.strokeStyle = `rgba(220,90,90,${0.55 + pulse * 0.45})`;
+            ctx.lineWidth = 2;
+            ctx.strokeRect(px + 2, py + 2, ts - 5, ts - 5);
+            ctx.font = `${Math.floor(ts * 0.44)}px sans-serif`;
+            fillEmojiCentered(ctx, "💀", px + ts * 0.74, py + ts * 0.28);
+            ctx.font = `${Math.floor(ts * 0.62)}px sans-serif`;   // 元に戻す
+          }
+        }
         // 異民族が築いた柵・櫓（[S27]）。敵領なので自領のマークとは別の分岐で描く。
         // 位置と絵文字は自分の施設と揃える（同じものが建っている、と読めるように）
         if (t.ownerId && t.ownerId !== "player" && ts >= 13) {
@@ -7954,6 +8119,19 @@ function renderTileDetails(ti) {
   if (isBlockedType(t.type)) return "";
   const ai = t.ownerId && t.ownerId !== "player" ? S.aiUsers.find(a => a.id === t.ownerId) : null;
   let html = "";
+
+  // 盗賊（[S31]）。倒すと何が得られるかを先に見せる（出兵の判断材料になる）
+  const bd = getBanditAt(ti);
+  if (bd) {
+    const rw = getBanditReward(bd);
+    html += `<div class="panel" style="border-color:var(--danger);margin-bottom:6px">
+      <b>💀 盗賊 Lv${bd.level}</b>
+      <div class="dim small">討伐しても土地は手に入りません。報酬だけを得ます</div>
+      <div class="small">守り <b>${fmt(getBanditDefense(bd))}</b> ｜ 残り ${fmtSec((bd.expiresAt - now()) / 1000)}</div>
+      <div class="small" style="color:var(--accent)">討伐報酬 ${
+        RES_KEYS.map(k => RES_DEFS[k].emoji + fmt(rw.res[k])).join(" ")} 💎${fmt(rw.diamonds)}</div>
+    </div>`;
+  }
 
   // 異民族が築いた施設は「なぜ硬いのか」が読めないと理不尽になるので明示する
   const tsk = getTribeStructAt(ti);
@@ -8979,6 +9157,7 @@ function tick() {
   checkTutorialProgress();
   renderHeader();
   renderGuideBar();
+  banditTick(t);
   aidTick(t);
   missionTick(t);
   eventTick(t);
