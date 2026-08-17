@@ -134,6 +134,27 @@ select{font:inherit;color:var(--fg);background:var(--bg3);border:1px solid var(-
 .avatar-row{display:block;width:38px;height:38px;border-radius:50%;overflow:hidden;margin-right:8px;
   background:var(--bg3);text-align:center;line-height:38px;font-size:22px;flex:0 0 auto}
 .avatar-row img{width:100%;height:100%;object-fit:cover;display:block}
+/* 城タブ最上部の盟主。**選ばせた以上、いちばん長く見る画面に堂々と出す**
+   （Gemini第4回・問題4）。タップで姿を変えられる */
+.lord-row{display:flex;align-items:center;gap:12px;width:100%;text-align:left;
+  background:none;border:0;padding:0 0 10px;margin-bottom:10px;border-bottom:1px solid var(--line)}
+.lord-face{flex:0 0 auto;position:relative;width:64px;height:64px;border-radius:50%;overflow:hidden;
+  border:2px solid var(--accent);box-shadow:0 0 14px rgba(232,184,74,.28);
+  display:flex;align-items:center;justify-content:center;font-size:30px;background:var(--bg3)}
+.lord-face img{width:100%;height:100%;object-fit:cover;display:block}
+/* 「押せる」ことを示す小さな印。文字を足すと64pxの円が窮屈になる */
+.lord-face::after{content:"🏳️";position:absolute;right:-2px;bottom:-2px;font-size:13px;
+  background:var(--bg2);border-radius:50%;padding:1px 2px;line-height:1}
+.lord-body{flex:1;min-width:0;display:block}
+.lord-name{display:block;font-size:16px;font-weight:800;letter-spacing:.06em}
+.lord-name .dim{font-weight:400;letter-spacing:0}
+.lord-stat{display:block;margin-top:3px;font-size:12px;color:var(--fg-dim);line-height:1.6}
+.lord-stat b{color:var(--fg)}
+/* 勝利バナーの中に出す小さな盟主 */
+.avatar-banner{display:inline-block;width:20px;height:20px;border-radius:50%;overflow:hidden;
+  vertical-align:-4px;margin-right:6px;background:var(--bg3);font-size:13px;line-height:20px;
+  text-align:center}
+.avatar-banner img{width:100%;height:100%;object-fit:cover;display:block}
 .avatar-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-top:6px}
 .avatar-cell{display:flex;flex-direction:column;align-items:center;gap:4px;padding:8px 4px;
   border-radius:10px;background:var(--bg2);border:1px solid var(--line);color:var(--fg)}
@@ -2482,6 +2503,15 @@ function isRulingPhase() {
 function isFullyUnified() {
   return isRulingPhase() && getRemainingFactions() === 0 && getConquestPct() >= 99.5;
 }
+/**
+ * 勝利バナーに添える小さな盟主（Gemini第4回・問題4）。
+ * **勝った場面にだけ添える。** 危機の赤バナーや進行中の波には出さない
+ * （どこにでも顔が並ぶと、祝勝の場面での意味が薄れる）。
+ */
+function lordBadgeHTML() {
+  const a = getAvatar();
+  return `<span class="avatar-banner">${a ? artHTML(a.imageKey, a.emoji) : "🏳️"}</span>`;
+}
 function showWinBanner() {
   const el = $("winBanner"); if (!el) return;
   el.classList.remove("danger");
@@ -2503,7 +2533,7 @@ function showWinBanner() {
   // 第二ステージに入ったら、目標は異民族の討伐と皇都の堅守になる
   if (isStage2() && S.tribe && S.tribe.wave > 0) {
     if (S.tribe.clearedAt) {
-      el.textContent = "🏆 異民族討伐 — 皇都を守り抜き、大陸に平穏をもたらした";
+      el.innerHTML = lordBadgeHTML() + "🏆 異民族討伐 — 皇都を守り抜き、大陸に平穏をもたらした";
     } else if (!holdsCapital()) {
       el.textContent = "🔥 皇都を奪われている！ 取り返さねば討伐は成らぬ";
       el.classList.add("danger");
@@ -2516,12 +2546,15 @@ function showWinBanner() {
     return;
   }
   // 勝利後は「残る反乱軍を掃討せよ」という次の目標を出し続ける（目的を切らさない）
+  // **数値だけを差し込む**ので innerHTML でも安全（同盟名などのユーザー入力は入らない）
   if (S.flags.unifiedAt) {
-    el.textContent = `🏆 天下統一 — 全${S.aiUsers.length}勢力を平定し、大陸のすべてを手にした`;
+    el.innerHTML = lordBadgeHTML()
+      + `🏆 天下統一 — 全${S.aiUsers.length}勢力を平定し、大陸のすべてを手にした`;
   } else {
     const rest = getRemainingFactions();
     const head = isLegacyRuleset() ? "⛩️ 聖地制圧" : "👑 皇都制圧";
-    el.textContent = `${head} — 戦乱は平定された。残る反乱軍 ${rest} 勢力を掃討せよ ｜ 制覇率 ${getConquestPct().toFixed(1)}%`;
+    el.innerHTML = lordBadgeHTML()
+      + `${head} — 戦乱は平定された。残る反乱軍 ${rest} 勢力を掃討せよ ｜ 制覇率 ${getConquestPct().toFixed(1)}%`;
   }
   el.classList.add("show");
 }
@@ -9364,10 +9397,33 @@ function nearestFreeCell(col, row, exceptType) {
 /** 上部サマリー（build時・updateCityLive時 共用） */
 function citySummaryHTML() {
   const per = getProdPerHour();
-  return `<h3>🏯 本城 Lv${S.player.castleLevel} ｜ 部隊戦力 ${fmt(getArmyPower())}</h3>
+  return `${lordRowHTML()}
+    <h3>🏯 本城 Lv${S.player.castleLevel} ｜ 部隊戦力 ${fmt(getArmyPower())}</h3>
     <div class="dim small">毎時 ${RES_KEYS.map(k => RES_DEFS[k].emoji + fmt(per[k])).join(" ")} 💎${fmt(per.diamonds)}
     ｜ 倉庫容量 ${fmt(getStorageCap())}</div>
     ${researchRowHTML()}`;
+}
+/**
+ * 城タブ最上部の盟主（Gemini第4回・問題4）。
+ *
+ * 開始時に6種から容姿を選ばせておきながら、出るのが同盟タブの38pxと
+ * チャットの16pxだけでは「選んだ意味」が回収されない。
+ * **内政は最も長く見る画面**なので、ここに大きく置いて自己投影の器にする。
+ * タップで姿を変えられる（同盟タブの導線と同じ `UIA.changeAvatar`）。
+ */
+function lordRowHTML() {
+  const a = getAvatar();
+  const face = a ? artHTML(a.imageKey, a.emoji) : "🏳️";
+  const owned = S.player.ownedTiles.length;
+  const allies = S.alliance.members.filter(m => m.id !== "player").length;
+  return `<button class="lord-row" onclick="UIA.changeAvatar()">
+    <span class="lord-face">${face}</span>
+    <span class="lord-body">
+      <span class="lord-name">${PLAYER_NAME}${a ? ` <span class="dim small">— ${a.label}</span>` : ""}</span>
+      <span class="lord-stat">領地 <b>${owned}</b>枚 ｜ 制覇率 <b>${getConquestPct().toFixed(1)}%</b>${
+        allies ? ` ｜ 同盟 <b>${allies}</b>勢力` : ""}</span>
+    </span>
+  </button>`;
 }
 /**
  * 城タブ最上部に置く研究の常設行（Gemini第3回【問題3】への対応）。
@@ -9399,8 +9455,12 @@ function citySignature() {
   // 研究の常設行が古いままにならないよう、研究状態も再描画の判定に含める
   const res = (r.active ? "A" + r.active.id : "-") + ":" + r.done.length
     + ":" + RESEARCH_DEFS.filter(d => !getResearchBlocker(d)).length;
+  // **盟主の行が載っているので avatar と領地数も含める**。
+  // 含めないと姿を変えた次のtickで古い顔に戻る（同盟名で一度踏んだのと同じ罠）
   return S.player.buildings.map(b => b.type + ":" + b.level + (b.upgradeEndsAt ? "U" : "")).join("|")
-    + "#" + S.player.castleLevel + "#" + res;
+    + "#" + S.player.castleLevel + "#" + res
+    + "#" + (S.player.avatar || "-") + "#" + S.player.ownedTiles.length
+    + "#" + S.alliance.members.length;
 }
 /** 建物1つぶんのDOM文字列 */
 function cityNodeHTML(b) {
