@@ -3945,8 +3945,8 @@ function defeatBandit(ti) {
   }
   S.player.diamonds += r.diamonds;
   spawnMapFx(ti, "castle");       // 討伐は大きめの演出（[S14]）
-  toast(`💀 盗賊Lv${b.level} を討伐！ ${got.join(" ")} 💎+${fmt(r.diamonds)}`, "capture");
-  logEvent("capture", `💀 盗賊Lv${b.level} を討ち取った`);
+  // **toast(msg, kind) は中で logEvent を呼ぶ**ので、ここで logEvent を重ねない（ログが2行になる）
+  toast(`💰 盗賊Lv${b.level} を討伐！ ${got.join(" ")} 💎+${fmt(r.diamonds)}`, "capture");
   warChat("onBanditDown");
   return b;
 }
@@ -3958,15 +3958,19 @@ function banditTick(t) {
   // 期限切れは静かに去る（討伐しなくても害はないので、去ったことは記録だけ）
   const before = S.bandits.length;
   S.bandits = S.bandits.filter(b => t < b.expiresAt);
-  if (S.bandits.length < before) toast("💀 盗賊は去っていった", "raid");
+  if (S.bandits.length < before) {
+    // **kind を渡さない**＝効果音を鳴らさない。取り逃しただけなので警告音も祝福音も合わない
+    toast("💰 盗賊は去っていった（討伐の機会を逃した）");
+    logEvent("bounty", "💰 盗賊は去っていった");
+  }
   if (t < (S.banditNextAt || 0)) return;
   S.banditNextAt = t + CONFIG.BANDIT_CYCLE_MIN * 60000;
   const lv = getBanditLevel();
   let n = 0;
   for (let i = 0; i < CONFIG.BANDIT_COUNT; i++) if (spawnBandit(lv)) n++;
   if (!n) return;                                          // 置ける場所が無ければ静かに見送る
-  toast(`💀 盗賊Lv${lv} が ${n}組 現れた！ 討伐すれば報酬が得られる（${CONFIG.BANDIT_STAY_SEC / 60}分で去る）`, "raid");
-  logEvent("raid", `💀 盗賊Lv${lv} が ${n}組 現れた`);
+  // **raid ではなく bounty**。侵攻と同じ赤＋同じ音で出すと「また敵が増えた」と読まれる
+  toast(`💰 稼ぎ時！ 盗賊Lv${lv} が ${n}組 現れた — 討伐すれば報酬（${CONFIG.BANDIT_STAY_SEC / 60}分で去る／領地は増えません）`, "bounty");
   warChat("onBanditAppear");
 }
 
@@ -4168,6 +4172,7 @@ const SE_BY_LOG_KIND = {
   capture: "capture", defend: "defend", raid: "raid", defeat: "defeat",
   build: "build", research: "research", win: "win", tribe: "tribe",
   event: "event", ally: "ally", incident: "incident", hint: "event",
+  bounty: "event",                 // 機会の合図。侵攻の raid 音とは別にする
   fuse: "build", skill: "research", grow: "research",
 };
 
@@ -7012,6 +7017,7 @@ const LOG_KINDS = {
   capture:  { color: "#8fd98f" },  // 制圧成功
   defeat:   { color: "#e08080" },  // 出兵失敗（見逃すと最も困る）
   raid:     { color: "#ff6b6b" },  // AIの侵攻予告・領地を奪われた（最も強く目立たせる）
+  bounty:   { color: "#ffd166" },  // 盗賊＝討伐すると得をする的。**脅威側の raid と必ず分ける**
   defend:   { color: "#7fd4c0" },  // AIの攻撃を撃退した
   research: { color: "#8fd0e8" },  // 研究完了
   fuse:     { color: "#e0a0d0" },  // カード合体で強化
@@ -7962,11 +7968,23 @@ const MapView = {
         if (ts >= 13) {
           const bd = getBanditAt(ti);
           if (bd) {
-            ctx.strokeStyle = `rgba(220,90,90,${0.55 + pulse * 0.45})`;
-            ctx.lineWidth = 2;
-            ctx.strokeRect(px + 2, py + 2, ts - 5, ts - 5);
-            ctx.font = `${Math.floor(ts * 0.44)}px sans-serif`;
-            fillEmojiCentered(ctx, "💀", px + ts * 0.74, py + ts * 0.28);
+            // **脅威の見た目にしないこと**（Gemini第4回・問題2）。
+            // 赤い脈動する枠は敵の侵攻の警告リングと同じ語彙なので、
+            // パニック中に「また敵が増えた」と読まれ、稼ぎの機会がストレス源に反転する。
+            // 枠ではなく**金の柔らかい光**にして「置いてある宝」に見せる。
+            const gx = px + ts / 2, gy = py + ts / 2, gr = ts * 0.52;
+            const gg = ctx.createRadialGradient(gx, gy, 0, gx, gy, gr);
+            gg.addColorStop(0, `rgba(255,209,102,${0.30 + pulse * 0.14})`);
+            gg.addColorStop(0.6, `rgba(255,209,102,${0.13 + pulse * 0.07})`);
+            gg.addColorStop(1, "rgba(255,209,102,0)");
+            ctx.fillStyle = gg;
+            ctx.fillRect(px, py, ts, ts);
+            // 絵文字は暗い円の上に置く（地図の明暗どちらでも読めるようにする）
+            const ex = px + ts * 0.74, ey = py + ts * 0.28;
+            ctx.fillStyle = "rgba(24,20,10,.72)";
+            ctx.beginPath(); ctx.arc(ex, ey, ts * 0.25, 0, Math.PI * 2); ctx.fill();
+            ctx.font = `${Math.floor(ts * 0.4)}px sans-serif`;
+            fillEmojiCentered(ctx, "💰", ex, ey);
             ctx.font = `${Math.floor(ts * 0.62)}px sans-serif`;   // 元に戻す
           }
         }
@@ -8501,12 +8519,14 @@ function renderTileDetails(ti) {
   const bd = getBanditAt(ti);
   if (bd) {
     const rw = getBanditReward(bd);
-    html += `<div class="panel" style="border-color:var(--danger);margin-bottom:6px">
-      <b>💀 盗賊 Lv${bd.level}</b>
-      <div class="dim small">討伐しても土地は手に入りません。報酬だけを得ます</div>
-      <div class="small">守り <b>${fmt(getBanditDefense(bd))}</b> ｜ 残り ${fmtSec((bd.expiresAt - now()) / 1000)}</div>
-      <div class="small" style="color:var(--accent)">討伐報酬 ${
+    // **枠を danger（赤）にしない**。守るべき脅威ではなく、取りに行く機会なので。
+    // 報酬を先頭に出し、注意書きは最後に回す（判断材料の順序をそのまま反映する）
+    html += `<div class="panel" style="border-color:#ffd166;margin-bottom:6px">
+      <b>💰 盗賊 Lv${bd.level} — 討伐すると報酬</b>
+      <div class="small" style="color:var(--accent)">${
         RES_KEYS.map(k => RES_DEFS[k].emoji + fmt(rw.res[k])).join(" ")} 💎${fmt(rw.diamonds)}</div>
+      <div class="small">守り <b>${fmt(getBanditDefense(bd))}</b> ｜ 残り ${fmtSec((bd.expiresAt - now()) / 1000)}</div>
+      <div class="dim small">攻めてはきません。放っておいても害はなく、時間で去ります（土地は増えません）</div>
     </div>`;
   }
 
