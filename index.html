@@ -934,6 +934,11 @@ const CONFIG = {
   // 音源ファイルは持たず WebAudio で合成する。単一HTML制約下で base64 の音源を
   // 積むとファイルサイズに直結するため（現在 index.html は約1.7MB）。
   AUDIO: {
+    // 音の強弱（Gemini第4回・問題3）。**全部が同じ強さで鳴ると警告としての価値が下がる**。
+    // 何度も繰り返す合図を下げ、めったに起きない出来事だけを際立たせる
+    SE_LEVEL:   { routine: 0.32, normal: 0.7, major: 1 },
+    // 同じ音の連打を防ぐ間隔（ms）。**major は 0＝必ず鳴らす**（警告を握り潰さない）
+    SE_MIN_GAP: { routine: 1500, normal: 400, major: 0 },
     TITLE: 0.55,                        // オープニング曲の音量（[S33]）
     TITLE_FADE_SEC: 1.2,                // 「はじめる」を押してから消えるまで
     MASTER: 0.5,                        // 全体音量
@@ -1355,7 +1360,8 @@ function toast(msg, kind) {
   setTimeout(() => el.remove(), 3200);
   if (kind) logEvent(kind, msg);  // 効果音は**ここに集約する**（[S29]）。kind ごとの鳴らし分けは SE_BY_LOG_KIND。
   // 各所に AUDIO.se() を撒くと、鳴る場面と鳴らない場面が散らかって管理できなくなる
-  if (kind && SE_BY_LOG_KIND[kind]) AUDIO.se(SE_BY_LOG_KIND[kind]);
+  const se = kind && SE_BY_LOG_KIND[kind];
+  if (se) AUDIO.se(se.se, se.lv);
 }
 /** innerHTML に差し込む前のHTMLエスケープ（プレイヤー入力の混入対策） */
 function escapeHtml(s) {
@@ -3436,7 +3442,7 @@ function resolveMarches(t) {
         S.player.diamonds += CONFIG.CASTLE_CAPTURE_DIAMONDS;
         toast(`🏯 ${winTag}${ai ? ai.name : "敵勢力"} の城を攻め落とした！ 💎+${CONFIG.CASTLE_CAPTURE_DIAMONDS}`
           + (freed ? ` ／ ${freed}枚の領地が無主に戻った` : "")
-          + (lost ? ` ／ 損耗 -${fmt(lost)}兵` : ""), "capture");
+          + (lost ? ` ／ 損耗 -${fmt(lost)}兵` : ""), "castle");
         warChat("onCastleFall", { enemy: ai ? ai.name : "敵勢力" });
       } else {
         toast(`⚔️ ${winTag}${TILE_DEFS[tile.type].name}Lv${tile.level} を制圧！ 💎+${bonus}`
@@ -3541,7 +3547,10 @@ function doGacha(count) {
   for (const def of results) S.player.cards.push({ uid: uid("c"), defId: def.id, obtainedAt: t, rank: 0, skillLv: 1, skillExp: 0, level: 1, exp: 0 });
   // 排出音は**最高レア度で1回だけ**鳴らす（10連で10回鳴ると音が潰れる）
   const best = results.reduce((a, c) => RARITY_ORDER[c.rarity] < RARITY_ORDER[a] ? c.rarity : a, "N");
-  AUDIO.se(best === "UR" || best === "SSR" ? "gachaUR" : best === "SR" ? "gachaSR" : "gachaN");
+  // **N止まりの排出は毎回鳴る**ので控えめに。SR以上だけを際立たせる（Gemini第4回・問題3）
+  if (best === "UR" || best === "SSR") AUDIO.se("gachaUR", "major");
+  else if (best === "SR") AUDIO.se("gachaSR", "normal");
+  else AUDIO.se("gachaN", "routine");
   // 初陣指南④は「10連を引いた」ことが条件（単発では達成しない）
   if (count === CONFIG.TUTORIAL_GACHA_COUNT && S.tutorial) S.tutorial.didTenPull = true;
   return results;
@@ -3992,6 +4001,8 @@ const AUDIO = {
   ctx: null, master: null, bgmGain: null, seGain: null, delay: null,
   started: false,          // 最初のユーザー操作で true
   bgmTimer: null,          // 先読みスケジューラ
+  _seMul: 1,               // 効果音の音量倍率（se() が前後で設定・復帰させる）
+  _seAt: {},               // 効果音ごとの最終再生時刻。連打の抑制に使う
   nextNoteAt: 0,           // 次の音を鳴らす時刻（ctx.currentTime 基準）
   step: 0,                 // 何音目か
   mood: null,              // 今かかっている曲想
@@ -4038,7 +4049,7 @@ const AUDIO = {
     o.frequency.setValueAtTime(opt.freq, t);
     if (opt.toFreq) o.frequency.exponentialRampToValueAtTime(Math.max(1, opt.toFreq), t + opt.dur);
     const g = this.ctx.createGain();
-    const peak = opt.gain != null ? opt.gain : 0.5;
+    const peak = (opt.gain != null ? opt.gain : 0.5) * this._seMul;
     const atk = opt.attack != null ? opt.attack : 0.005;
     // exponentialRamp は 0 に落とせないので必ず微小値で止める
     g.gain.setValueAtTime(0.0001, t);
@@ -4068,16 +4079,32 @@ const AUDIO = {
     f.type = opt.filter || "bandpass";
     f.frequency.value = opt.freq || 800;
     f.Q.value = opt.q != null ? opt.q : 1;
-    const g = this.ctx.createGain(); g.gain.value = opt.gain != null ? opt.gain : 0.4;
+    const g = this.ctx.createGain();
+    g.gain.value = (opt.gain != null ? opt.gain : 0.4) * this._seMul;
     src.connect(f); f.connect(g); g.connect(this.seGain);
     src.start(t); src.stop(t + opt.dur);
   },
 
   /** 効果音を鳴らす。名前は SE_DEFS のキー */
-  se(name) {
+  /**
+   * 効果音を鳴らす。lv で**強弱と連打の抑制**を分ける（Gemini第4回・問題3）。
+   * note/noise は同期的に予約されるので、_seMul は呼び出しの前後で完結する。
+   */
+  se(name, lv) {
     if (!this.started || !this.on || !this.ctx) return;
     const f = SE_DEFS[name];
-    if (f) f(this);
+    if (!f) return;
+    const key = lv || "major";
+    const gap = CONFIG.AUDIO.SE_MIN_GAP[key] || 0;
+    const t = Date.now();
+    if (gap) {
+      // 同じ音が続けざまに鳴るのを抑える（連続制圧で機関銃のようにならない）
+      if (this._seAt[name] && t - this._seAt[name] < gap) return;
+    }
+    this._seAt[name] = t;
+    this._seMul = CONFIG.AUDIO.SE_LEVEL[key] != null ? CONFIG.AUDIO.SE_LEVEL[key] : 1;
+    f(this);
+    this._seMul = 1;
   },
 
   /* --- BGM ------------------------------------------------------------
@@ -4140,8 +4167,11 @@ const SE_DEFS = {
                    a.note({ freq: 784, type: "triangle", dur: 0.28, gain: 0.30, at: a.ctx.currentTime + 0.09 }); },
   defend:   a => { a.note({ freq: 392, type: "square", dur: 0.12, gain: 0.18, cutoff: 1200 });
                    a.note({ freq: 587, type: "triangle", dur: 0.22, gain: 0.26, at: a.ctx.currentTime + 0.08 }); },
-  raid:     a => { a.noise({ freq: 300, dur: 0.35, gain: 0.30, filter: "lowpass", q: 0.7 });
-                   a.note({ freq: 220, toFreq: 110, type: "sawtooth", dur: 0.5, gain: 0.20, cutoff: 700 }); },
+  // **警告音なので、日常音を下げた後も埋もれないこと。**
+  // 低い帯域の音は同じ振幅でも小さく聞こえるため、定義そのものを厚くしてある
+  raid:     a => { a.noise({ freq: 300, dur: 0.35, gain: 0.42, filter: "lowpass", q: 0.7 });
+                   a.note({ freq: 220, toFreq: 110, type: "sawtooth", dur: 0.5, gain: 0.30, cutoff: 700 });
+                   a.note({ freq: 466, toFreq: 349, type: "square", dur: 0.28, gain: 0.16, cutoff: 1400 }); },
   defeat:   a => a.note({ freq: 330, toFreq: 110, type: "sawtooth", dur: 0.6, gain: 0.24, cutoff: 800 }),
   build:    a => { a.note({ freq: 659, type: "sine", dur: 0.12, gain: 0.26 });
                    a.note({ freq: 988, type: "sine", dur: 0.24, gain: 0.22, at: a.ctx.currentTime + 0.1 }); },
@@ -4150,6 +4180,12 @@ const SE_DEFS = {
   win:      a => [0, 0.13, 0.26, 0.42].forEach((d, i) =>
                    a.note({ freq: [523, 659, 784, 1047][i], type: "triangle",
                             dur: i === 3 ? 0.7 : 0.2, gain: 0.32, at: a.ctx.currentTime + d })),
+  // 城が落ちる音。**制圧(capture)と同じ音にしない** — 一勢力が滅ぶ最大の場面なので、
+  // 低い衝撃のあとに上がる3音を重ねて「大きな出来事」として区別させる
+  castle:   a => { a.noise({ freq: 140, dur: 0.5, gain: 0.34, filter: "lowpass", q: 0.7 });
+                   [0, 0.14, 0.3].forEach((d, i) =>
+                     a.note({ freq: [262, 392, 523][i], type: "triangle", dur: i === 2 ? 0.6 : 0.22,
+                              gain: 0.3, at: a.ctx.currentTime + d })); },
   tribe:    a => { a.noise({ freq: 180, dur: 0.6, gain: 0.28, filter: "lowpass", q: 0.6 });
                    a.note({ freq: 98, type: "sawtooth", dur: 0.9, gain: 0.24, cutoff: 400 }); },
   event:    a => [0, 0.1, 0.2].forEach((d, i) =>
@@ -4168,12 +4204,39 @@ const SE_DEFS = {
                    a.noise({ freq: 6000, dur: 0.9, gain: 0.10, filter: "highpass", q: 0.5 }); },
 };
 /** ログ種別（[S20] LOG_KINDS）→ 効果音。載っていない種別は鳴らさない */
+/**
+ * ログ種別 → 効果音と**強弱**（Gemini第4回・問題3）。
+ * 新しい種別を足す時はここに1行足すだけで鳴るようにしておく。
+ *
+ * lv の意味:
+ *   routine … 何度も繰り返す日常操作（制圧・普請・育成）。**控えめ＋連打を抑える**
+ *   normal  … 節目の出来事
+ *   major   … めったに起きない。**ここだけ際立たせたい**。抑制もしない
+ *
+ * **raid（侵攻の警告）を下げないこと。** 日常音を下げる目的は、
+ * 危険の合図を相対的に際立たせることにある。
+ */
 const SE_BY_LOG_KIND = {
-  capture: "capture", defend: "defend", raid: "raid", defeat: "defeat",
-  build: "build", research: "research", win: "win", tribe: "tribe",
-  event: "event", ally: "ally", incident: "incident", hint: "event",
-  bounty: "event",                 // 機会の合図。侵攻の raid 音とは別にする
-  fuse: "build", skill: "research", grow: "research",
+  // --- めったに起きない。ここを聴かせたい ---
+  win:      { se: "win",      lv: "major" },    // 勝利
+  castle:   { se: "castle",   lv: "major" },    // 敵城の陥落＝一勢力の滅亡
+  raid:     { se: "raid",     lv: "major" },    // 侵攻の予告・領地を奪われた
+  tribe:    { se: "tribe",    lv: "major" },    // 異民族の流入
+  // --- 節目 ---
+  defeat:   { se: "defeat",   lv: "normal" },   // 出兵の失敗
+  defend:   { se: "defend",   lv: "normal" },   // 撃退
+  event:    { se: "event",    lv: "normal" },   // 期間限定イベント
+  bounty:   { se: "event",    lv: "normal" },   // 盗賊＝機会（[S31]）
+  ally:     { se: "ally",     lv: "normal" },   // 同盟の加入・事件の結末
+  incident: { se: "incident", lv: "normal" },   // 同盟内事件
+  // --- 何度も繰り返す。控えめに ---
+  capture:  { se: "capture",  lv: "routine" },  // 制圧。空地1枚でも鳴る最頻出
+  build:    { se: "build",    lv: "routine" },  // 普請の完了
+  research: { se: "research", lv: "routine" },  // 研究の完了
+  fuse:     { se: "build",    lv: "routine" },  // カード合体
+  skill:    { se: "research", lv: "routine" },  // 必殺技のLvUP
+  grow:     { se: "research", lv: "routine" },  // 武将のLvUP
+  hint:     { se: "event",    lv: "routine" },  // 解禁の告知
 };
 
 /* 曲想。ヨナ抜き五音音階なので、どの音を選んでも濁らない。
@@ -7018,6 +7081,7 @@ const LOG_KINDS = {
   defeat:   { color: "#e08080" },  // 出兵失敗（見逃すと最も困る）
   raid:     { color: "#ff6b6b" },  // AIの侵攻予告・領地を奪われた（最も強く目立たせる）
   bounty:   { color: "#ffd166" },  // 盗賊＝討伐すると得をする的。**脅威側の raid と必ず分ける**
+  castle:   { color: "#8fd98f" },  // 敵城の陥落。色は制圧と同じ（勝ち事）だが**音だけ major**
   defend:   { color: "#7fd4c0" },  // AIの攻撃を撃退した
   research: { color: "#8fd0e8" },  // 研究完了
   fuse:     { color: "#e0a0d0" },  // カード合体で強化
@@ -8839,7 +8903,7 @@ const UIA = {
     S.settings[key] = S.settings[key] === false;      // false のみを「オフ」として扱う
     AUDIO.unlock();                                    // 操作の中なので、ここで解禁もできる
     AUDIO.syncBGM();
-    if (key === "se" && S.settings.se) AUDIO.se("tap");
+    if (key === "se" && S.settings.se) AUDIO.se("tap", "routine");
     openSoundSheet();
     saveGame();
   },
