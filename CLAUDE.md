@@ -64,6 +64,7 @@ Claude Code はセッション開始時にこのファイルを読むこと。
 | `DESIGN_S3.md` | 第三次拡張 設計書（難易度・築城・編成D&D）。**全項目 実装済み** |
 | `DESIGN_S4.md` | 同盟の深掘り 設計書（名前・援軍・ミッション・AI同士の戦争）。**全項目 実装済み** |
 | `DESIGN_S5.md` | 皇都争奪と盗賊イベント 設計書。**全項目 実装済み** |
+| `DESIGN_S6.md` | マップの脅威トリアージ 設計書（Gemini第4回 問題1）。**確認待ち** |
 | `tools/embed_art.py` | art/*.png を index.html へ base64 同梱（冪等・安全ガード付き） |
 | `tools/embed_bgm.py` | オープニング曲を index.html へ base64 同梱（冪等）。圧縮コマンドは冒頭に記載 |
 | `bgm/` | 圧縮済みのオープニング曲（`title.m4a`・45秒モノラルAAC 64kbps・361KB）。原曲は非配置 |
