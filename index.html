@@ -807,6 +807,8 @@ const CONFIG = {
 
   // --- マップの視覚的誘導（UX検品の指摘を受けて追加） ---
   MAP_HIGHLIGHT_MARCHABLE: true,        // 出兵可能なタイルを枠で強調（隣接ルールの可視化）
+  MAP_THREAT_COMPASS: true,             // 画面外の侵攻を指す（[S14]・DESIGN_S6.md §5）
+  MAP_THREAT_COMPASS_MAX: 4,            // 同時に出す数。多いと端が埋まって逆に読めない
   MAP_HOLY_COMPASS: true,               // 画面外の聖地の方向を画面端に表示（目標の提示）
   // 制圧エフェクト（[S14]）。マップのcanvasに描くだけなのでDOMは触らない
   // （毎tick再描画されるパネルにアニメを載せると点滅する。2026-08-06 の教訓）
@@ -7937,7 +7939,8 @@ const MapView = {
    * 勝利条件が常に画面外で「何を目指すゲームか分からない」問題への対処。
    * タップするとその聖地へマップを移動する（compassHit で判定）。 */
   drawHolyCompass(ctx, ts, pulse) {
-    this._compassHits = [];
+    // **_compassHits はここで初期化しない**。脅威コンパス([S14])と共用しており、
+    // このメソッドは条件次第で呼ばれないため、初期化は呼び出し側（draw）に置く
     // 右下のズーム/ホームボタンや上部の情報バーと重ならないよう、端の余白を非対称にする
     const ML = 26, MT = 26, MR = 82, MB = 52;
     const objective = isLegacyRuleset() ? "holy" : "capital"; // 目標はルールセットで変わる
@@ -7947,6 +7950,9 @@ const MapView = {
       const cx = this.offsetX + (t.x + 0.5) * ts, cy = this.offsetY + (t.y + 0.5) * ts;
       if (cx >= 0 && cx <= this.vw && cy >= 0 && cy <= this.vh) continue; // 画面内なら不要
       const mx = clamp(cx, ML, this.vw - MR), my = clamp(cy, MT, this.vh - MB);
+      // **脅威の印と重なるなら出さない**。攻められている方角では、そちらが先に要る情報。
+      // 侵攻が片付けば自然に戻る
+      if (this._compassHits.some(h => h.kind === "threat" && Math.hypot(h.x - mx, h.y - my) < 40)) continue;
       const mine = t.ownerId === "player";
       const dist = chebyshev(t.x, t.y, ps.x, ps.y);
       // 台座
@@ -7974,18 +7980,97 @@ const MapView = {
       ctx.fillStyle = mine ? "#ffe9a8" : "#e6d2f2";
       ctx.fillText(mine ? "領有" : dist + "マス", mx, my + 10);
       ctx.font = `${Math.floor(ts * 0.62)}px sans-serif`; // 元に戻す
-      this._compassHits.push({ x: mx, y: my, tx: t.x, ty: t.y });
+      this._compassHits.push({ x: mx, y: my, tx: t.x, ty: t.y, kind: "objective" });
+    }
+  },
+
+  /**
+   * 画面外で起きている侵攻を指すコンパス（DESIGN_S6.md §5・案C）。
+   *
+   * 40×40のうち画面に入るのは18×24程度なので、**終盤は自領の半分以上が画面外**にある。
+   * 案Aで画面を静かにしても「見えていない脅威」は減らないため、ここで拾う。
+   *
+   * **脅威なので脈動させてよい**（案Aの「動きは最も急ぐものだけ」に従う）。
+   * 画面内の警告リングと合わせて、赤い明滅＝今の危機、が保たれる。
+   */
+  drawThreatCompass(ctx, ts, pulse) {
+    if (!CONFIG.MAP_THREAT_COMPASS) return;
+    const ML = 26, MT = 26, MR = 82, MB = 52;
+    const t0 = now();
+    // 同じタイルを複数が狙うことがあるので、標的ごとにまとめる（端に同じ印が重なるのを防ぐ）
+    const byTile = new Map();
+    for (const m of (S.aiMarches || [])) {
+      const t = S.world.tiles[m.targetIdx]; if (!t) continue;
+      const cx = this.offsetX + (t.x + 0.5) * ts, cy = this.offsetY + (t.y + 0.5) * ts;
+      if (cx >= 0 && cx <= this.vw && cy >= 0 && cy <= this.vh) continue;   // 画面内なら警告リングが見えている
+      const cur = byTile.get(m.targetIdx);
+      if (!cur || m.arriveAt < cur.arriveAt) byTile.set(m.targetIdx, { t, cx, cy, m });
+    }
+    // **同じ方向のものはまとめる**。端に寄せると位置が潰れて重なり、
+    // 4つ出しても最後の1つしか読めない（実際にそうなった）。
+    // 1つにまとめて「×3」と出す方が、方向と逼迫度の両方が伝わる
+    const groups = [];
+    for (const it of [...byTile.values()].sort((a, b) => a.m.arriveAt - b.m.arriveAt)) {
+      const mx = clamp(it.cx, ML, this.vw - MR), my = clamp(it.cy, MT, this.vh - MB);
+      const near = groups.find(g => Math.hypot(g.mx - mx, g.my - my) < 40);
+      if (near) { near.n++; continue; }          // 先頭＝最も着弾が近いものを代表にする
+      groups.push({ mx, my, n: 1, it });
+    }
+    for (const g of groups.slice(0, CONFIG.MAP_THREAT_COMPASS_MAX)) {
+      const { mx, my, it } = g;
+      const ai = S.aiUsers.find(a => a.id === it.m.aiId);
+      const left = Math.max(0, (it.m.arriveAt - t0) / 1000);
+      ctx.beginPath();
+      ctx.arc(mx, my, 17, 0, Math.PI * 2);
+      ctx.fillStyle = "rgba(70,16,16,.94)";
+      ctx.fill();
+      ctx.strokeStyle = `rgba(255,60,60,${0.55 + pulse * 0.45})`;
+      ctx.lineWidth = 2.5; ctx.stroke();
+      const ang = Math.atan2(it.cy - my, it.cx - mx);
+      ctx.beginPath();
+      ctx.moveTo(mx + Math.cos(ang) * 24, my + Math.sin(ang) * 24);
+      ctx.lineTo(mx + Math.cos(ang + 2.5) * 15, my + Math.sin(ang + 2.5) * 15);
+      ctx.lineTo(mx + Math.cos(ang - 2.5) * 15, my + Math.sin(ang - 2.5) * 15);
+      ctx.closePath();
+      ctx.fillStyle = `rgba(255,60,60,${0.7 + pulse * 0.3})`;
+      ctx.fill();
+      ctx.font = "13px sans-serif"; ctx.textAlign = "center"; ctx.textBaseline = "middle";
+      ctx.fillStyle = "#fff";
+      fillEmojiCentered(ctx, ai && isTribe(ai) ? "🐺" : "⚔️", mx, my - 3);
+      ctx.font = "bold 9px sans-serif";
+      ctx.fillStyle = "#ffd2d2";
+      ctx.fillText(fmtSec(left), mx, my + 10);
+      // まとまっている数。**最短の残り時間と併せて**「どっちが先か」を判断させる
+      if (g.n > 1) {
+        const bx = mx + 13, by = my - 13;
+        ctx.beginPath(); ctx.arc(bx, by, 8, 0, Math.PI * 2);
+        ctx.fillStyle = "#ff3c3c"; ctx.fill();
+        ctx.strokeStyle = "rgba(0,0,0,.5)"; ctx.lineWidth = 1; ctx.stroke();
+        ctx.font = "bold 10px sans-serif"; ctx.fillStyle = "#fff";
+        ctx.fillText("×" + g.n, bx, by + 1);
+      }
+      ctx.font = `${Math.floor(ts * 0.62)}px sans-serif`;
+      this._compassHits.push({ x: mx, y: my, tx: it.t.x, ty: it.t.y, kind: "threat" });
     }
   },
   /** コンパスのマーカーがタップされたら、その聖地へ移動して true を返す */
   compassHit(cx, cy) {
     const rect = this.canvas.getBoundingClientRect();
     const px = cx - rect.left, py = cy - rect.top;
-    for (const h of (this._compassHits || [])) {
+    // **後ろから見る**。_compassHits は描画順に積まれるので、
+    // 逆順に判定しないと「手前に描いたものが、当たり判定では奥に負ける」。
+    // 実際に脅威コンパスのタップが皇都コンパスへ吸われた
+    const hits = (this._compassHits || []).slice().reverse();
+    for (const h of hits) {
       if (Math.hypot(px - h.x, py - h.y) <= 20) {
         this.centerOn(h.tx, h.ty); this.draw();
-        const objName = TILE_DEFS[isLegacyRuleset() ? "holy" : "capital"].name;
-        toast(`${isLegacyRuleset() ? "⛩️" : "👑"} ${objName}へ移動しました（ここを制すれば勝利）`);
+        if (h.kind === "threat") {
+          const t = S.world.tiles[idx(h.tx, h.ty)];
+          toast(`🚨 侵攻を受けている ${TILE_DEFS[t.type].name}(${h.tx}, ${h.ty}) へ移動しました`);
+        } else {
+          const objName = TILE_DEFS[isLegacyRuleset() ? "holy" : "capital"].name;
+          toast(`${isLegacyRuleset() ? "⛩️" : "👑"} ${objName}へ移動しました（ここを制すれば勝利）`);
+        }
         return true;
       }
     }
@@ -8151,7 +8236,14 @@ const MapView = {
       }
     }
     this.drawMapFx(ctx, ts);
-    if (CONFIG.MAP_HOLY_COMPASS && !guiding) this.drawHolyCompass(ctx, ts, pulse);
+    // 画面外の目標と脅威を指す。**初期化はここ**（どちらのコンパスも呼ばれないことがある）
+    this._compassHits = [];
+    if (!guiding) {
+      // **脅威を先に置く。** 皇都の印は脅威と重なる位置を避けるので、
+      // 先に脅威の位置が決まっている必要がある（重なると片方が押せなくなる）
+      this.drawThreatCompass(ctx, ts, pulse);
+      if (CONFIG.MAP_HOLY_COMPASS) this.drawHolyCompass(ctx, ts, pulse);
+    }
     else if (guiding) this._compassHits = []; // 指南中はコンパスのタップ判定も消す
     // 出兵ラインと部隊アイコン
     const t0 = now();
