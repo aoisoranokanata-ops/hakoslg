@@ -406,3 +406,70 @@ NO watermark, NO border, NO frame.
   **未納品でも 🎏 の絵文字で完全に動く**ので、急ぎではない
 - 将来ピックアップ（特定武将の排出率だけ上げる）を足す時は、
   **その武将のカードアートを流用する**のが素直（バナーを増やさない）
+
+---
+
+## 7. タイトル画面の背景（imageKey: `title_bg`）📋 発注中
+
+起動して最初に出る**全画面の背景**。オープニング曲「灰城の覇道」が流れる画面。
+
+**★これまでの素材と決定的に違う点: 唯一の非正方形・全画面素材**。
+カードも建物もバナーも1:1だったが、これは**縦長（9:16）**で、
+`object-fit: cover` で画面いっぱいに引き伸ばされる。
+
+---
+
+### 発注時のブリーフ（以下）
+
+### 技術前提（厳守）
+
+- **縦長 9:16**（1080×1920 で納品）。**正方形で描かない**。
+  iPhone縦画面（約390×844）を基準にし、横長の画面では左右が切られる
+- **文字・ロゴは一切描かない**。タイトル「箱庭クロニクル」はコード側で重ねる
+  （フォントを画面幅に合わせて出すため。描き込むと拡縮でぼやける）
+- **★上下は静かに、真ん中で見せる**。`object-fit: cover` は縦横比の違う画面で
+  **上下を削る**ので、端に主役を置くと切れる。加えて:
+  ・**上から25%**にタイトルロゴが重なる → 明るい要素や細かい模様を置かない
+  ・**下から25%**に「▶ はじめる」ボタンと版名が重なる → 同上。暗く落として終わる
+  ・つまり**画面中央の帯（上から30〜70%）に主役を置く**
+- **配色をゲーム本編に合わせる**。背景の紺 `#141821`／金 `#e8b84a` が基調。
+  この2色から外れると、タップして本編に入った瞬間に色が飛んで見える
+- 納品は 1080×1920 PNG。Claude 側で **720×1280 JPEG q80** に落として同梱する
+  （全画面素材なのでカード192pxより大きい。**それでも300KB前後**に収める）
+
+### 何を描くか
+
+曲名が「**灰城の覇道**」なので、**灰色の城**を主役にして曲と画を揃えたい。
+ゲームの中身（箱庭＝一つの大陸を上から治める）とも噛み合う画にする。
+
+### プロンプト
+
+```
+1080x1920 px, vertical 9:16 portrait. Japanese sengoku-fantasy game title
+screen background. NO text, NO logo, NO letters, NO watermark, NO UI.
+
+Subject: a lone ash-grey stone castle standing on a high ridge, seen from a
+low three-quarter angle, its tiered roofs catching the last gold light.
+Tattered war banners on tall poles flank the ridge. Far below and behind,
+a vast continent stretches to the horizon: rivers, mountain ranges and the
+tiny scattered lights of distant fortresses, half-buried in drifting mist.
+
+Composition: keep the top 25% and bottom 25% dark, calm and empty - only
+sky above and shadowed foreground below. Put the castle and the glowing
+horizon in the CENTRAL BAND of the frame.
+
+Lighting: deep indigo night-blue sky (#141821) with a single warm gold
+break of light (#e8b84a) at the horizon behind the castle. Embers and ash
+drifting upward. Strong silhouette, dramatic but restrained.
+
+Stylized mobile game art, clean bold shapes, warm painterly shading, rich
+saturated colors.
+```
+
+### 注意
+
+- **人物を描かない**。盟主は6種から選ぶ（§5）ので、タイトルに特定の人物が居ると噛み合わない
+- **城を画面いっぱいにしない**。「箱庭＝大陸を俯瞰して治める」作品なので、
+  城の向こうに**広がる土地**が見えることが世界観の説明になる
+- 未納品でも**CSSのグラデーションだけで完全に動く**（急ぎではない）。
+  コード側は `title_bg` が無ければ紺のグラデーションにフォールバックする
